@@ -9,3 +9,6 @@ COMMIT_EDITMSG
 internal/
 # codegraph local index + daemon state — rebuildable, machine-local
 .codegraph/
+
+# Gaal run directories
+.gaal/runs/

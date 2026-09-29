@@ -1,0 +1,41 @@
+# Gaal project profile. Edit freely: `gaal onboard` keeps your values on re-runs.
+# Schema: https://github.com/116-Labs/gaal/blob/main/schemas/project.schema.json
+schema_version: 1
+repo: 116-Labs/okfmem
+default_branch: main
+visibility: public
+tracker:
+  kind: github
+gates:
+  - name: test
+    command: python3 -m pytest -q
+    required: true
+preflight:
+  - name: leaks
+    command: python3 scripts/check-leaks.py
+commits:
+  single_commit: true
+  attribution: pr-provenance
+  convention: conventional
+branches:
+  prefix: gaal/
+merge:
+  queue: true
+  method: squash
+  message_source: commits
+review:
+  required_approvals: 1
+  threads_block_merge: false
+  reviewers: []
+  start_signal: reaction
+limits:
+  implement_attempts: 3
+  revise_rounds: 3
+  review_rounds: 2
+comms:
+  github_comments: true
+  maintainer_channels: []
+harnesses:
+  - claude-code
+okfmem:
+  enabled: false
