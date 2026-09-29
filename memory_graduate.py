@@ -51,7 +51,12 @@ from memory_consolidate import (  # noqa: E402
     parse_fields,
     update_fields,
 )
-from memory_init import _current_git_root, _load_registry, _prompt_yes_no  # noqa: E402
+from memory_init import (  # noqa: E402
+    _current_git_root,
+    _load_registry,
+    _prompt_yes_no,
+    _shared_repo_root,
+)
 from memory_reindex import index_files  # noqa: E402
 
 DEFAULT_STORE = os.environ.get("OKFMEM_STORE", os.path.expanduser("~/okfmem-store"))
@@ -76,12 +81,14 @@ class GraduateError(Exception):
 # ---------------------------------------------------------------------------
 def resolve_project(store, explicit):
     """--project if given; else the same `basename(git-root) unless
-    overridden` rule `okfmem init` uses to name the current repo's store dir."""
+    overridden` rule `okfmem init` uses to name the current repo's store dir,
+    with a worktree mapped to its main checkout (#62)."""
     if explicit:
         return explicit
     root = _current_git_root()
     if not root:
         return None
+    root = _shared_repo_root(root)
     reg = _load_registry(os.path.join(store, "registry.json"))
     return reg.get("overrides", {}).get(root, os.path.basename(root))
 

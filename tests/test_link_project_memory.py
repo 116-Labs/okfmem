@@ -1,4 +1,6 @@
 import os
+import shutil
+import subprocess
 import sys
 
 import pytest
@@ -468,3 +470,120 @@ def test_probe_never_raises(env, monkeypatch):
                         lambda: (_ for _ in ()).throw(OSError("boom")))
     assert mi.project_link_state(env["store"], env["claude_projects"]) == (
         "no-claude", None)
+
+
+# ---------------------------------------------------------------------------
+# Worktrees (#62) -- identity is the MAIN checkout, not the worktree slug
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def worktree_env(tmp_path, monkeypatch):
+    """A real repo `myproj` with a worktree `gh-953` under
+    `.claude/worktrees/`, a fake store + ~/.claude/projects, and cwd set
+    inside the worktree. `_current_git_root` is NOT stubbed: the point is
+    what real git reports from a worktree."""
+    if not shutil.which("git"):
+        pytest.skip("git not on PATH")
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
+        monkeypatch.delenv(var, raising=False)
+
+    def git(*args, cwd):
+        subprocess.run(["git", *args], cwd=cwd, check=True,
+                       capture_output=True, text=True)
+
+    main = tmp_path / "repos" / "myproj"
+    main.mkdir(parents=True)
+    git("init", "-q", cwd=main)
+    git("-c", "user.name=t", "-c", "user.email=t@example.invalid",
+        "commit", "-q", "--allow-empty", "-m", "init", cwd=main)
+    wt = main / ".claude" / "worktrees" / "gh-953"
+    git("worktree", "add", "-q", "-b", "gh-953", str(wt), cwd=main)
+
+    store = tmp_path / "store"
+    (store / "projects").mkdir(parents=True)
+    claude_projects = tmp_path / "claude_projects"
+    claude_projects.mkdir()
+    harnesses = {"claude_code": "/fake/.claude/CLAUDE.md"}
+    monkeypatch.setattr(mi, "detect_harnesses", lambda: harnesses)
+    monkeypatch.chdir(wt)
+    return {
+        "store": str(store),
+        "claude_projects": str(claude_projects),
+        "harnesses": harnesses,
+        "main": main,
+        "wt": wt,
+    }
+
+
+def test_shared_repo_root_maps_worktree_to_main_checkout(worktree_env):
+    assert os.path.basename(mi._current_git_root()) == "gh-953"  # the bug
+    assert os.path.realpath(mi._current_project_root()) == os.path.realpath(
+        str(worktree_env["main"]))
+
+
+def test_shared_repo_root_keeps_main_checkout_spelling(worktree_env,
+                                                       monkeypatch):
+    monkeypatch.chdir(worktree_env["main"])
+    root = mi._current_git_root()
+    assert mi._shared_repo_root(root) == root
+
+
+def test_shared_repo_root_falls_back_outside_git(tmp_path):
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    assert mi._shared_repo_root(str(plain)) == str(plain)
+
+
+def test_probe_linked_from_worktree_of_linked_repo(worktree_env, monkeypatch):
+    # Link from the main checkout, as a user would have.
+    monkeypatch.chdir(worktree_env["main"])
+    mi.link_project_memory(worktree_env["store"],
+                           worktree_env["claude_projects"],
+                           worktree_env["harnesses"], {"overrides": {}},
+                           dry_run=False)
+    monkeypatch.chdir(worktree_env["wt"])
+    # The SessionStart hook and /okfmem-save both read this probe: `linked`
+    # silences the hook's warning and hands /okfmem-save the parent's name.
+    assert mi.project_link_state(
+        worktree_env["store"], worktree_env["claude_projects"]) == (
+        "linked", "myproj")
+
+
+def test_probe_unlinked_from_worktree_of_unlinked_repo(worktree_env):
+    assert mi.project_link_state(
+        worktree_env["store"], worktree_env["claude_projects"]) == (
+        "unlinked", "myproj")
+
+
+def test_init_from_worktree_links_parent_project_not_slug(worktree_env):
+    status, msg = mi.link_project_memory(
+        worktree_env["store"], worktree_env["claude_projects"],
+        worktree_env["harnesses"], {"overrides": {}}, dry_run=False)
+    assert status == "changed" and "myproj" in msg
+    # No per-branch 'gh-953' project split off from the real one.
+    assert os.listdir(os.path.join(worktree_env["store"], "projects")) == [
+        "myproj"]
+    link = os.path.join(worktree_env["claude_projects"],
+                        mi.encode_root(mi._current_project_root()), "memory")
+    assert os.path.realpath(link) == os.path.realpath(
+        os.path.join(worktree_env["store"], "projects", "myproj"))
+
+
+def test_status_project_for_cwd_from_worktree(worktree_env):
+    reg = {"map": {mi._current_project_root(): "myproj"}}
+    assert mi.project_for_cwd(reg) == "myproj"
+
+
+def test_graduate_resolve_project_from_worktree(worktree_env):
+    import memory_graduate as mg
+    assert mg.resolve_project(worktree_env["store"], None) == "myproj"
+
+
+def test_reindex_resolve_target_from_worktree(worktree_env):
+    import argparse
+    import memory_reindex as mr
+    proj = os.path.join(worktree_env["store"], "projects", "myproj")
+    os.mkdir(proj)
+    args = argparse.Namespace(target=None, store=worktree_env["store"],
+                              project=None)
+    assert mr.resolve_target(args) == proj
