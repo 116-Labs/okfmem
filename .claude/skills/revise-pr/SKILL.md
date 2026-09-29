@@ -43,7 +43,7 @@ dismiss-on-push still applies to any Code Owner review a contributor's PR earned
 ### Step 0: Detect repo + PR
 
 ```bash
-REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"   # s-annam/okfmem
+REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"   # 116-Labs/okfmem
 OWNER="${REPO%%/*}"; NAME="${REPO##*/}"
 # PR_NUM from the argument, or inferred from the current branch (see Input).
 gh pr view "$PR_NUM" --repo "$REPO" \

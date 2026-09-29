@@ -11,7 +11,7 @@ Requirements: Python 3 (stdlib only — no dependencies) and `git`. Runs nativel
 
 ```bash
 # 1. Clone the engine (this repo)
-git clone https://github.com/s-annam/okfmem.git ~/okfmem
+git clone https://github.com/116-Labs/okfmem.git ~/okfmem
 cd ~/okfmem
 
 # 2. Run the automated installer
@@ -21,7 +21,7 @@ cd ~/okfmem
 **On Windows**, run the native PowerShell installer instead:
 
 ```powershell
-git clone https://github.com/s-annam/okfmem.git $env:USERPROFILE\okfmem
+git clone https://github.com/116-Labs/okfmem.git $env:USERPROFILE\okfmem
 cd $env:USERPROFILE\okfmem
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
@@ -296,8 +296,8 @@ By default, the store is created at `~/okfmem-store`. To put it elsewhere, set `
 
 ---
 Design & research: the full design, decay math, prior-art survey, and phased plan
-live in the tracked issues — [#1](https://github.com/s-annam/okfmem/issues/1)
-(self-maintaining memory) and [#2](https://github.com/s-annam/okfmem/issues/2)
+live in the tracked issues — [#1](https://github.com/116-Labs/okfmem/issues/1)
+(self-maintaining memory) and [#2](https://github.com/116-Labs/okfmem/issues/2)
 (session search). See [`CONTRIBUTING.md`](CONTRIBUTING.md) to get involved.
 
 [okf]: https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md

@@ -53,7 +53,7 @@ the day a second maintainer exists; then the approval rule binds everyone.)
 ### Step 0: Detect repo + base
 
 ```bash
-REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"              # s-annam/okfmem
+REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"              # 116-Labs/okfmem
 BASE="$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)"   # main
 # If --base <ref> was provided, override BASE here: BASE="<ref>"
 ```

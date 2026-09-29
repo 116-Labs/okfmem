@@ -23,8 +23,8 @@ Two git-backed repos + native memory auto-load:
 
 | Repo | Role | Path / remote |
 |---|---|---|
-| `okfmem` | **engine** — skills + Python (`memory_*.py`, `okfmem` CLI) | `~/okfmem` → `github.com/s-annam/okfmem` (private) |
-| `okfmem-store` | **data** — markdown pages, `MEMORY.md`, `STATE.md`, `decay_state.json` | `~/okfmem-store` → `github.com/s-annam/okfmem-store` (private) |
+| `okfmem` | **engine** — skills + Python (`memory_*.py`, `okfmem` CLI) | `~/okfmem` → `github.com/116-Labs/okfmem` (public) |
+| `okfmem-store` | **data** — markdown pages, `MEMORY.md`, `STATE.md`, `decay_state.json` | `~/okfmem-store` → `github.com/<you>/okfmem-store` (private, per user) |
 
 Two memory layers, both plain markdown the native memory system auto-loads:
 

@@ -11,7 +11,7 @@ or an explicit list — onto **one branch**, accumulating their changes into a
 **single commit**, then hardening the result with an **adversarial review pass**
 and opening **one PR** via `/open-pr`.
 
-This is a **GitHub-only, self-contained** batch driver for `s-annam/okfmem`. It
+This is a **GitHub-only, self-contained** batch driver for `116-Labs/okfmem`. It
 has **no Linear code** and **no dependency on a global `/implement-issue`** — the
 per-issue implementation contract is embedded here, in the subagent spawn prompt,
 so this skill works for anyone who clones `okfmem` (contributors included), not
@@ -25,7 +25,7 @@ just a maintainer whose `~/tools/skills/` has the global skills.
 
 ## Repo facts (okfmem)
 
-- **Repo:** `s-annam/okfmem`, a **public** repo. `main` is protected — every
+- **Repo:** `116-Labs/okfmem`, a **public** repo. `main` is protected — every
   change merges through a PR that needs a green **`verify`** check, **linear
   history**, and **1 approving review from a Code Owner** (`.github/CODEOWNERS`).
   Direct commits/pushes to `main` are blocked. So this skill **never commits on
@@ -80,7 +80,7 @@ Parse `$ARGUMENTS` for **either**:
 
 Resolve `<owner>/<repo>` once:
 ```bash
-REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"   # s-annam/okfmem
+REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"   # 116-Labs/okfmem
 ```
 
 **Flags** (strip before parsing the identifier):
