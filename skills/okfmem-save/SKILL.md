@@ -67,7 +67,15 @@ if [ ! -d "$PWD" ]; then
   esac
 fi
 
-PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+# Inside a worktree `--show-toplevel` is the worktree, not the project (#62);
+# `--git-common-dir` names the main checkout's `.git` from both, so its parent
+# is the real root. Anything else (bare repo, submodule) keeps the toplevel.
+COMMON_DIR="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+if [ "$(basename "$COMMON_DIR")" = ".git" ] && [ -d "$(dirname "$COMMON_DIR")" ]; then
+  PROJECT_ROOT="$(dirname "$COMMON_DIR")"
+else
+  PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+fi
 PROJECT_NAME="$(basename "$PROJECT_ROOT")"
 
 # Ask the engine whether THIS repo is wired, instead of re-deriving the encoded

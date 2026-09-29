@@ -869,6 +869,54 @@ def _current_git_root():
     return os.path.normpath(out.stdout.strip())
 
 
+def _shared_repo_root(root):
+    """The main checkout that `root` (a git toplevel) belongs to (#62).
+
+    Inside a git worktree `--show-toplevel` is the WORKTREE, so its basename is
+    the worktree slug and no store project matches -- and `okfmem init` there
+    would register the slug as a project of its own, splitting one repo's
+    memory per branch. `--git-common-dir` names the main checkout's `.git`
+    from both a worktree and the main checkout, so its parent is the project.
+
+    Falls back to `root` unchanged whenever that parent can't be trusted:
+    git fails, the common dir isn't named `.git` (bare repo, submodule,
+    `--separate-git-dir`), or the main checkout is gone. Never raises, never
+    prints -- the caller already reported any git failure."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", root, "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except OSError:
+        return root
+    common = out.stdout.strip() if out.returncode == 0 else ""
+    if not common:
+        return root
+    # A relative answer is relative to `-C root`.
+    common = os.path.normpath(os.path.join(root, common))
+    if os.path.basename(common) != ".git":
+        return root
+    main = os.path.dirname(common)
+    if not os.path.isdir(main):
+        return root
+    if os.path.normcase(os.path.realpath(main)) == os.path.normcase(
+        os.path.realpath(root)
+    ):
+        return root  # the main checkout itself: keep git's own spelling
+    return main
+
+
+def _current_project_root():
+    """Project identity root for the cwd: the git root, mapped from a worktree
+    to its main checkout (#62). None when cwd isn't inside a git repo. Use this
+    -- not `_current_git_root` -- wherever the root names the store project or
+    the memory link; keep `_current_git_root` for files inside the checkout."""
+    root = _current_git_root()
+    return _shared_repo_root(root) if root else None
+
+
 # ---------------------------------------------------------------------------
 # Orphan-page adoption (#35)
 # ---------------------------------------------------------------------------
@@ -1157,9 +1205,10 @@ def _seed_store_project(target, name):
 
 
 def project_link_state(store, claude_projects=None):
-    """Read-only probe: is the CURRENT repo (cwd's git root) wired to the
-    store? Mutates nothing and never raises -- every reminder surface (the
-    SessionStart pull hook, the skills, `okfmem status`) shares this one
+    """Read-only probe: is the CURRENT repo (cwd's git root, or a worktree's
+    main checkout) wired to the store? Mutates nothing and never raises --
+    every reminder surface (the SessionStart pull hook, the skills, `okfmem
+    status`) shares this one
     implementation instead of re-deriving the encoded path by hand (a
     `sed 's|/|-|g'` re-derivation is wrong on Windows, where `encode_root`
     also encodes the drive colon).
@@ -1179,7 +1228,7 @@ def project_link_state(store, claude_projects=None):
             )
         if not detect_harnesses().get("claude_code"):
             return ("no-claude", None)
-        root = _current_git_root()
+        root = _current_project_root()
         if not root:
             return ("not-a-repo", None)
         reg = _load_registry(os.path.join(store, "registry.json"))
@@ -1256,7 +1305,7 @@ def link_project_memory(
         non_interactive = not sys.stdin.isatty()
     if not harnesses.get("claude_code"):
         return ("skip", "no Claude Code harness detected")
-    root = _current_git_root()
+    root = _current_project_root()
     if not root:
         return ("skip", "not inside a git repo")
     name = reg.get("overrides", {}).get(root, os.path.basename(root))
@@ -2331,6 +2380,7 @@ def project_for_cwd(reg):
 
     Reuses the ``{git-root: project}`` map ``cmd_status`` already builds via
     ``build_registry`` -- resolving cwd -> project is one normalized lookup.
+    A worktree resolves to its main checkout (#62).
     Not in a git repo, or an unregistered root -> ``None`` (print nothing extra
     rather than guessing). Read-only: ``git rev-parse`` is a local query, no
     network, no writes."""
@@ -2345,7 +2395,7 @@ def project_for_cwd(reg):
         return None
     if r.returncode != 0:
         return None
-    root = os.path.normpath(r.stdout.strip())
+    root = _shared_repo_root(os.path.normpath(r.stdout.strip()))
     return reg.get("map", {}).get(root)
 
 
