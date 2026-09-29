@@ -19,7 +19,7 @@ CLI coding agents — contributions that keep it that way are especially welcome
 ## Development
 
 ```bash
-git clone https://github.com/s-annam/okfmem.git ~/okfmem
+git clone https://github.com/116-Labs/okfmem.git ~/okfmem
 cd ~/okfmem
 ./install.sh        # symlinks the CLI, creates a local store, wires harnesses
 okfmem status       # verify wiring

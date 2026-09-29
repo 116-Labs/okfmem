@@ -337,8 +337,8 @@ Show the user:
 Active state and insights are plain markdown under `~/okfmem-store` — no MCP server, no daemon. Setup is the two repo clones plus `okfmem init`:
 
 ```bash
-git clone git@github.com:s-annam/okfmem.git       ~/okfmem         # engine (this skill + scripts)
-git clone git@github.com:s-annam/okfmem-store.git ~/okfmem-store   # data (markdown pages)
+git clone git@github.com:116-Labs/okfmem.git      ~/okfmem         # engine (this skill + scripts)
+git clone git@github.com:<you>/okfmem-store.git   ~/okfmem-store   # data (markdown pages)
 python3 ~/okfmem/okfmem init   # symlinks skills into each harness + wires memory pointers/registry
 # Then, for each project with a memory dir in the store, symlink it into the project's memory dir:
 ln -sfn ~/okfmem-store/projects/<name> ~/.claude/projects/-Users-<user>-<name>/memory
