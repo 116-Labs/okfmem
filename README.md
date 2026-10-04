@@ -304,3 +304,68 @@ live in the tracked issues — [#1](https://github.com/116-Labs/okfmem/issues/1)
 [memgpt]: https://arxiv.org/abs/2310.08560
 [lost-in-the-middle]: https://arxiv.org/abs/2307.03172
 [generative-agents]: https://arxiv.org/abs/2304.03442
+
+### Codex integration
+
+Codex CLI **0.160.0** is the minimum validated lifecycle release. Claude uses
+native memory links; Codex and Antigravity read the same private store through
+managed global instructions. No Claude installation is required for project
+initialization, save, curate, reindex, or Codex session indexing.
+
+Run `okfmem init --store PATH` from each project. The additive project seed and
+registry write need no configuration consent. Global instructions, skills and
+hooks require `[y/N]`; non-interactive runs skip them and print
+`okfmem init --yes`. `--dry-run` writes nothing. Repeat init safely after upgrades.
+Store selection is `--store`, then `$OKFMEM_STORE`, then `~/okfmem-store`.
+`okfmem init --resolve-project --store PATH` reports read-only JSON with the
+project, main checkout root (including worktrees), readiness, and memory directory.
+Existing registry overrides are honored.
+
+Global instructions are installed under `$CODEX_HOME` (default `~/.codex`).
+A nonempty `AGENTS.override.md` takes precedence over `AGENTS.md`; init updates
+the effective file's managed block, preserving surrounding instructions.
+Skills are linked into `~/.agents/skills` and the legacy `$CODEX_HOME/skills`.
+Use `/skills` to confirm discovery, and `$okfmem-save` for end-of-session capture.
+The instructions pull fail-open and eagerly read only `STATE.md` and `MEMORY.md`.
+
+Supported Codex runtimes receive SessionStart pull and Stop maintenance entries
+in `$CODEX_HOME/hooks.json`, preserving unrelated hooks. **Open `/hooks` and
+review/trust the exact definitions** before they can run. Changed definitions
+need renewed trust. Managed policy can disable hooks; `okfmem status` reports
+configuration separately from execution, which must be verified in Codex.
+Older runtimes retain instruction/skill recall and manual `okfmem pull --quiet`
+and `okfmem consolidate`. Legacy `notify` is not a lifecycle substitute.
+Codex hook payloads enter a dedicated boundary: transcript_path is discarded,
+so Claude's save-state parser never receives a Codex transcript. Durable capture
+is agent-authored with the save skill; maintenance handles decay/archive/sync.
+
+For an external private store, recall needs read access and saving needs narrowly
+scoped write access. In a local workspace-write session, launch with
+`codex --add-dir /path/to/private-store` (quote paths with spaces using your shell).
+An explicit custom store must also be passed to okfmem commands or exported as
+`OKFMEM_STORE`. This does not disable the sandbox or trust unrelated directories.
+Read-only sessions cannot save. Organization-managed filesystem/approval policy
+may forbid access even with `--add-dir`; verify an actual read/write in your
+runtime, and ask the administrator for the specific store permission when denied.
+okfmem neither changes sandbox policy nor claims that wiring grants access.
+
+`okfmem index --codex-root PATH --store PATH` includes Codex rollout JSONL;
+`okfmem search QUERY --harness codex` filters it, and `okfmem distill` accepts the
+same root/store overrides. Default history is `$CODEX_HOME/sessions`.
+The adapter targets 0.160 rollout `session_meta` and `response_item` records;
+this local format is not stable. Event-message chat mirrors and tool outputs
+are omitted; emitted chat and short tool signatures are secret-scrubbed.
+Missing or malformed history is skipped; transcripts and rebuildable caches stay local.
+
+To verify a fresh Codex-only installation: initialize a synthetic Git repository
+and private store, launch Codex with that store in `--add-dir`, confirm it reads
+the seeded STATE/MEMORY files, invoke `$okfmem-save` with a harmless marker, then
+start a fresh session and confirm the marker is recalled. Inspect `/hooks` for
+trust/disabled state separately. Uninstall removes only managed instruction
+blocks, skill links and lifecycle handlers; memory and other configuration remain.
+Destructive store deletion retains the native uninstaller's typed confirmation.
+
+References: [instructions](https://learn.chatgpt.com/docs/agent-configuration/agents-md),
+[skills](https://learn.chatgpt.com/docs/build-skills),
+[hooks](https://learn.chatgpt.com/docs/hooks),
+[permissions](https://learn.chatgpt.com/docs/permissions/sandboxing).

@@ -187,11 +187,62 @@ def classify_line(text):
 # ---------------------------------------------------------------------------
 # Harness detection
 # ---------------------------------------------------------------------------
+def codex_home():
+    return os.path.abspath(os.path.expanduser(os.environ.get("CODEX_HOME", "~/.codex")))
+
+
+def codex_instructions():
+    override = os.path.join(codex_home(), "AGENTS.override.md")
+    return override if os.path.isfile(override) and os.path.getsize(override) else os.path.join(codex_home(), "AGENTS.md")
+
+
+def _lookup_reg(d, path):
+    if not path or not isinstance(d, dict):
+        return None
+    if path in d:
+        return d[path]
+    norm = os.path.normpath(path)
+    if norm in d:
+        return d[norm]
+    norm_case = os.path.normcase(norm)
+    for k, v in d.items():
+        if os.path.normcase(os.path.normpath(k)) == norm_case:
+            return v
+    return None
+
+
+def resolve_project(store, cwd=None):
+    """Read-only harness-neutral identity; retain the main-checkout worktree rule."""
+    if cwd:
+        try:
+            out = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=False)
+        except OSError:
+            return {"state": "not-a-repo", "project": None, "memory_dir": None, "store": store}
+        root = _shared_repo_root(os.path.normpath(out.stdout.strip())) if out.returncode == 0 else None
+    else:
+        root = _current_project_root()
+    if not root:
+        return {"state": "not-a-repo", "project": None, "memory_dir": None, "store": store}
+    root = os.path.normpath(root)
+    reg = _load_registry(os.path.join(store, "registry.json"))
+    overrides = reg.get("overrides", {})
+    mapping = reg.get("map", {})
+    name = (
+        _lookup_reg(overrides, root)
+        or _lookup_reg(mapping, root)
+        or os.path.basename(root)
+    )
+    target = os.path.join(store, "projects", name)
+    ready = all(os.path.isfile(os.path.join(target, f)) for f in ("STATE.md", "MEMORY.md"))
+    return {"state": "ready" if ready else "uninitialized", "project": name, "memory_dir": target, "root": root, "store": store}
+
+
 def detect_harnesses():
     home = os.path.expanduser("~")
     claude_dir = os.path.join(home, ".claude")
     gemini_dir = os.path.join(home, ".gemini")
     return {
+        "codex": codex_instructions() if shutil.which("codex") else None,
         "claude_code": os.path.join(claude_dir, "CLAUDE.md")
         if os.path.isdir(claude_dir)
         else None,
@@ -425,19 +476,26 @@ def write_registry(store, reg, dry_run):
 # ---------------------------------------------------------------------------
 # Pointer upsert
 # ---------------------------------------------------------------------------
-def upsert_pointer(path, dry_run):
+def upsert_pointer(path, dry_run, store=None):
     """Insert or replace the managed pointer block in `path`. Returns action."""
     existing = ""
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             existing = f.read()
 
+    pointer = POINTER_BLOCK if store is None else (
+        f"{MARKER_OPEN}\n## Memory\n"
+        f'Use the private store at "{store}". At session start, run okfmem pull --quiet with --store set to that exact path (fail open), then okfmem init --resolve-project with the same --store. Quote the path using your current shell.\n'
+        "Read only STATE.md and MEMORY.md from the returned memory_dir before starting work; open durable pages on demand.\n"
+        "If uninitialized, run okfmem init from this repository. Use okfmem-save to save active state and durable insights.\n"
+        f"{MARKER_CLOSE}"
+    )
     block_re = re.compile(
         re.escape(MARKER_OPEN) + r".*?" + re.escape(MARKER_CLOSE),
         re.DOTALL,
     )
     if block_re.search(existing):
-        new_text = block_re.sub(POINTER_BLOCK, existing)
+        new_text = block_re.sub(lambda _: pointer, existing)
         action = "unchanged" if new_text == existing else "updated"
     else:
         sep = (
@@ -445,7 +503,7 @@ def upsert_pointer(path, dry_run):
             if existing == "" or existing.endswith("\n\n")
             else ("\n" if existing.endswith("\n") else "\n\n")
         )
-        new_text = existing + sep + POINTER_BLOCK + "\n"
+        new_text = existing + sep + pointer + "\n"
         action = "inserted"
 
     if action != "unchanged" and not dry_run:
@@ -608,7 +666,8 @@ def skill_dirs():
     # dir -- the dir alone is too weak a signal, and gating on it links skills
     # for an app that isn't actually present.
     if shutil.which("codex"):
-        out["codex"] = os.path.join(home, ".codex", "skills")
+        out["codex"] = os.path.join(home, ".agents", "skills")
+        out["codex_legacy"] = os.path.join(codex_home(), "skills")
     # Antigravity: its ~/.gemini home dir OR the `agy` binary on PATH.
     if os.path.isdir(os.path.join(home, ".gemini")) or shutil.which("agy"):
         out["antigravity"] = os.path.join(home, ".gemini", "config", "skills")
@@ -1981,12 +2040,18 @@ def cmd_run(
         apply_config = True  # preview only -- ops run in dry_run, mutate nothing
     else:
         apply_config = _prompt_yes_no(
-            "Wire okfmem into ~/.claude (hooks, harness pointers, and skill/"
+            "Wire okfmem into detected harnesses (hooks, pointers, and skill/"
             "memory links)?",
             assume_yes=assume_yes,
             non_interactive=non_interactive,
             manual_hint=config_hint,
         )
+
+    resolved = resolve_project(store)
+    if resolved["project"] and resolved["state"] != "ready":
+        if not dry_run:
+            _seed_store_project(resolved["memory_dir"], resolved["project"])
+        print(f"{glyph('chg')} project memory {'would seed' if dry_run else 'seeded'} {resolved['project']}")
 
     # --- 1b. memory link (current repo) ------------------------------------
     # Runs BEFORE the registry step, on the registry as it exists on disk,
@@ -2016,6 +2081,13 @@ def cmd_run(
 
     # --- 2. registry -------------------------------------------------------
     reg, drift = build_registry(store, claude_projects)
+    # Non-native harnesses own mappings without a Claude memory link.
+    if harnesses.get("codex") or harnesses.get("antigravity"):
+        existing = _load_registry(os.path.join(store, "registry.json"))
+        for key in ("map", "overrides"):
+            reg[key] = {**existing.get(key, {}), **reg[key]}
+    if resolved.get("root"):
+        reg["map"][resolved["root"]] = resolved["project"]
     reg_path, reg_changed, merged = write_registry(store, reg, dry_run)
     changes += 1 if reg_changed else 0
     # Report the MERGED registry (what's actually on disk), not just this
@@ -2063,7 +2135,7 @@ def cmd_run(
     if not apply_config:
         print(f"{glyph('ok')} pointers    skipped (config changes declined)")
     else:
-        pacts = [(n, upsert_pointer(p, dry_run), p) for n, p in harnesses.items() if p]
+        pacts = [(n, upsert_pointer(p, dry_run, store), p) for n, p in harnesses.items() if p]
         pchg = [a for a in pacts if a[1] != "unchanged"]
         changes += len(pchg)
         if pchg:
@@ -2211,6 +2283,11 @@ def cmd_run(
             print(f"{glyph('warn')} pull hook   {paction}")
     else:
         print(f"{glyph('ok')} pull hook   skipped (--no-hook)")
+
+    if apply_config and wire_hook and harnesses.get("codex"):
+        from memory_codex import wire_hooks
+        action = wire_hooks(store, dry_run)
+        print(f"{glyph('ok')} Codex hooks {action}; review/trust with /hooks; policy may disable execution")
 
     # --- 8. leftover claude-memory clone (migration cleanup, warn only) ----
     legacy = detect_legacy_clone()
@@ -2400,6 +2477,8 @@ def project_for_cwd(reg):
 
 
 def cmd_status(store, show_all=False, project_filter=None):
+    from memory_codex import status
+    print("Codex: " + status(store))
     home = os.path.expanduser("~")
     harnesses = detect_harnesses()
     reg_path = os.path.join(store, "registry.json")
@@ -2712,7 +2791,11 @@ def main():
         "--store",
         default=os.environ.get("OKFMEM_STORE", os.path.expanduser("~/okfmem-store")),
     )
+    ap.add_argument("--resolve-project", action="store_true", help="read-only JSON project and memory_dir for every harness")
     args = ap.parse_args()
+    if args.resolve_project:
+        print(json.dumps(resolve_project(os.path.abspath(os.path.expanduser(args.store)))))
+        return
 
     if args.project_link_state:
         # Pure read; deliberately BEFORE the store-shape check so an

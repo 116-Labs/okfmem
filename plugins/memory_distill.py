@@ -69,7 +69,7 @@ _ENGINE_ROOT = _find_engine_root() or _ROOT_DIR
 if _ENGINE_ROOT not in sys.path:
     sys.path.insert(0, _ENGINE_ROOT)
 
-from adapters import agy, claude_code  # noqa: E402
+from adapters import agy, claude_code, codex  # noqa: E402
 try:
     from memory_init import decode_root  # noqa: E402  (FS-probing decoder)
     # The single home for "which files are indexes, which are pages" and for
@@ -300,12 +300,13 @@ def store_project_for(harness, token, registry_map):
 # ---------------------------------------------------------------------------
 # corpus -> candidates
 # ---------------------------------------------------------------------------
-def iter_corpus(claude_root, agy_path, project=None):
+def iter_corpus(claude_root, agy_path, project=None, codex_root=codex.DEFAULT_ROOT, store=None):
     """Yield normalized turns from both adapters (the search corpus, unindexed).
     `project` here filters the HARNESS token, matching the adapters' own filter;
     store-project scoping happens after mapping, in collect_candidates."""
     yield from claude_code.iter_turns(claude_root, project=project)
     yield from agy.iter_turns(agy_path, project=project)
+    yield from codex.iter_turns(codex_root, project=project, store=store)
 
 
 def _slugify(phrase_tokens):
@@ -426,7 +427,7 @@ def build_report(args):
     coverage = load_coverage(store, projects=only)
     registry_map = _load_registry_map(store)
     turns = iter_corpus(os.path.expanduser(args.claude_root),
-                        os.path.expanduser(args.agy_path))
+                        os.path.expanduser(args.agy_path), codex_root=getattr(args, "codex_root", codex.DEFAULT_ROOT), store=store)
     roles = (frozenset(r.strip() for r in args.roles.split(",") if r.strip())
              if args.roles else DEFAULT_ROLES)
     report = collect_candidates(
@@ -459,6 +460,7 @@ def main():
                    help="include harness projects with no store dir yet")
     p.add_argument("--json", action="store_true", help="emit JSON, not text")
     p.add_argument("--claude-root", default=claude_code.DEFAULT_ROOT)
+    p.add_argument("--codex-root", default=codex.DEFAULT_ROOT)
     p.add_argument("--agy-path", default=agy.DEFAULT_PATH)
 
     # Dispatcher hands us `distill ...`; drop that leading verb token if present.

@@ -128,7 +128,7 @@ def _teardown_link(link, dry_run):
 # ---------------------------------------------------------------------------
 # 2. Skill links -- inverse of memory_init.link_skills
 # ---------------------------------------------------------------------------
-def unlink_skills(dry_run):
+def unlink_skills(dry_run, include_codex=False):
     """Remove the engine's skill links/junctions/copies from every detected
     harness skill dir. Never removes a real (unmanaged) directory or file at
     that path. Returns a list of (harness, name, action) tuples."""
@@ -138,9 +138,19 @@ def unlink_skills(dry_run):
         return actions
     names = sorted(n for n in os.listdir(engine)
                    if os.path.isfile(os.path.join(engine, n, "SKILL.md")))
-    for harness, dest in mi.skill_dirs().items():
+    dirs = mi.skill_dirs()
+    if include_codex:
+        dirs.update({"codex": os.path.join(os.path.expanduser("~"), ".agents", "skills"), "codex_legacy": os.path.join(mi.codex_home(), "skills")})
+    for harness, dest in dirs.items():
         for name in names:
             link = os.path.join(dest, name)
+            if harness.startswith("codex") and os.path.lexists(link):
+                expected = os.path.realpath(os.path.join(engine, name))
+                recorded = mi._managed_copy_target(link)
+                actual = os.path.realpath(recorded or link)
+                if os.path.normcase(actual) != os.path.normcase(expected):
+                    actions.append((harness, name, "skip (unrelated target)"))
+                    continue
             actions.append((harness, name, _teardown_link(link, dry_run)))
     return actions
 
@@ -313,6 +323,10 @@ def main():
 
     # --- 1. pointers ---------------------------------------------------
     harnesses = mi.detect_harnesses()
+    for filename in ("AGENTS.md", "AGENTS.override.md"):
+        remove_pointer(os.path.join(mi.codex_home(), filename), dry_run)
+    from memory_codex import wire_hooks
+    print("Codex hooks: " + wire_hooks(store, dry_run, remove=True))
     pacts = [(n, remove_pointer(p, dry_run), p) for n, p in harnesses.items() if p]
     pchg = [a for a in pacts if a[1] == "removed"]
     changes += len(pchg)
@@ -326,7 +340,7 @@ def main():
         print(f"    {mi.glyph(k)} {name:12} {action:10} {mi._short(path)}")
 
     # --- 2. skill links --------------------------------------------------
-    sk = unlink_skills(dry_run)
+    sk = unlink_skills(dry_run, include_codex=True)
     sk_removed = [a for a in sk if a[2].startswith("removed")]
     changes += len(sk_removed)
     if not sk:

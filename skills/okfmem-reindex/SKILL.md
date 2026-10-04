@@ -4,6 +4,15 @@ description: "Topology restructuring for a bloated MEMORY.md — cluster flat po
 origin: user
 ---
 
+Resolve STORE_PATH from the `store` field of `okfmem init --resolve-project`
+with the user's explicit `--store PATH` when supplied. Pass that exact store
+with `--store "$STORE_PATH"` to every init, pull, sync, graduate, status, and
+maintenance command in this skill. For an explicit memory directory, resolve
+its enclosing store before store-level mutation; stop if ambiguous.
+Use the installed `okfmem` CLI. If it is off PATH, resolve the real path of this
+SKILL.md and use the engine dispatcher two directories above it; do not assume
+a home-directory checkout. SKILL_DIR is the real directory containing this skill.
+
 # okfmem Reindex
 
 > **Names.** Canonical `/okfmem-reindex`. This skill lives in the `okfmem`
@@ -56,6 +65,8 @@ surface duplicate-looking content along the way.
 and high-hit-rate — they are not a lane, regardless of how a byte-count
 argument might read.
 
+Resolve the current project with `okfmem init --resolve-project`; use its memory_dir, respecting explicit `--store PATH` or `$OKFMEM_STORE`. Codex and AGY eagerly read STATE.md and MEMORY.md from that directory; Claude native links remain supported. No Claude directory is required.
+
 ## When to use
 
 - `okfmem status` or `okfmem reindex --report` flags a project's `MEMORY.md`
@@ -87,7 +98,7 @@ current project by default, or an explicit path argument) and call the
 engine:
 
 ```bash
-python3 ~/okfmem/okfmem reindex --report "$MEM_DIR" --json
+okfmem reindex --report "$MEM_DIR" --json
 ```
 
 Read the `auto_loaded` row for `MEMORY.md`: bytes, ceiling, `over`. Read the
@@ -211,8 +222,8 @@ Once approved:
 ### Phase 5: Verify
 
 ```bash
-python3 ~/okfmem/okfmem reindex --verify "$MEM_DIR"; echo "verify exit: $?"
-python3 ~/okfmem/okfmem reindex --report "$MEM_DIR"    # after-numbers
+okfmem reindex --verify "$MEM_DIR"; echo "verify exit: $?"
+okfmem reindex --report "$MEM_DIR"    # after-numbers
 ```
 
 `--verify` exits **0** when every `MEMORY*.md` in the dir is intact and
