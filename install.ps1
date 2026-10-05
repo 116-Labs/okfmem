@@ -380,3 +380,5 @@ $Step++
 Write-Host "$Step. The consolidation Stop hook was wired into Claude Code automatically"
 Write-Host "   (see the 'stop hook' line above -- nothing to paste). For OTHER"
 Write-Host "   agents, the hook snippet is in README.md."
+
+Write-Host "Codex: init supports shared memory; review/trust configured hooks with /hooks. External stores require scoped --add-dir access."

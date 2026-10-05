@@ -4,6 +4,15 @@ allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Agent
 description: "Session close-out — clean up tool-created worktrees/branches, write active state to STATE.md, capture durable insights as memory pages, and commit + push okfmem-store via `okfmem sync`. Drafts an impl-complete comment on the resolved GitHub issue via `gh issue comment`. Invoked as /okfmem-save (alias: /primer)."
 ---
 
+Resolve STORE_PATH from the `store` field of `okfmem init --resolve-project`
+with the user's explicit `--store PATH` when supplied. Pass that exact store
+with `--store "$STORE_PATH"` to every init, pull, sync, graduate, status, and
+maintenance command in this skill. For an explicit memory directory, resolve
+its enclosing store before store-level mutation; stop if ambiguous.
+Use the installed `okfmem` CLI. If it is off PATH, resolve the real path of this
+SKILL.md and use the engine dispatcher two directories above it; do not assume
+a home-directory checkout. SKILL_DIR is the real directory containing this skill.
+
 # /okfmem-save — Write active state + capture insights + commit & push okfmem-store
 
 > **Names.** Canonical `/okfmem-save`; `/primer` is a back-compat alias (a
@@ -17,7 +26,7 @@ description: "Session close-out — clean up tool-created worktrees/branches, wr
 
 ## Two-layer architecture (for context)
 
-Everything lives under `~/.claude/projects/<proj-dir>/memory/` (symlinked to `~/okfmem-store/projects/<name>/`):
+Everything lives under the resolved store project memory directory:
 
 - **Active state** lives in `STATE.md` — a bounded, single-session snapshot with a fixed 6-section shape (Summary / Left off / Next steps / Decisions / Blockers / Goal) plus OKF `type: state` frontmatter. It is **overwritten every session**, never appended. The native memory system auto-loads it next session.
 - **Durable knowledge** lives in per-topic `<topic>.md` pages (OKF v0.1: markdown + YAML frontmatter with a top-level `type:` field ∈ `user` | `feedback` | `project` | `reference`), indexed by one-line pointers in a `MEMORY*.md` index — the matching lane index by default, the root `MEMORY.md` only for cross-lane or `type: feedback` pages (#53; see Step 3). This is the durable write path: create or update the page, then add/refresh its pointer in that index.
@@ -27,126 +36,21 @@ Everything lives under `~/.claude/projects/<proj-dir>/memory/` (symlinked to `~/
 
 End-of-session. Also works mid-session for a checkpoint.
 
-## Cost: delegate drafting to Haiku
-
-`/okfmem-save` runs inside the current session, so its model is whatever your session is on (often Opus). The work splits cleanly:
-
-| Phase | Character | Model |
-|---|---|---|
-| Triage (Step 2, 4, parts of 6) | judgment; needs full session context | session model |
-| Insight capture (Step 3) | direct markdown page writes | session model — **direct, no Agent** |
-| Drafting (Step 6 comment body) | mechanical formatting | **Haiku via Agent** |
-
-Insight capture (Step 3) is a handful of small `Write`/`Edit` calls on the session model — one memory page plus its `MEMORY.md` pointer per insight. It is cheap; do **not** spawn a Haiku Agent per memory file.
-
-The remaining delegation candidate is the Step 6 impl-complete comment body: spawn an `Agent(subagent_type="claude", model="haiku", ...)` briefed with the *decided* content (criteria → met/unmet + notes), have it return the body text; the main session writes the file and posts. Triage decisions stay on the main model.
+Draft memory directly in the current session. Optional issue comments can also be drafted inline; delegation is never required.
 
 ## Process
 
 ### Step 1: Identify the active project
 
-First, recover from a deleted cwd. `commit-all.sh` often runs immediately before `/okfmem-save` and cleans up the worktree the session was implementing in (`<repo>/.claude/worktrees/<issue-id>/`). When that happens, `$PWD` still holds the path string but the directory is gone — every `git`/`pwd`-based lookup below will fail until we cd back to a live checkout.
-
-```bash
-if [ ! -d "$PWD" ]; then
-  case "$PWD" in
-    */.claude/worktrees/*)
-      MAIN_CHECKOUT="${PWD%%/.claude/worktrees/*}"
-      if [ -d "$MAIN_CHECKOUT" ]; then
-        cd "$MAIN_CHECKOUT"
-        echo "okfmem-save: cwd was a worktree that's been cleaned up; switched to $MAIN_CHECKOUT"
-      else
-        echo "okfmem-save: cwd $PWD is gone and fallback $MAIN_CHECKOUT also missing — cd to the project root and re-run" >&2
-        exit 1
-      fi
-      ;;
-    *)
-      echo "okfmem-save: cwd $PWD no longer exists and is not a recognized worktree path — cd to the project root and re-run" >&2
-      exit 1
-      ;;
-  esac
-fi
-
-# Inside a worktree `--show-toplevel` is the worktree, not the project (#62);
-# `--git-common-dir` names the main checkout's `.git` from both, so its parent
-# is the real root. Anything else (bare repo, submodule) keeps the toplevel.
-COMMON_DIR="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
-if [ "$(basename "$COMMON_DIR")" = ".git" ] && [ -d "$(dirname "$COMMON_DIR")" ]; then
-  PROJECT_ROOT="$(dirname "$COMMON_DIR")"
-else
-  PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-fi
-PROJECT_NAME="$(basename "$PROJECT_ROOT")"
-
-# Ask the engine whether THIS repo is wired, instead of re-deriving the encoded
-# path by hand: `encode_root` also encodes the drive colon on Windows, so a
-# hand-rolled sed/replace resolves to the wrong directory there.
-# Rung 1 — read-only, never prompts. Same engine-path hedge used for `okfmem
-# pull` below and `okfmem sync` in Step 7: bare `okfmem` when it's on PATH, else
-# the engine's own path (a manual install may leave `~/.local/bin` off `PATH`).
-LINK_STATE="$(okfmem init --project-link-state 2>/dev/null)" \
-  || LINK_STATE="$(python3 ~/okfmem/okfmem init --project-link-state 2>/dev/null)"
-#   "linked <name>" | "unlinked <name>" | "not-a-repo" | "no-claude" | "" (unreachable)
-
-# `read` consumes only the FIRST line and leaves NAME **empty** when the engine
-# printed a bare state: `not-a-repo`/`no-claude` carry no name at all. Do not
-# reach for `${LINK_STATE#* }` here — on a single-word value it hands back that
-# word unchanged, i.e. `not-a-repo` silently becomes the "project name".
-read -r STATE NAME <<< "$LINK_STATE"
-
-# The probe resolves the project name through the registry (honouring renames),
-# so take the name from it rather than assuming basename == project.
-STORE="${OKFMEM_STORE:-$HOME/okfmem-store}"
-MEMORY_DIR=""                     # meaningful ONLY when STATE is `linked`
-if [ "$STATE" = "linked" ] && [ -n "$NAME" ]; then
-  MEMORY_DIR="$STORE/projects/$NAME"
-fi
-```
-
-**`$MEMORY_DIR` stays empty for every state but `linked`, and that is
-load-bearing — this skill *writes*.** Building it unconditionally lets a missing
-name collapse to `$STORE/projects/`, the store's *projects root*: a real
-directory that passes any `-d` guard, so `STATE.md` and this session's memory
-pages would be written there, where nothing auto-loads them and they pollute the
-store next to the per-project dirs. **Never write anything with `$MEMORY_DIR`
-empty** — there is no safe default for it. If `$STATE` is empty or is none of the
-four states the probe can print, the engine could not be reached (`okfmem` off
-`PATH` *and* absent from `~/okfmem/okfmem`) or it wrote something unexpected to
-stdout: stop, report the raw `$LINK_STATE`, and have the user run
-`python3 ~/okfmem/okfmem init --project-link-state` directly to see the real
-error on stderr.
-
-**If the probe says `unlinked`, stop and fix that first** — this repo has no memory link, so anything you write would land in a directory the agent never auto-loads. Tell the user plainly, then run:
-
-```bash
-okfmem init   # from the repo root; seeds ~/okfmem-store/projects/<name>/ and links it
-```
-
-`init` creates the store project dir (with a seed `MEMORY.md` + `STATE.md`) when it doesn't exist yet, so a repo that has never been saved wires up in that one command. `not-a-repo` means `cd` to the project root first; `no-claude` means the harness isn't installed and there's nothing to link.
-
-**Pull latest before writing anything (#26).** The SessionStart pull hook (#16) only fires at session *start* — if another machine pushed to `~/okfmem-store` *during* this session, the store is stale by the time `/okfmem-save` runs. Bring it current before writing `STATE.md`/pages so this session's capture builds on the latest shared history instead of racing it during the Step 7 sync:
-
-```bash
-okfmem pull   # or: python3 ~/okfmem/okfmem pull   if not on PATH
-```
-
-`okfmem pull` (the fail-open read-side primitive backing #17/#16) fetches and integrates — fast-forward if the store is clean, `rebase --autostash` otherwise — and is a clean no-op when offline, already up to date, or there's no upstream. It never blocks this skill: a non-zero exit means a genuine rebase conflict, which it already aborted (tree left clean); surface that to the user as "the store needs manual conflict resolution before this save's memory pages can be written cleanly" and continue — don't let a pull failure stop STATE.md/page capture, since Step 7's `okfmem sync` will hit the same conflict and report it again if it's still unresolved.
-
-### Step 1c: Clean up tool-created worktrees and branches
-
-Before any memory write, reclaim the worktrees and branches that tooling left behind this session. `/implement-issue`, `/implement-epic`, `commit-all.sh`, and the worktree isolation used by Stop hooks (fallow audits and friends) all create `<repo>/.claude/worktrees/<slug>/` dirs and local feature branches (`feat/…`, `gh-<N>`); after a ff-merge into `main` they are dead weight, and `git worktree remove`'s partial-success failure mode (TCC, Docker pins) leaves orphan dirs behind. The `fallow audit --changed-since` Stop hook also leaves **detached, clean temp worktrees** in `$TMPDIR` (basename `fallow-audit-base-cache-*`) — the sweep now matches those too. Run the sweep:
-
-```bash
-bash "$PROJECT_ROOT/scripts/cleanup-worktrees.sh"   # ~/tools — adjust if PROJECT_ROOT differs
-```
-
-It is **safe by default and non-interactive**: it removes only *clean* worktrees and branches *fully merged into `main`*, and **keeps** (reporting, never deleting) anything with uncommitted changes or unmerged commits. It releases Docker pins first (fail-open), handles git's three worktree-removal outcomes, and prints a TCC remediation hint for any orphan dir it can't `rm`. It always exits 0, so this step never aborts the skill.
-
-- The script lives in `~/tools/scripts/cleanup-worktrees.sh`. If `$PROJECT_ROOT` is a different repo that has no copy, call it by absolute path: `bash ~/tools/scripts/cleanup-worktrees.sh` (it operates on the *current* repo via `git rev-parse`; Step 1 already put you in a live checkout of `$PROJECT_ROOT`).
-- **Invoke it as a single, non-compound command** — just `bash "$PROJECT_ROOT/scripts/cleanup-worktrees.sh"`. Do **not** wrap it as `cd … && bash …`: a compound command defeats the `Bash(bash:*)` allowlist prefix and falls to the auto-mode classifier, which gates it — that's the recurring "can't clean up worktrees" failure. If you need a different cwd, `cd` in a **prior, separate** Bash call.
-- Direct `git worktree remove` / `git worktree prune` are also allowlisted now, so a targeted manual cleanup won't prompt either — but prefer the script; it is the safe-by-default path.
-- Do **not** pass `--force` — that would delete unmerged branches and dirty worktrees. Only a human should opt into that.
-- Relay the script's one-line summary (removed N worktrees / M branches; kept list) in Step 8.
+Run `okfmem init --resolve-project` (read-only JSON). Honor an explicit store
+with `--store PATH`, otherwise `$OKFMEM_STORE` or the default store.
+Use `project`, `root`, `memory_dir`, and `store` as PROJECT_NAME, PROJECT_ROOT, MEMORY_DIR, and STORE_PATH.
+Proceed only when `state` is `ready` and memory_dir is nonempty. For
+`uninitialized`, run `okfmem init --store STORE_PATH` from the repository and resolve again.
+For `not-a-repo` or an unreachable engine, stop; never write into projects/.
+Run `okfmem pull --quiet --store "$STORE_PATH"` before reading existing memory.
+Claude native links remain supported; Codex and AGY use this store path directly.
+No cleanup script or harness-specific agent API is required to save memory.
 
 ### Step 2: Triage this session's content
 
@@ -254,7 +158,8 @@ Fill each section from the session. **Stamp `modified:` with the current wall-cl
 **`STATE.md` has a ceiling: 8192 bytes** (~2.2k tokens) — the same auto-load budget `okfmem reindex` checks `MEMORY.md` against (`memory_reindex.STATE_BUDGET_BYTES`; #52). Generous headroom for a bounded, six-section, single-session snapshot, so this is a signal something drifted (a section grew a changelog instead of staying a pointer), not a routine concern. After writing, spot-check it:
 
 ```bash
-okfmem reindex --report "${MEMORY_DIR:?Step 1 did not resolve a memory dir — do not fall back to a default}"   # or: python3 ~/okfmem/okfmem reindex --report "${MEMORY_DIR:?Step 1 did not resolve a memory dir — do not fall back to a default}"
+okfmem reindex --report "${MEMORY_DIR:?Step 1 did not resolve a memory dir — do not fall back to a default}"
+# Off PATH: "$SKILL_DIR/../../okfmem" reindex --report "$MEMORY_DIR"
 ```
 
 Look at the `STATE.md` row's Status column. If it reads `OVER`, report it in Step 8 — advisory, not a rewrite gate.
@@ -302,15 +207,15 @@ Rules: check `[x]` with a short note per criterion; use `[ ]` + reason if not me
    ```
    Keep this on its own — no `cd …;`, no `&&`, no heredoc on the same line.
 
-**Delegation:** main session decides which criteria are met and what additional changes shipped. Hand that decided mapping (criterion → "met, note: X" or "unmet, reason: Y", plus the additional-changes list) to an `Agent(model="haiku")` that formats the comment body. The Agent returns the body text; the main session writes it to the tempfile **with the Write tool** and posts via the standalone `gh issue comment` call above, then verifies round-trip.
+**Optional delegation (only if the harness supports it):** main session decides which criteria are met and what additional changes shipped. Hand that decided mapping (criterion → "met, note: X" or "unmet, reason: Y", plus the additional-changes list) to an `Agent(model="haiku")` that formats the comment body. The Agent returns the body text; the main session writes it to the tempfile **with the Write tool** and posts via the standalone `gh issue comment` call above, then verifies round-trip.
 
 ### Step 7: Commit and push `~/okfmem-store` via `okfmem sync`
 
-Commit + push the memory repo synchronously at the end of the session — no daemon, no queue. This runs **inside Claude Code**, so it works the same on Mac and Windows (no LaunchAgent / launchd / cron). The commit+push logic lives in one shared place — the `okfmem sync` engine command (`~/okfmem/memory_sync.py`), which the P3 consolidation Stop-hook job also calls — so the pull-rebase and concurrency-lock behavior is identical on both paths:
+Commit + push the memory repo synchronously at the end of the session — no daemon, no queue. This runs **inside the current harness**, so it works the same on Mac and Windows (no LaunchAgent / launchd / cron). The commit+push logic lives in one shared place — the `okfmem sync` engine command (`~/okfmem/memory_sync.py`), which the P3 consolidation Stop-hook job also calls — so the pull-rebase and concurrency-lock behavior is identical on both paths:
 
 ```bash
-okfmem sync -m "<PROJECT_NAME>: <session summary line>"
-# or, if `okfmem` is not on PATH:  python3 ~/okfmem/okfmem sync -m "…"
+okfmem sync --store "$STORE_PATH" -m "<PROJECT_NAME>: <session summary line>"
+# Off PATH: "$SKILL_DIR/../../okfmem" sync --store "$STORE_PATH" -m "…"
 ```
 
 `okfmem sync` does: `add -A` → (if anything staged) `pull --rebase` → `commit` → `push`, serialized by an `flock` lockfile at the store root so two windows can't race. It is a clean **no-op when nothing changed** (no empty commits). On a `pull --rebase` conflict it aborts the half-done rebase, leaves `~/okfmem-store` clean, refuses to push, and exits non-zero — surface the conflict to the user rather than forcing. It prints one status line (`committed <sha>: <msg>` + `pushed.`, or the reason it did nothing).
@@ -318,7 +223,6 @@ okfmem sync -m "<PROJECT_NAME>: <session summary line>"
 ### Step 8: Confirm and show
 
 Show the user:
-- The worktree/branch cleanup result (Step 1c): removed N worktrees / M branches, and the kept list if non-empty
 - The session summary written to `STATE.md` (one line)
 - Any insights captured as memory pages (slugs + one-line hooks; note new vs. updated-existing)
 - Any `MEMORY.md` pointer over the 150-char budget after this session's writes (slug + length), or `"none"`; likewise if the `okfmem reindex --report` spot-check flagged `STATE.md` as `OVER`
@@ -338,7 +242,7 @@ Show the user:
 - **Capture memory pages BEFORE writing `STATE.md`** so the session summary can reference what was captured
 - **Skip reconstructable content** — `git log` + the issue tracker are authoritative for history; don't capture "what shipped"
 - **Commit + push `~/okfmem-store` via `okfmem sync`** (Step 7), synchronously, no-op when clean — no daemon, cross-platform; the same helper backs the Stop-hook consolidation job
-- **Worktree cleanup (Step 1c) runs before any memory write and is safe-by-default** — `cleanup-worktrees.sh` removes only clean worktrees + branches merged into `main`, keeps anything with uncommitted/unmerged work, and exits 0 always; never pass `--force`
+- Worktree cleanup is optional and independent of memory capture.
 
 ## First-time setup on a new machine
 
@@ -347,9 +251,8 @@ Active state and insights are plain markdown under `~/okfmem-store` — no MCP s
 ```bash
 git clone git@github.com:116-Labs/okfmem.git      ~/okfmem         # engine (this skill + scripts)
 git clone git@github.com:<you>/okfmem-store.git   ~/okfmem-store   # data (markdown pages)
-python3 ~/okfmem/okfmem init   # symlinks skills into each harness + wires memory pointers/registry
-# Then, for each project with a memory dir in the store, symlink it into the project's memory dir:
-ln -sfn ~/okfmem-store/projects/<name> ~/.claude/projects/-Users-<user>-<name>/memory
+okfmem init   # symlinks skills into each harness + wires memory pointers/registry
+# Then run okfmem init from each project repository.
 ```
 
 The native memory system auto-loads `STATE.md` / `MEMORY.md` on session start, so no load hook is required. If sessions may run on multiple workstations, add a `git -C ~/okfmem-store pull --rebase` SessionStart hook so each session starts from the latest memory.

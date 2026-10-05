@@ -4,6 +4,15 @@ description: "Judgment-driven memory curation (rare; routine hygiene is automati
 origin: user
 ---
 
+Resolve STORE_PATH from the `store` field of `okfmem init --resolve-project`
+with the user's explicit `--store PATH` when supplied. Pass that exact store
+with `--store "$STORE_PATH"` to every init, pull, sync, graduate, status, and
+maintenance command in this skill. For an explicit memory directory, resolve
+its enclosing store before store-level mutation; stop if ambiguous.
+Use the installed `okfmem` CLI. If it is off PATH, resolve the real path of this
+SKILL.md and use the engine dispatcher two directories above it; do not assume
+a home-directory checkout. SKILL_DIR is the real directory containing this skill.
+
 # okfmem Curate
 
 > **Names.** Canonical `/okfmem-curate`; `/memory-curate` is a back-compat
@@ -22,7 +31,7 @@ origin: user
 > Note the layers differ: consolidation archives (reversible); this skill can
 > delete (hard, gated). Prefer letting decay do the routine work.
 
-Curate the per-project auto-memory store under `~/.claude/projects/<project-slug>/memory/`. Detects stale, superseded, or duplicate-with-CLAUDE.md entries; proposes a deletion/compression plan; on approval, executes and rewrites `MEMORY.md` as tight one-line hooks per the user's auto-memory convention.
+Curate the per-project auto-memory store under `<resolved-store>/projects/<project>/`. Detects stale, superseded, or duplicate-with-CLAUDE.md entries; proposes a deletion/compression plan; on approval, executes and rewrites `MEMORY.md` as tight one-line hooks per the user's auto-memory convention.
 
 **Page deletion and archival are store hygiene and recall precision — not a context optimization (#52).** Only `MEMORY.md` and `STATE.md` are auto-loaded at session start; every other page costs zero context regardless of how many exist. A curate pass that deletes or archives 100 pages and touches no pointer saves **0** tokens. The number that moves the needle is auto-loaded bytes — see Phase 2 and Phase 4.
 
@@ -52,60 +61,24 @@ If the user passed an explicit path argument (e.g. `/okfmem-curate audit <path>`
 `MEM_DIR` directly and skip the probe below — this is the escape hatch for running outside a
 repo.
 
-Otherwise, ask the engine rather than re-deriving the encoded path by hand: `encode_root` also
-encodes the drive colon on Windows, so a hand-rolled `sed`/replace resolves to the wrong
-directory there, and it can't see registry overrides for a renamed project either.
-
-```bash
-# Rung 1 — read-only, never prompts. Try bare `okfmem` first, then fall back to
-# the engine's own path: a manual install that leaves `~/.local/bin` off `PATH`
-# is supported, and every later phase in this skill already calls the engine as
-# `python3 ~/okfmem/okfmem ...` for that reason.
-LINK_STATE="$(okfmem init --project-link-state 2>/dev/null)" \
-  || LINK_STATE="$(python3 ~/okfmem/okfmem init --project-link-state 2>/dev/null)"
-#   "linked <name>" | "unlinked <name>" | "not-a-repo" | "no-claude" | "" (unreachable)
-
-# `read` consumes only the FIRST line and leaves NAME **empty** when the engine
-# printed a bare state: `not-a-repo`/`no-claude` carry no name at all. Do not
-# reach for `${LINK_STATE#* }` here — on a single-word value it hands back that
-# word unchanged, i.e. `not-a-repo` silently becomes the "project name".
-read -r STATE NAME <<< "$LINK_STATE"
-
-STORE="${OKFMEM_STORE:-$HOME/okfmem-store}"
-MEM_DIR=""                        # meaningful ONLY for `linked` — see the table
-if [ "$STATE" = "linked" ] && [ -n "$NAME" ]; then
-  MEM_DIR="$STORE/projects/$NAME"
-fi
-```
-
-Branch on `$STATE`:
-
-| State | What Phase 1 does |
-|---|---|
-| `linked <name>` | proceed with the resolved `$MEM_DIR` |
-| `unlinked <name>` | stop — tell the user this repo has no memory link; the fix is `okfmem init` from the repo root, then re-run `/okfmem-curate` |
-| `not-a-repo` | stop — tell the user to `cd` to the project root first (or pass an explicit path) |
-| `no-claude` | stop — tell the user the harness isn't installed here; nothing to curate |
-| anything else — `$STATE` empty, or a word not in the four rows above | stop — the engine could not be reached (`okfmem` is off `PATH` *and* absent from `~/okfmem/okfmem`), or it wrote something unexpected to stdout. Report the raw `$LINK_STATE` and have the user run `python3 ~/okfmem/okfmem init --project-link-state` directly to see the real error on stderr, or re-invoke `/okfmem-curate` with an explicit path argument |
-
-**`$MEM_DIR` stays empty in every row but the first, and that is the point.**
-Building it unconditionally is what made a missing name collapse to
-`$STORE/projects/` — the store's *projects root*, a real directory that passes
-any `-d` guard — so Phases 2–3 would report on the wrong tree and Phase 4 would
-ask the user to approve deletions derived from it. Never proceed past this phase
-with `$MEM_DIR` unset; there is no safe default for it.
+Otherwise run `okfmem init --resolve-project` (read-only JSON), honoring an explicit
+`--store PATH` or `$OKFMEM_STORE`. Set MEM_DIR to the returned memory_dir only
+when state is ready. For uninitialized, run okfmem init --store STORE_PATH from the repository;
+for not-a-repo or an unreachable engine, stop or request an explicit path.
+Never substitute the projects root for an unresolved project. This works with
+Codex, AGY, and Claude without depending on a Claude memory link.
 
 Detect whether the dir is git-backed (so deletions are recoverable). Run:
 
 ```bash
 # Test the property, not a proxy for it. `$MEM_DIR` is now the symlink's TARGET
-# inside the store, not the `~/.claude/projects/<encoded>/memory` symlink — so
+# inside the store, not the `<resolved-store>/projects/<project>` symlink — so
 # `readlink` prints nothing and exits 1 here, which would report "not
 # recoverable" on every correctly linked, fully git-backed store. Ask git.
-git -C "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}" rev-parse --show-toplevel 2>/dev/null
+GIT_ROOT=$(git -C "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}" rev-parse --show-toplevel 2>/dev/null)
 ```
 
-Non-empty output is the enclosing repo — surface it to the user as the recovery mechanism (it is the `<toplevel>` in the Recovery section's `git -C <toplevel> restore .`). Empty output means the dir is genuinely not under git: *say so explicitly* — recovery is harder. This also works for the explicit-path escape hatch, which `readlink` never handled.
+A non-empty GIT_ROOT is the enclosing repo — retain it for Recovery and surface it to the user as the recovery mechanism. An empty GIT_ROOT means the dir is genuinely not under git: *say so explicitly* — recovery is harder. This also works for the explicit-path escape hatch, which `readlink` never handled.
 
 ### Phase 2: Inventory (deterministic)
 
@@ -117,7 +90,7 @@ dominant block is the finding that decides whether the remedy is "tighten a
 few hooks" or "split a lane"; total file size alone never shows it:
 
 ```bash
-python3 ~/okfmem/okfmem reindex --report "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"
+okfmem reindex --report "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"
 ```
 
 **If the `MEMORY.md` row reads `OVER`, the restructure trigger has fired
@@ -137,7 +110,7 @@ enforces ≤150 chars at write time; this is the check that catches what
 slipped through):
 
 ```bash
-python3 ~/okfmem/okfmem reindex --budget-check "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"
+okfmem reindex --budget-check "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"
 ```
 
 It walks **every** index, not just the root — after a lane split (or once
@@ -163,7 +136,7 @@ Lead the curation report (Phase 4) with these numbers: `MEMORY.md` /
 for per-file age, link status, and heuristic flags:
 
 ```bash
-python3 ~/okfmem/skills/okfmem-curate/scripts/inventory.py "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"
+python3 "$SKILL_DIR/scripts/inventory.py" "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"
 ```
 
 Page count and on-disk total bytes are **not auto-loaded and cost zero
@@ -192,7 +165,7 @@ For every flagged file (any flag set), read its frontmatter + first ~30 lines an
 
 - **keep** — pattern memories, user feedback, current operational state. Default for `feedback_*`, named patterns, and the most recent `*_landed` doc per project surface.
 - **delete** — superseded markers, CK snapshots older than the most recent two, pure-noise files whose `name`/`description` is fully covered by the project's `CLAUDE.md` (no unique content worth keeping), "X landed" docs older than 7 days where the design rules survive in pattern memories.
-- **graduate** — a *still-valuable* page whose rule belongs in the always-loaded `CLAUDE.md` (not recall-on-demand memory): promote it into `CLAUDE.md`/`AGENTS.md` and archive the source with provenance, rather than deleting it. This is the forward, lossless alternative to `delete` for the duplicate-with-CLAUDE.md case — run `okfmem graduate <slug> [--to <dir>/CLAUDE.md]` (it distills + places, mirrors a real-file `AGENTS.md`, archives the page stamped `graduated_to`, and drops its `MEMORY.md` pointer). Reserve `delete` for duplicates with no unique content.
+- **graduate** — a *still-valuable* page whose rule belongs in the always-loaded `CLAUDE.md` (not recall-on-demand memory): promote it into `CLAUDE.md`/`AGENTS.md` and archive the source with provenance, rather than deleting it. This is the forward, lossless alternative to `delete` for the duplicate-with-CLAUDE.md case — run `okfmem graduate <slug> --store "$STORE_PATH" [--to <dir>/CLAUDE.md]` (it distills + places, mirrors a real-file `AGENTS.md`, archives the page stamped `graduated_to`, and drops its `MEMORY.md` pointer). Reserve `delete` for duplicates with no unique content.
 - **compress** — files with unique content but verbose framing; output a one-paragraph rewrite.
 - **unsure** — content needs user judgment. Surface verbatim with a short question.
 
@@ -219,7 +192,7 @@ Present the plan as a single markdown response with three buckets:
 | ... | ... |
 
 ### Bucket B — duplicates with CLAUDE.md (N files)
-Recommended action per file: **graduate** a still-valuable page (promote into `CLAUDE.md`/`AGENTS.md` + archive with provenance via `okfmem graduate <slug>`), **delete** only a pure-noise duplicate. Graduate is lossless and keeps provenance; prefer it whenever the rule is worth keeping.
+Recommended action per file: **graduate** a still-valuable page (promote into `CLAUDE.md`/`AGENTS.md` + archive with provenance via `okfmem graduate <slug> --store "$STORE_PATH"`), **delete** only a pure-noise duplicate. Graduate is lossless and keeps provenance; prefer it whenever the rule is worth keeping.
 
 | File | Where it lives in CLAUDE.md | Action (graduate / delete) |
 |---|---|---|
@@ -255,7 +228,7 @@ Once approved:
 
 1. Delete the approved files using `rm` (single batched command if possible).
 2. For `compress` decisions: rewrite the file in place with the agreed paragraph.
-3. For every file the approved plan marked **graduate**, run `okfmem graduate <slug> --yes` (add `--to <dir>/CLAUDE.md` for a lane-scoped target). Phase 4 **is** the human approval gate, so pass `--yes` to skip graduate's own rung-2 `[y/N]` — without it, invoked non-interactively with no tty the prompt silently skips and prints only a manual hint, so nothing lands while Phase 5 would wrongly report success. Each run distills the rule into `CLAUDE.md` (mirroring a real-file `AGENTS.md`), archives the source page stamped `graduated_to`, and drops its `MEMORY.md` pointer — so run these **before** the MEMORY.md rewrite below.
+3. For every file the approved plan marked **graduate**, run `okfmem graduate <slug> --store "$STORE_PATH" --yes` (add `--to <dir>/CLAUDE.md` for a lane-scoped target). Phase 4 **is** the human approval gate, so pass `--yes` to skip graduate's own rung-2 `[y/N]` — without it, invoked non-interactively with no tty the prompt silently skips and prints only a manual hint, so nothing lands while Phase 5 would wrongly report success. Each run distills the rule into `CLAUDE.md` (mirroring a real-file `AGENTS.md`), archives the source page stamped `graduated_to`, and drops its `MEMORY.md` pointer — so run these **before** the MEMORY.md rewrite below.
 4. **Read MEMORY.md once** (required before Write).
 5. Rewrite MEMORY.md as the tightened index:
    - Group entries by frontmatter `type` (or by topical sections if types aren't consistent): "Current operational state", "Design patterns", "Gotchas / references", "User feedback (preferences)", "Cross-references".
@@ -264,8 +237,8 @@ Once approved:
 6. Run the verification block:
 
 ```bash
-python3 ~/okfmem/okfmem reindex --verify "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"; echo "verify exit: $?"
-python3 ~/okfmem/okfmem reindex --report "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"    # after-numbers for step 8
+okfmem reindex --verify "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"; echo "verify exit: $?"
+okfmem reindex --report "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"    # after-numbers for step 8
 ```
 
 `--verify` walks **every** `MEMORY*.md` (not just the root index) and accepts
@@ -304,7 +277,7 @@ for slug in $GRADUATED_SLUGS; do
 done
 ```
 
-A `MISSING:`/`BROKEN:` line here means the graduate did not apply (commonly: `--yes` was omitted so the non-interactive `[y/N]` silently skipped) — re-run `okfmem graduate <slug> --yes` and re-verify before rewriting MEMORY.md's counts.
+A `MISSING:`/`BROKEN:` line here means the graduate did not apply (commonly: `--yes` was omitted so the non-interactive `[y/N]` silently skipped) — re-run `okfmem graduate <slug> --store "$STORE_PATH" --yes` and re-verify before rewriting MEMORY.md's counts.
 
 8. Report the final numbers from the step-6 `okfmem reindex --report` run, in this order: (1) `MEMORY.md` + `STATE.md` bytes before/after against the ceiling and the resulting tokens saved per session (~bytes delta / 3.5) — the number that matters; (2) pages before/after, labelled non-context — store hygiene, not a context saving. "We deleted N files" must never be presented as a context saving on its own; say so only alongside a `MEMORY.md`/`STATE.md` byte drop.
 
@@ -313,7 +286,7 @@ A `MISSING:`/`BROKEN:` line here means the graduate did not apply (commonly: `--
 If the user disagrees with deletions:
 
 ```bash
-git -C ~/okfmem-store restore .
+git -C "${GIT_ROOT:?Phase 1 found no Git-backed recovery root}" restore .
 ```
 
 Restores everything in the symlinked memory dir. Only works if the memory dir is git-backed (which the user's `~/okfmem-store` setup ensures). Skill must check this in Phase 1 and surface it; if memory dir is *not* git-backed, the approval gate requires extra confirmation language ("this is not recoverable via git").

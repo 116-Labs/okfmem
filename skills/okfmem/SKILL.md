@@ -4,6 +4,15 @@ allowed-tools: Read, Bash, Glob, Grep
 description: High-level overview + status of the okfmem memory system — store location, per-project page/archive counts, decay/consolidation state, git sync status, hook + skill wiring health. `/okfmem` for the dashboard, `/okfmem usage` for the how-to.
 ---
 
+Resolve STORE_PATH from the `store` field of `okfmem init --resolve-project`
+with the user's explicit `--store PATH` when supplied. Pass that exact store
+with `--store "$STORE_PATH"` to every init, pull, sync, graduate, status, and
+maintenance command in this skill. For an explicit memory directory, resolve
+its enclosing store before store-level mutation; stop if ambiguous.
+Use the installed `okfmem` CLI. If it is off PATH, resolve the real path of this
+SKILL.md and use the engine dispatcher two directories above it; do not assume
+a home-directory checkout. SKILL_DIR is the real directory containing this skill.
+
 # /okfmem — memory system overview
 
 Read-only status + orientation for the okfmem memory system. It answers "what is
@@ -49,7 +58,7 @@ consolidation, so pull-rebase + concurrency-lock behavior is identical on both.
 ### Step 1: Engine status
 
 ```bash
-python3 ~/okfmem/okfmem status
+okfmem status
 ```
 
 Relay its output: detected harnesses + pointer state, registry roots/overrides,
@@ -60,14 +69,12 @@ Then probe **this repo's** own memory link — the per-repo wiring is separate
 from the machine-wide install, and an unlinked repo fails invisibly:
 
 ```bash
-python3 ~/okfmem/okfmem init --project-link-state   # read-only
+okfmem init --resolve-project --store "$STORE_PATH"   # read-only JSON
 ```
 
-`linked <name>` is healthy. On **`unlinked <name>`, lead the summary with it**:
-this repo isn't wired, nothing said here will be remembered, and the fix is one
-command run from the repo root — `okfmem init` (it seeds the store project dir
-too, so a never-saved repo wires up in that single step). `not-a-repo` /
-`no-claude` are informational, not problems.
+`state: ready` is healthy. For `uninitialized`, lead the summary with the
+missing project memory and suggest `okfmem init --store "$STORE_PATH"` from
+the repository. `not-a-repo` is informational. No Claude link is required.
 
 ### Step 2: Store inventory + decay state
 
@@ -94,8 +101,8 @@ prints:
   not tightening hooks.
 - The default view collapses to the current project plus any over-ceiling
   project. When the user wants the **full** list, re-run
-  `python3 ~/okfmem/okfmem status --all`; for a single project,
-  `python3 ~/okfmem/okfmem status --project <name>`.
+  `okfmem status --all`; for a single project,
+  `okfmem status --project <name>`.
 - The `decay:` line reports the `decay_state.json` epoch (the cold-start guard
   the consolidation job uses so a freshly-cloned store doesn't mass-archive on
   first run), or `not yet run on this machine` when the file is absent.
@@ -146,7 +153,7 @@ Print this orientation instead of the dashboard:
   flat pointers into lane indexes and rewrites `MEMORY.md` as a routing
   table. Nothing is deleted — pointers only move. `audit` mode previews the
   cluster proposal without writing.
-- `okfmem sync -m "…"` — commit+push the store by hand (pull-rebase + lock).
+- `okfmem sync --store "$STORE_PATH" -m "…"` — commit+push the store by hand (pull-rebase + lock).
 - `okfmem init` — run once **in each repo** you want memory for (the link is
   per-repo; the installer only wired the repo it ran in). Also (re)wires skills
   + pointers into each harness after a clone.
@@ -157,3 +164,5 @@ Print this orientation instead of the dashboard:
   (SessionStart hook).
 - Manual: capturing new insights and writing `STATE.md` — these need the session
   model reading the conversation, so they live in `/okfmem-save`, not a hook.
+
+Use `okfmem init --resolve-project` for harness-neutral project identity; honor explicit `--store PATH` and `$OKFMEM_STORE` in all commands. Codex recall follows managed instructions rather than Claude native links.

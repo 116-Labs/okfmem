@@ -320,3 +320,5 @@ n=$((n + 1))
 echo "$n. The consolidation Stop hook was wired into Claude Code automatically"
 echo "   (see the 'stop hook' line above -- nothing to paste). For other"
 echo "   agents, the hook snippet is in README.md."
+
+echo "Codex: init supports shared memory; review/trust configured hooks with /hooks. External stores require scoped --add-dir access."

@@ -24,7 +24,7 @@ import sqlite3
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from adapters import agy, claude_code  # noqa: E402
+from adapters import agy, claude_code, codex  # noqa: E402
 
 DEFAULT_DB = os.environ.get("OKFMEM_CACHE") or os.path.expanduser("~/.cache/okfmem/sessions.db")
 
@@ -45,9 +45,10 @@ def _connect(db_path):
     return con
 
 
-def _all_turns(claude_root, agy_path):
+def _all_turns(claude_root, agy_path, codex_root=codex.DEFAULT_ROOT, store=None):
     yield from claude_code.iter_turns(claude_root)
     yield from agy.iter_turns(agy_path)
+    yield from codex.iter_turns(codex_root, store=store)
 
 
 def cmd_index(args):
@@ -59,7 +60,7 @@ def cmd_index(args):
         con.execute("DELETE FROM turns")  # cheap full refresh; corpus is small + rebuildable
     n = 0
     with con:
-        for t in _all_turns(args.claude_root, args.agy_path):
+        for t in _all_turns(args.claude_root, args.agy_path, getattr(args, "codex_root", codex.DEFAULT_ROOT), getattr(args, "store", None)):
             con.execute(
                 "INSERT INTO turns (harness,project,session_id,ts,idx,role,text,tool_name) "
                 "VALUES (?,?,?,?,?,?,?,?)",
@@ -114,13 +115,15 @@ def main():
     pi.add_argument("--rebuild", action="store_true", help="drop + recreate the db")
     pi.add_argument("--claude-root", default=claude_code.DEFAULT_ROOT)
     pi.add_argument("--agy-path", default=agy.DEFAULT_PATH)
+    pi.add_argument("--codex-root", default=codex.DEFAULT_ROOT)
+    pi.add_argument("--store", default=os.environ.get("OKFMEM_STORE", os.path.expanduser("~/okfmem-store")))
     pi.add_argument("--db", default=DEFAULT_DB)
     pi.set_defaults(func=cmd_index)
 
     ps = sub.add_parser("search", help="query the index")
     ps.add_argument("query", help="FTS5 MATCH expression")
     ps.add_argument("--limit", type=int, default=20)
-    ps.add_argument("--harness", help="filter: claude-code | agy")
+    ps.add_argument("--harness", help="filter: claude-code | agy | codex")
     ps.add_argument("--project", help="filter: project id")
     ps.add_argument("--db", default=DEFAULT_DB)
     ps.set_defaults(func=cmd_search)
