@@ -386,6 +386,44 @@ def test_report_root_only_store_has_zero_lane_recall_cost(mem):
     assert "zero context cost at session start" in mr.render_report(data)
 
 
+@pytest.mark.parametrize("sizes, median, largest", [
+    ([], 0, 0),
+    ([300, 100, 200], 200, 300),
+    ([100, 400, 200, 300], 250, 400),
+    ([100, 201], 150, 201),
+])
+def test_report_page_median_and_max_bytes(mem, sizes, median, largest):
+    write(mem, "MEMORY.md", "# Index\n")
+    for n, size in enumerate(sizes):
+        write(mem, f"p{n}.md", "x" * size)
+
+    data = mr.report_data(scan(mem))
+    assert data["on_disk"]["median_page_bytes"] == median
+    assert data["on_disk"]["max_page_bytes"] == largest
+    assert data["recall_path"]["page"]["median_bytes"] == median
+    assert data["recall_path"]["page"]["max_bytes"] == largest
+    assert isinstance(data["on_disk"]["median_page_bytes"], int)
+
+
+def test_report_never_claims_the_auto_loaded_files_are_the_entire_cost(mem):
+    write(mem, "MEMORY.md", "# Index\n")
+    write(mem, "MEMORY-lane.md", "x" * 10)
+
+    for line in mr.render_report(mr.report_data(scan(mem))).splitlines():
+        if "entire context cost" in line or "zero context cost" in line:
+            assert "at session start" in line
+
+
+def test_report_leaves_the_store_unchanged(mem):
+    page(mem, "one")
+    write(mem, "MEMORY.md", "# Index\n\n- one.md - hook\n")
+    write(mem, "notes.md", "user-authored, unindexed\n")
+    before = {p.name: p.read_bytes() for p in mem.iterdir()}
+
+    assert mr.main(["--report", str(mem)]) == 0
+    assert {p.name: p.read_bytes() for p in mem.iterdir()} == before
+
+
 def test_lane_budget_override_does_not_change_auto_loaded_budget(mem, capsys):
     write(mem, "MEMORY.md", "# Index\n")
     write(mem, "MEMORY-lane.md", "x" * 11)

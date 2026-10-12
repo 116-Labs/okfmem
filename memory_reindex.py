@@ -48,6 +48,7 @@ the same check fails open on BSD `sed` (macOS).
 Usage:
   okfmem reindex [--report] [--verify] [--budget-check] [TARGET]
                  [--project NAME] [--store PATH] [--json] [--budget BYTES]
+                 [--lane-budget BYTES]
 
   TARGET      memory dir to inspect. Default: <store>/projects/<project>/,
               with <project> from --project, else the cwd's git-root name
@@ -55,6 +56,7 @@ Usage:
   --json      machine-readable output instead of markdown (stable contract for
               callers such as the /okfmem-reindex skill).
   --budget    override the auto-load byte ceiling for this run.
+  --lane-budget  override the per-recall lane-index byte ceiling for this run.
 
 Exit codes:
   0  clean (or --report/--budget-check, which never fail on content)
@@ -96,10 +98,13 @@ CK_PREFIX = "ck_"
 MEMORY_BUDGET_BYTES = 8192
 STATE_BUDGET_BYTES = 8192
 
-# A report over the multi-lane store used to validate #61 found that 4 KiB keeps
-# the mandatory lane-routing read to roughly 1k tokens, comfortably below the
-# durable pages it selects. It is deliberately separate from the session-start
-# budget: this is a per-recall ceiling and an overage is a signal to split lanes.
+# Per-recall ceiling for one lane index. 4 KiB is roughly 1k tokens (at ~4 bytes
+# per token) for the mandatory lane-routing read, half the session-start ceiling
+# above. This figure is a chosen default, not yet derived from a measured
+# lane-size distribution; replace it with one once a report over a real
+# multi-lane store (`--report --json`) has been recorded. It is deliberately
+# separate from the session-start budget: this is a per-recall ceiling and an
+# overage is a signal to split lanes.
 LANE_BUDGET_BYTES = 4096
 
 # Per-line pointer budget (#52), in CHARACTERS. `okfmem-save` enforces it at
@@ -514,7 +519,7 @@ def report_data(scan, budget=None, lane_budget=None):
         median_page_bytes = ordered_page_sizes[middle]
     else:
         median_page_bytes = (ordered_page_sizes[middle - 1] +
-                             ordered_page_sizes[middle]) / 2
+                             ordered_page_sizes[middle]) // 2
     largest_lane_bytes = max((i["bytes"] for i in indexes
                               if not i["auto_loaded"]), default=0)
     largest_page_bytes = max(page_sizes, default=0)
@@ -542,7 +547,7 @@ def report_data(scan, budget=None, lane_budget=None):
 
 def render_report(data):
     out = ["# Reindex report: " + data["dir"], ""]
-    out.append("## Auto-loaded bytes (the entire context cost)")
+    out.append("## Auto-loaded bytes (the entire context cost at session start)")
     out.append("")
     out.append("| File | Bytes | Ceiling | % of ceiling | Status |")
     out.append("|---|---|---|---|---|")
