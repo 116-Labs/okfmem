@@ -28,6 +28,9 @@ review:
   threads_block_merge: false
   reviewers: []
   start_signal: reaction
+  identity:
+    reviewer: separate
+    login: 116-labs-gaal-review[bot]
 limits:
   implement_attempts: 3
   revise_rounds: 3
