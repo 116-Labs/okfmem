@@ -245,7 +245,7 @@ An opt-in plugin — the "consolidation v1.1" reflection pass. It reads the same
 okfmem distill --project okfmem     # report only — writes nothing to the store
 ```
 
-Two invariants hold by construction. **Zero API calls, zero mandatory deps:** candidate detection is pure-Python heuristics (session-recurrence + a document-frequency ceiling that prunes boilerplate + dedup-against-pages), so it never calls a model — and it is *not* wired into the headless Stop-hook consolidation job, which keeps running with no cost. **Nothing is ever written:** `distill` is a pure reporter. The report is the *feed* to a gate — a model at session end (`/okfmem-save`) or a human — which is the only thing that authors or updates pages. A dry-run reporter by design, not a writer with a `--dry-run` flag.
+Two invariants hold by construction. **Zero API calls, zero mandatory deps:** candidate detection is pure-Python heuristics (session-recurrence + a document-frequency ceiling that prunes boilerplate + dedup-against-pages), so it never calls a model — and it is *not* wired into the headless Stop-hook consolidation job, which keeps running with no cost. **Nothing is ever written:** `distill` is a pure reporter. The report is the *feed* to a gate — a model at session end (`/okfmem-save` Step 2 runs `okfmem distill` and routes each qualifying candidate to Step 3; a missing plugin is skipped) or a human — which is the only thing that authors or updates pages. A dry-run reporter by design, not a writer with a `--dry-run` flag.
 
 ### 7. Graduation (`okfmem graduate`)
 The forward complement to decay: promoting a durable page that has matured into a house rule — something every session should see, not recall on demand — into the project's `CLAUDE.md`.
