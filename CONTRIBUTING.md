@@ -39,7 +39,8 @@ Try changes against a throwaway store: `OKFMEM_STORE=/tmp/okfmem-test okfmem <cm
 ## Roadmap
 
 Open issues track the direction:
-- **#3** — public release readiness + launch.
+- **#3** — public release readiness + launch (manual maintainer steps in
+  [`docs/LAUNCH.md`](docs/LAUNCH.md)).
 - **#4 / #5** — session-search replication and full Antigravity extraction.
-- **#6 / #7** — conditional retrieval and consolidation upgrades (gated on real
-  need; not built preemptively).
+- **#6** — conditional retrieval upgrades (gated on real need; not built
+  preemptively).
