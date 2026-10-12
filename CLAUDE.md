@@ -74,7 +74,7 @@ okfmem status                 # store + per-project page/archive counts, sync + 
 okfmem backfill  --dry-run    # stamp decay frontmatter on existing pages
 okfmem init      --dry-run    # per-repo memory link + pointers + registry wiring
 okfmem consolidate --dry-run  # decay + archive stale pages + push
-okfmem sync [-m "<msg>"]      # commit + pull-rebase + push the store (prompts for the message if -m omitted)
+okfmem sync [-m "<msg>"]      # commit + pull-rebase + push the store (prompts on a tty if -m omitted)
 okfmem reindex --report       # read-only: auto-loaded bytes vs ceiling + per-section breakdown
 okfmem reindex --verify       # read-only: link integrity across every MEMORY*.md; exits 1 on dangling/orphans
 

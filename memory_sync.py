@@ -600,22 +600,36 @@ def main():
     args = ap.parse_args()
 
     # A bare `okfmem sync` shouldn't be a usage error -- ask for the subject,
-    # offering a timestamped default so Enter alone works. input() is the
-    # ground truth for interactivity (not a pre-detected isatty guess): on a
-    # non-interactive stdin it raises EOFError immediately, and the documented
-    # default is taken so piped/unattended callers keep working. Ctrl+C aborts
-    # before anything is committed. In-process callers (memory_consolidate)
-    # pass `message` to sync_store directly and never reach this.
+    # offering a timestamped default so Enter alone works. Only prompt on a
+    # real terminal: a non-tty stdin that stays open (a pipe, a background
+    # shell) would block input() forever, so there the default is taken with
+    # a notice. EOFError is still handled for a tty that reaches EOF. Ctrl+C
+    # aborts before anything is committed. In-process callers
+    # (memory_consolidate) pass `message` to sync_store directly and never
+    # reach this.
     message = args.message
     if not message:
         default = "okfmem sync " + datetime.now().strftime("%Y-%m-%d %H:%M")
+        stdin = sys.stdin
+        isatty = getattr(stdin, "isatty", None)
         try:
-            answer = input(f"Commit message [{default}]: ").strip()
-        except EOFError:
-            answer = ""  # no interactive stdin -- take the default
-        except KeyboardInterrupt:
-            print("\nokfmem sync: aborted -- nothing committed.")
-            sys.exit(130)
+            interactive = bool(stdin and callable(isatty) and isatty())
+        except (ValueError, OSError):
+            interactive = False  # closed or detached stdin -- not a terminal
+        if interactive:
+            try:
+                answer = input(f"Commit message [{default}]: ").strip()
+            except EOFError:
+                answer = ""  # tty closed -- take the default
+            except KeyboardInterrupt:
+                print("\nokfmem sync: aborted -- nothing committed.")
+                sys.exit(130)
+        else:
+            print(
+                "okfmem sync: non-interactive stdin, using default commit "
+                f"message '{default}'"
+            )
+            answer = ""
         message = answer or default
 
     res = sync_store(
