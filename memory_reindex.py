@@ -98,13 +98,17 @@ CK_PREFIX = "ck_"
 MEMORY_BUDGET_BYTES = 8192
 STATE_BUDGET_BYTES = 8192
 
-# Per-recall ceiling for one lane index. 4 KiB is roughly 1k tokens (at ~4 bytes
+# Per-recall ceiling for one lane index: 4 KiB, roughly 1k tokens (at ~4 bytes
 # per token) for the mandatory lane-routing read, half the session-start ceiling
-# above. This figure is a chosen default, not yet derived from a measured
-# lane-size distribution; replace it with one once a report over a real
-# multi-lane store (`--report --json`) has been recorded. It is deliberately
-# separate from the session-start budget: this is a per-recall ceiling and an
-# overage is a signal to split lanes.
+# above. Measured with `--report --json` over a real 17-project store
+# (2026-10-12): 10 projects had lanes, 42 lane indexes (archive lanes aside),
+# median 2,140 bytes, 90th percentile 7,116, largest 33,871; 2,257 pages,
+# median 1,848 bytes, 90th percentile 3,746, largest 34,663. So 4 KiB holds the
+# median lane with ~2x headroom and costs about two median pages per recall,
+# while flagging 12 of the 42 lanes (29%), the long tail that has grown into a
+# page list and should be split. It is deliberately separate from the
+# session-start budget: this is a per-recall ceiling and an overage is a signal
+# to split lanes.
 LANE_BUDGET_BYTES = 4096
 
 # Per-line pointer budget (#52), in CHARACTERS. `okfmem-save` enforces it at
