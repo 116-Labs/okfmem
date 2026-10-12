@@ -353,6 +353,54 @@ def test_report_lists_per_index_pointer_counts_for_every_index(mem):
     assert by_file["MEMORY-lane-index.md"]["inline"] == 1
 
 
+def test_report_flags_a_lane_over_its_recall_ceiling(mem):
+    write(mem, "MEMORY.md", "# Index\n")
+    write(mem, "MEMORY-lane.md", "x" * 101)
+
+    data = mr.report_data(scan(mem), lane_budget=100)
+    lane = {i["file"]: i for i in data["indexes"]}["MEMORY-lane.md"]
+    assert lane["budget"] == 100
+    assert lane["over"] is True
+    assert lane["pct_of_budget"] == 101.0
+    assert "Worst-case recall" in mr.render_report(data)
+
+
+def test_report_keeps_a_lane_exactly_at_its_recall_ceiling_in_budget(mem):
+    write(mem, "MEMORY.md", "# Index\n")
+    write(mem, "MEMORY-lane.md", "x" * 100)
+
+    data = mr.report_data(scan(mem), lane_budget=100)
+    lane = {i["file"]: i for i in data["indexes"]}["MEMORY-lane.md"]
+    assert lane["over"] is False
+    assert lane["pct_of_budget"] == 100.0
+
+
+def test_report_root_only_store_has_zero_lane_recall_cost(mem):
+    page(mem, "one", "small\n")
+    write(mem, "MEMORY.md", "# Index\n\n- one.md - hook\n")
+
+    data = mr.report_data(scan(mem))
+    assert all(i["auto_loaded"] for i in data["indexes"])
+    assert data["recall_path"]["lane_index"]["largest_bytes"] == 0
+    assert data["recall_path"]["worst_case_bytes"] == data["on_disk"]["max_page_bytes"]
+    assert "zero context cost at session start" in mr.render_report(data)
+
+
+def test_lane_budget_override_does_not_change_auto_loaded_budget(mem, capsys):
+    write(mem, "MEMORY.md", "# Index\n")
+    write(mem, "MEMORY-lane.md", "x" * 11)
+
+    assert mr.main(["--report", "--json", "--budget", "20", "--lane-budget",
+                    "10", str(mem)]) == 0
+    data = json.loads(capsys.readouterr().out)
+    auto = {r["file"]: r for r in data["auto_loaded"]}
+    lane = {i["file"]: i for i in data["indexes"]}["MEMORY-lane.md"]
+    assert auto["MEMORY.md"]["budget"] == 20
+    assert auto["STATE.md"]["budget"] == 20
+    assert lane["budget"] == 10
+    assert lane["over"] is True
+
+
 def test_report_tolerates_a_dir_with_no_memory_md(mem):
     page(mem, "loose")
     data = mr.report_data(scan(mem))
