@@ -353,6 +353,92 @@ def test_report_lists_per_index_pointer_counts_for_every_index(mem):
     assert by_file["MEMORY-lane-index.md"]["inline"] == 1
 
 
+def test_report_flags_a_lane_over_its_recall_ceiling(mem):
+    write(mem, "MEMORY.md", "# Index\n")
+    write(mem, "MEMORY-lane.md", "x" * 101)
+
+    data = mr.report_data(scan(mem), lane_budget=100)
+    lane = {i["file"]: i for i in data["indexes"]}["MEMORY-lane.md"]
+    assert lane["budget"] == 100
+    assert lane["over"] is True
+    assert lane["pct_of_budget"] == 101.0
+    assert "Worst-case recall" in mr.render_report(data)
+
+
+def test_report_keeps_a_lane_exactly_at_its_recall_ceiling_in_budget(mem):
+    write(mem, "MEMORY.md", "# Index\n")
+    write(mem, "MEMORY-lane.md", "x" * 100)
+
+    data = mr.report_data(scan(mem), lane_budget=100)
+    lane = {i["file"]: i for i in data["indexes"]}["MEMORY-lane.md"]
+    assert lane["over"] is False
+    assert lane["pct_of_budget"] == 100.0
+
+
+def test_report_root_only_store_has_zero_lane_recall_cost(mem):
+    page(mem, "one", "small\n")
+    write(mem, "MEMORY.md", "# Index\n\n- one.md - hook\n")
+
+    data = mr.report_data(scan(mem))
+    assert all(i["auto_loaded"] for i in data["indexes"])
+    assert data["recall_path"]["lane_index"]["largest_bytes"] == 0
+    assert data["recall_path"]["worst_case_bytes"] == data["on_disk"]["max_page_bytes"]
+    assert "zero context cost at session start" in mr.render_report(data)
+
+
+@pytest.mark.parametrize("sizes, median, largest", [
+    ([], 0, 0),
+    ([300, 100, 200], 200, 300),
+    ([100, 400, 200, 300], 250, 400),
+    ([100, 201], 150, 201),
+])
+def test_report_page_median_and_max_bytes(mem, sizes, median, largest):
+    write(mem, "MEMORY.md", "# Index\n")
+    for n, size in enumerate(sizes):
+        write(mem, f"p{n}.md", "x" * size)
+
+    data = mr.report_data(scan(mem))
+    assert data["on_disk"]["median_page_bytes"] == median
+    assert data["on_disk"]["max_page_bytes"] == largest
+    assert data["recall_path"]["page"]["median_bytes"] == median
+    assert data["recall_path"]["page"]["max_bytes"] == largest
+    assert isinstance(data["on_disk"]["median_page_bytes"], int)
+
+
+def test_report_never_claims_the_auto_loaded_files_are_the_entire_cost(mem):
+    write(mem, "MEMORY.md", "# Index\n")
+    write(mem, "MEMORY-lane.md", "x" * 10)
+
+    for line in mr.render_report(mr.report_data(scan(mem))).splitlines():
+        if "entire context cost" in line or "zero context cost" in line:
+            assert "at session start" in line
+
+
+def test_report_leaves_the_store_unchanged(mem):
+    page(mem, "one")
+    write(mem, "MEMORY.md", "# Index\n\n- one.md - hook\n")
+    write(mem, "notes.md", "user-authored, unindexed\n")
+    before = {p.name: p.read_bytes() for p in mem.iterdir()}
+
+    assert mr.main(["--report", str(mem)]) == 0
+    assert {p.name: p.read_bytes() for p in mem.iterdir()} == before
+
+
+def test_lane_budget_override_does_not_change_auto_loaded_budget(mem, capsys):
+    write(mem, "MEMORY.md", "# Index\n")
+    write(mem, "MEMORY-lane.md", "x" * 11)
+
+    assert mr.main(["--report", "--json", "--budget", "20", "--lane-budget",
+                    "10", str(mem)]) == 0
+    data = json.loads(capsys.readouterr().out)
+    auto = {r["file"]: r for r in data["auto_loaded"]}
+    lane = {i["file"]: i for i in data["indexes"]}["MEMORY-lane.md"]
+    assert auto["MEMORY.md"]["budget"] == 20
+    assert auto["STATE.md"]["budget"] == 20
+    assert lane["budget"] == 10
+    assert lane["over"] is True
+
+
 def test_report_tolerates_a_dir_with_no_memory_md(mem):
     page(mem, "loose")
     data = mr.report_data(scan(mem))

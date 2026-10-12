@@ -48,6 +48,7 @@ the same check fails open on BSD `sed` (macOS).
 Usage:
   okfmem reindex [--report] [--verify] [--budget-check] [TARGET]
                  [--project NAME] [--store PATH] [--json] [--budget BYTES]
+                 [--lane-budget BYTES]
 
   TARGET      memory dir to inspect. Default: <store>/projects/<project>/,
               with <project> from --project, else the cwd's git-root name
@@ -55,6 +56,7 @@ Usage:
   --json      machine-readable output instead of markdown (stable contract for
               callers such as the /okfmem-reindex skill).
   --budget    override the auto-load byte ceiling for this run.
+  --lane-budget  override the per-recall lane-index byte ceiling for this run.
 
 Exit codes:
   0  clean (or --report/--budget-check, which never fail on content)
@@ -95,6 +97,19 @@ CK_PREFIX = "ck_"
 # roughly 2k tokens per file -- a routing table, not a page list.
 MEMORY_BUDGET_BYTES = 8192
 STATE_BUDGET_BYTES = 8192
+
+# Per-recall ceiling for one lane index: 4 KiB, roughly 1k tokens (at ~4 bytes
+# per token) for the mandatory lane-routing read, half the session-start ceiling
+# above. Measured with `--report --json` over a real 17-project store
+# (2026-10-12): 10 projects had lanes, 42 lane indexes (archive lanes aside),
+# median 2,140 bytes, 90th percentile 7,116, largest 33,871; 2,257 pages,
+# median 1,848 bytes, 90th percentile 3,746, largest 34,663. So 4 KiB holds the
+# median lane with ~2x headroom and costs about two median pages per recall,
+# while flagging 12 of the 42 lanes (29%), the long tail that has grown into a
+# page list and should be split. It is deliberately separate from the
+# session-start budget: this is a per-recall ceiling and an overage is a signal
+# to split lanes.
+LANE_BUDGET_BYTES = 4096
 
 # Per-line pointer budget (#52), in CHARACTERS. `okfmem-save` enforces it at
 # write time; `--budget-check` is the after-the-fact sweep for what slipped
@@ -463,12 +478,13 @@ def _budget_row(name, path, budget):
             "pct_of_budget": round(_pct(nbytes, budget), 1)}
 
 
-def report_data(scan, budget=None):
+def report_data(scan, budget=None, lane_budget=None):
     """``--budget`` overrides the ceiling for both auto-loaded files -- they
     share one context budget, so splitting the override would let a caller
     tighten one and silently leave the other at the default."""
     mem_budget = MEMORY_BUDGET_BYTES if budget is None else budget
     st_budget = STATE_BUDGET_BYTES if budget is None else budget
+    lane_budget = LANE_BUDGET_BYTES if lane_budget is None else lane_budget
     d = scan.dir
 
     auto = [
@@ -488,25 +504,54 @@ def report_data(scan, budget=None):
     indexes = []
     for idx in scan.indexes:
         bare, inline = scan.pointer_counts(idx)
-        indexes.append({"file": idx, "bytes": scan.index_bytes(idx),
-                        "pointers": bare + inline, "bare": bare,
-                        "inline": inline,
-                        "external_refs": len(scan.external[idx]),
-                        "auto_loaded": idx == ROOT_INDEX})
+        row = {"file": idx, "bytes": scan.index_bytes(idx),
+               "pointers": bare + inline, "bare": bare,
+               "inline": inline,
+               "external_refs": len(scan.external[idx]),
+               "auto_loaded": idx == ROOT_INDEX}
+        if idx != ROOT_INDEX:
+            row.update(_budget_row(idx, os.path.join(d, idx), lane_budget))
+        indexes.append(row)
 
-    page_bytes = sum(os.path.getsize(os.path.join(d, p)) for p in scan.pages)
+    page_sizes = [os.path.getsize(os.path.join(d, p)) for p in scan.pages]
+    page_bytes = sum(page_sizes)
+    ordered_page_sizes = sorted(page_sizes)
+    middle = len(ordered_page_sizes) // 2
+    if not ordered_page_sizes:
+        median_page_bytes = 0
+    elif len(ordered_page_sizes) % 2:
+        median_page_bytes = ordered_page_sizes[middle]
+    else:
+        median_page_bytes = (ordered_page_sizes[middle - 1] +
+                             ordered_page_sizes[middle]) // 2
+    largest_lane_bytes = max((i["bytes"] for i in indexes
+                              if not i["auto_loaded"]), default=0)
+    largest_page_bytes = max(page_sizes, default=0)
     archived = len(glob.glob(os.path.join(glob.escape(d), "archive", "*.md")))
     return {"mode": "report", "dir": d, "auto_loaded": auto,
             "sections": sections, "indexes": indexes,
             "on_disk": {"pages": len(scan.pages), "bytes": page_bytes,
+                        "median_page_bytes": median_page_bytes,
+                        "max_page_bytes": largest_page_bytes,
                         "archived": archived, "auto_loaded": False,
                         "note": "read on demand; costs zero context at "
-                                "session start"}}
+                                "session start"},
+            "recall_path": {
+                "session_start": {"files": [ROOT_INDEX, "STATE.md"],
+                                  "bytes": sum(r["bytes"] for r in auto),
+                                  "when": "every session start"},
+                "lane_index": {"largest_bytes": largest_lane_bytes,
+                               "budget": lane_budget,
+                               "when": "every recall"},
+                "page": {"median_bytes": median_page_bytes,
+                         "max_bytes": largest_page_bytes,
+                         "when": "every recall"},
+                "worst_case_bytes": largest_lane_bytes + largest_page_bytes}}
 
 
 def render_report(data):
     out = ["# Reindex report: " + data["dir"], ""]
-    out.append("## Auto-loaded bytes (the entire context cost)")
+    out.append("## Auto-loaded bytes (the entire context cost at session start)")
     out.append("")
     out.append("| File | Bytes | Ceiling | % of ceiling | Status |")
     out.append("|---|---|---|---|---|")
@@ -541,21 +586,45 @@ def render_report(data):
 
     out.append("## Indexes")
     out.append("")
-    out.append("| Index | Bytes | Pointers | rich | bare | auto-loaded |")
-    out.append("|---|---|---|---|---|---|")
+    out.append("| Index | Bytes | Pointers | rich | bare | Ceiling | Status | auto-loaded |")
+    out.append("|---|---|---|---|---|---|---|---|")
     for i in data["indexes"]:
+        if i["auto_loaded"]:
+            ceiling, status = "-", "-"
+        else:
+            ceiling = str(i["budget"])
+            status = "OVER" if i["over"] else "ok"
         out.append(f"| {i['file']} | {i['bytes']} | {i['pointers']} | "
-                   f"{i['inline']} | {i['bare']} | "
+                   f"{i['inline']} | {i['bare']} | {ceiling} | {status} | "
                    f"{'yes' if i['auto_loaded'] else 'no'} |")
     out.append("")
 
     od = data["on_disk"]
-    out.append("## On disk (NOT auto-loaded -- zero context cost)")
+    rp = data["recall_path"]
+    out.append("## Recall-path cost")
     out.append("")
-    out.append(f"- **Pages**: {od['pages']} ({od['bytes']} bytes)")
+    out.append("| Tier | What it costs | When |")
+    out.append("|---|---|---|")
+    out.append(f"| MEMORY.md + STATE.md | {rp['session_start']['bytes']} bytes "
+               f"(budgeted) | {rp['session_start']['when']} |")
+    out.append(f"| chosen MEMORY-<lane>.md | up to "
+               f"{rp['lane_index']['largest_bytes']} bytes "
+               f"(ceiling {rp['lane_index']['budget']}) | "
+               f"{rp['lane_index']['when']} |")
+    out.append(f"| chosen <slug>.md | median {rp['page']['median_bytes']} bytes, "
+               f"max {rp['page']['max_bytes']} bytes | {rp['page']['when']} |")
+    out.append("")
+    out.append(f"- **Worst-case recall**: {rp['worst_case_bytes']} bytes "
+               "(largest lane index + largest page).")
+    out.append("")
+
+    out.append("## On disk (NOT auto-loaded -- zero context cost at session start)")
+    out.append("")
+    out.append(f"- **Pages**: {od['pages']} ({od['bytes']} bytes; median "
+               f"{od['median_page_bytes']}; max {od['max_page_bytes']})")
     out.append(f"- **Archived**: {od['archived']}")
-    out.append(f"- These are {od['note']}. Only the auto-loaded table above "
-               "spends context.")
+    out.append(f"- These are {od['note']}. Only the auto-loaded table spends "
+               "context at session start; lane indexes spend context on recall.")
     return "\n".join(out)
 
 
@@ -725,6 +794,9 @@ def build_parser():
     p.add_argument("--budget", type=int, default=None,
                    help=f"auto-load byte ceiling (default "
                         f"{MEMORY_BUDGET_BYTES})")
+    p.add_argument("--lane-budget", type=int, default=None,
+                   help=f"per-recall lane-index byte ceiling (default "
+                        f"{LANE_BUDGET_BYTES})")
     return p
 
 
@@ -751,7 +823,8 @@ def main(argv=None):
     chunks = []
     payload = {}
     if do_report:
-        data = report_data(scan, budget=args.budget)
+        data = report_data(scan, budget=args.budget,
+                           lane_budget=args.lane_budget)
         payload["report"] = data
         chunks.append(render_report(data))
     if do_verify:
