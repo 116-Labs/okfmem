@@ -31,6 +31,11 @@ review:
   identity:
     reviewer: separate
     login: 116-labs-gaal-review[bot]
+identities:
+  push:
+    - 116-labs-gaal-push[bot]
+  review:
+    - 116-labs-gaal-review[bot]
 limits:
   implement_attempts: 3
   revise_rounds: 3
