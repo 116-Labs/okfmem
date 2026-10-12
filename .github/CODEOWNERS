@@ -4,6 +4,39 @@
 # and (with branch protection's "require review from Code Owners") needs an
 # owner's approval to merge. One owner today; add lines as co-maintainers join.
 #
+# Only the paths that run on a user's machine outside the engine's own logic,
+# steer an agent, or change how this repo is guarded are owned. Everything else
+# (engine modules, tests, docs) merges on one approving review, which gaal's
+# separate reviewer can give.
+#
 # Syntax: <path pattern>  <@owner ...>   (last matching line wins)
 
-* @s-annam
+# Repo guards: CI, branch policy, gaal's profile and skills.
+/.github/ @s-annam
+/.gaal/ @s-annam
+
+# Agent instructions and harness config: what an agent working here reads and runs.
+/AGENTS.md @s-annam
+/CLAUDE.md @s-annam
+/.claude/ @s-annam
+
+# Shipped into users' sessions: skills, plugins, hooks.
+/skills/ @s-annam
+/plugins/ @s-annam
+/scripts/ @s-annam
+
+# Install, launch and uninstall: run directly on users' machines.
+/install.sh @s-annam
+/install.ps1 @s-annam
+/uninstall.sh @s-annam
+/uninstall.ps1 @s-annam
+/okfmem @s-annam
+/okfmem.cmd @s-annam
+/okfmem.ps1 @s-annam
+/okfmem-statusline.sh @s-annam
+/okfmem-statusline.ps1 @s-annam
+
+# Engine modules that push, pull or delete in a user's store.
+/memory_sync.py @s-annam
+/memory_pull.py @s-annam
+/memory_uninstall.py @s-annam
