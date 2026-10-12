@@ -12,3 +12,5 @@ internal/
 
 # Gaal run directories
 .gaal/runs/
+.claude/skills/gaal-*/
+.agents/skills/gaal-*/

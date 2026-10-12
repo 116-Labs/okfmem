@@ -369,3 +369,5 @@ References: [instructions](https://learn.chatgpt.com/docs/agent-configuration/ag
 [skills](https://learn.chatgpt.com/docs/build-skills),
 [hooks](https://learn.chatgpt.com/docs/hooks),
 [permissions](https://learn.chatgpt.com/docs/permissions/sandboxing).
+
+Gaal renders its skills (`.claude/skills/gaal-*`, `.agents/skills/gaal-*`) from its templates when it dispatches a run, so they are not committed here; `gaal skills render` writes them locally, to read or to run one by hand.
