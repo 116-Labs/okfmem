@@ -54,10 +54,22 @@ No cleanup script or harness-specific agent API is required to save memory.
 
 ### Step 2: Triage this session's content
 
+First read the cross-session feed. The session model sees only this session; `okfmem distill` sees topics that recurred across many sessions and still have no page. It is a read-only reporter (writes nothing, zero API calls), and an opt-in plugin, so a core install without `plugins/memory_distill.py` exits non-zero. That is not an error: skip the feed and continue the close-out. Use the `PROJECT_NAME` from Step 1's `okfmem init --resolve-project` result (so registry renames resolve), never `basename $(pwd)`:
+
+```bash
+okfmem distill --store "$STORE_PATH" --project "$PROJECT_NAME" --limit 10 \
+  || "$SKILL_DIR/../../okfmem" distill --store "$STORE_PATH" --project "$PROJECT_NAME" --limit 10 \
+  || true
+```
+
+A candidate is a *proposal*, not an instruction: the Step 3 capture bar still governs. Note N, the number of candidates surfaced, for Step 8. The feed is capped by `--limit`, so when N equals the limit (10) more candidates may exist: say so in Step 8.
+
 For each durable item worth preserving across sessions, pick the right home:
 
 | Content | Goes to |
 | -- | -- |
+| A `distill` candidate that clears the Step 3 capture bar and adds a fact no existing page holds | **Memory page** (Step 3). If an existing page covers the topic under a different slug, reuse that exact filename (`Edit`, not a duplicate `Write`) per Step 3's reuse rule |
+| A `distill` candidate that is status/derivable, or whose fact an existing page already holds (under any slug) | **Skip** — name it in Step 8 |
 | What's in progress, next step, active blocker | **`STATE.md`** (see Step 5) — bounded active state |
 | Decision, engineering insight, reusable pattern, "lesson learned" | **Memory page** — a `<topic>.md` page + `MEMORY.md` pointer (see Step 3) |
 | Bug discovered, follow-up work not yet started | **GitHub issue** — file it |
@@ -225,6 +237,7 @@ okfmem sync --store "$STORE_PATH" -m "<PROJECT_NAME>: <session summary line>"
 Show the user:
 - The session summary written to `STATE.md` (one line)
 - Any insights captured as memory pages (slugs + one-line hooks; note new vs. updated-existing)
+- The `okfmem distill` feed: `N` candidates surfaced, `k` captured, and the skipped ones named in one line (or `"distill unavailable"` if the plugin is absent); add "feed may be truncated at the limit" when `N` equals the `--limit`. Never truncate silently — that reads as "nothing recurred"
 - Any `MEMORY.md` pointer over the 150-char budget after this session's writes (slug + length), or `"none"`; likewise if the `okfmem reindex --report` spot-check flagged `STATE.md` as `OVER`
 - Any issues filed or commented on
 - The memory push result — the commit SHA that was pushed (from `okfmem sync`'s status line), or `"no memory changes to push"` if the working tree was clean.
