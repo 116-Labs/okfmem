@@ -12,13 +12,15 @@ Sequence:  fetch  →  no-op if already up to date  →
 
 Fail-open contract (this is the part #16's SessionStart hook depends on):
   - Offline / fetch failure: swallowed. Never raises, never exits non-zero.
-  - Rebase conflict confined to per-project STATE.md snapshots: auto-resolved
-    (#25) — STATE.md is a whole-file last-write-wins snapshot, so the newer
-    `modified:` frontmatter timestamp wins (tie → the incoming side; a
-    read-side pull is consuming, not saving). Any conflict touching a durable
-    page or MEMORY.md: the half-done rebase is aborted (tree left clean) and
-    reported; `okfmem pull` run manually exits 1 so a human notices and
-    resolves the store by hand. This is the ONLY non-zero exit case.
+  - Rebase conflict confined to per-project STATE.md snapshots or
+    registry.json: auto-resolved (#25, #80) — STATE.md is a whole-file
+    last-write-wins snapshot, so the newer `modified:` frontmatter timestamp
+    wins (tie → the incoming side; a read-side pull is consuming, not saving).
+    registry.json is a union of native-path maps from both sides (incoming wins
+    on key collisions). Any conflict touching a durable page or MEMORY.md: the
+    half-done rebase is aborted (tree left clean) and reported; `okfmem pull`
+    run manually exits 1 so a human notices and resolves the store by hand.
+    This is the ONLY non-zero exit case.
   - No upstream configured, or already up to date: clean no-op, exit 0.
 A caller that must never block (a SessionStart hook) can invoke this command
 as-is and either ignore its exit code entirely or treat 1 as "needs a human,
@@ -112,6 +114,17 @@ def pull_store(store, timeout=DEFAULT_TIMEOUT):
             res["reason"] = "no upstream configured — nothing to pull."
             return res
 
+        # #80: On read-only machines (e.g. gaal workers), `okfmem init --yes` writes
+        # this machine's roots into registry.json but never commits them. A trailing
+        # uncommitted registry edit causes every later `pull --rebase --autostash`
+        # to conflict when popping the stash after remote changes.
+        # Commit the pending registry.json edit locally before integrating so the
+        # edit becomes a normal commit that rebases cleanly over upstream.
+        reg_st = _safe_git(store, "status", "--porcelain", "--", "registry.json")
+        if reg_st.returncode == 0 and reg_st.stdout.strip():
+            _safe_git(store, "add", "--", "registry.json")
+            _safe_git(store, "commit", "-m", "chore(registry): update registry.json")
+
         local = _safe_git(store, "rev-parse", "HEAD")
         if local.returncode == 0 and local.stdout.strip() == upstream.stdout.strip():
             res["up_to_date"] = True
@@ -144,14 +157,14 @@ def pull_store(store, timeout=DEFAULT_TIMEOUT):
 
         rb = _safe_git(store, "pull", "--rebase", "--autostash", timeout=timeout)
         if rb.returncode != 0:
-            # #25: a conflict confined to STATE.md snapshots is decided by
-            # the newer `modified:` frontmatter (prefer_local=False — a
-            # read-side pull prefers the incoming snapshot on a tie);
+            # #25, #80: a conflict confined to STATE.md snapshots or registry.json
+            # is auto-resolved (prefer_local=False — a read-side pull prefers
+            # the incoming snapshot on a tie; registry.json takes union of maps);
             # anything touching a durable page or MEMORY.md falls through
             # to the normal abort so a human reconciles it. Post-fetch the
             # rebase is local-only, so ms helpers (no _safe_git wrapper)
             # are fine here.
-            if not ms._finish_rebase_with_state_autoresolve(
+            if not ms._finish_rebase_with_autoresolve(
                     store, prefer_local=False):
                 _safe_git(store, "rebase", "--abort")
                 res["conflict"] = True
@@ -161,15 +174,14 @@ def pull_store(store, timeout=DEFAULT_TIMEOUT):
         if ms._has_unmerged_paths(store):
             # The rebase completed (branch moved) but the trailing
             # autostash-pop conflicted — git exits 0 for that, so it must be
-            # caught here (same latent gap #26 closed in memory_sync). #25:
-            # a STATE.md-only pop conflict is resolved in place (newer
-            # `modified:` wins, incoming on a tie) and the retained
-            # autostash dropped; the mixed reset then unstages the
-            # resolution so surviving local edits sit in the working tree
+            # caught here (same latent gap #26 closed in memory_sync). #25/#80:
+            # a STATE.md- or registry.json-only pop conflict is resolved in place
+            # and the retained autostash dropped; the mixed reset then unstages
+            # the resolution so surviving local edits sit in the working tree
             # exactly as a clean autostash-pop would have left them.
             # Anything else: undo the rebase (ORIG_HEAD) and re-apply the
             # stash, restoring the original dirty tree for a human.
-            if ms._auto_resolve_state_conflicts(store, prefer_local=False):
+            if ms._auto_resolve_conflicts(store, prefer_local=False):
                 _safe_git(store, "stash", "drop")
                 _safe_git(store, "reset", "-q")
             else:
