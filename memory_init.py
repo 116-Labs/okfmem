@@ -211,6 +211,49 @@ def _lookup_reg(d, path):
     return None
 
 
+def _repo_name_from_remote(url):
+    """Repository slug from a git remote URL (HTTPS, SSH scp-style, ssh://, or
+    a local path), without a trailing `.git`. None when no usable name."""
+    if not url:
+        return None
+    parts = [p for p in re.split(r"[/:\\]", url.strip()) if p]
+    if not parts:
+        return None
+    name = parts[-1]
+    if name.endswith(".git"):
+        name = name[: -len(".git")]
+    if not name or name in (".", "..") or "@" in name:
+        return None
+    return name
+
+
+def _remote_repo_name(root):
+    """Repo name from `remote.origin.url` of the repo at `root`, or None."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", root, "config", "--get", "remote.origin.url"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if out.returncode != 0:
+        return None
+    return _repo_name_from_remote(out.stdout)
+
+
+def canonical_project_name(root, reg):
+    """Store project name for the git root `root`: explicit override, else the
+    origin remote's repo name, else the registry map, else `basename(root)`."""
+    return (
+        _lookup_reg(reg.get("overrides", {}), root)
+        or _remote_repo_name(root)
+        or _lookup_reg(reg.get("map", {}), root)
+        or os.path.basename(root)
+    )
+
+
 def resolve_project(store, cwd=None):
     """Read-only harness-neutral identity; retain the main-checkout worktree rule."""
     if cwd:
@@ -225,13 +268,7 @@ def resolve_project(store, cwd=None):
         return {"state": "not-a-repo", "project": None, "memory_dir": None, "store": store}
     root = os.path.normpath(root)
     reg = _load_registry(os.path.join(store, "registry.json"))
-    overrides = reg.get("overrides", {})
-    mapping = reg.get("map", {})
-    name = (
-        _lookup_reg(overrides, root)
-        or _lookup_reg(mapping, root)
-        or os.path.basename(root)
-    )
+    name = canonical_project_name(root, reg)
     target = os.path.join(store, "projects", name)
     ready = all(os.path.isfile(os.path.join(target, f)) for f in ("STATE.md", "MEMORY.md"))
     return {"state": "ready" if ready else "uninitialized", "project": name, "memory_dir": target, "root": root, "store": store}
@@ -358,7 +395,7 @@ def build_registry(store, claude_projects):
         project = os.path.basename(target)
         root = decode_root(entry)
         mapping[root] = project
-        if os.path.basename(root) != project:
+        if (_remote_repo_name(root) or os.path.basename(root)) != project:
             overrides[root] = project
     return _registry_shell(mapping, overrides), drift
 
@@ -1115,6 +1152,142 @@ def _install_memory_link(proj_dir, link, target_real):
     return " (copy — will go stale; re-run okfmem init after engine updates)"
 
 
+def _copy_pages_non_clobbering(src_dir, dest_dir, adopt, collide, src_memory):
+    """Copy `adopt` pages to their natural path in `dest_dir` and `collide`
+    pages under a `.orphan` suffix, adopting `src_memory` wholesale when the
+    destination has no `MEMORY.md`; then verify every copy by size. Nothing in
+    `src_dir` is removed. Returns (wholesale_memory, failure) where failure is
+    None, ("copy", OSError) or ("verify", None)."""
+    copied = []
+    wholesale_memory = False
+    try:
+        for rel in adopt:
+            src = os.path.join(src_dir, rel)
+            dest = os.path.join(dest_dir, rel)
+            os.makedirs(os.path.dirname(dest) or dest_dir, exist_ok=True)
+            shutil.copy2(src, dest)
+            copied.append((src, dest))
+        for rel in collide:
+            src = os.path.join(src_dir, rel)
+            dest = _preserved_orphan_path(dest_dir, rel)
+            os.makedirs(os.path.dirname(dest) or dest_dir, exist_ok=True)
+            shutil.copy2(src, dest)
+            copied.append((src, dest))
+        dest_md = os.path.join(dest_dir, "MEMORY.md")
+        wholesale_memory = src_memory is not None and not os.path.isfile(dest_md)
+        if wholesale_memory:
+            src = os.path.join(src_dir, "MEMORY.md")
+            shutil.copy2(src, dest_md)
+            copied.append((src, dest_md))
+    except OSError as e:
+        return wholesale_memory, ("copy", e)
+    for src, dest in copied:
+        try:
+            if not os.path.isfile(dest) or os.path.getsize(dest) != os.path.getsize(
+                src
+            ):
+                raise OSError("size mismatch")
+        except OSError:
+            return wholesale_memory, ("verify", None)
+    return wholesale_memory, None
+
+
+def _association_rename_candidate(store, claude_projects, root, reg):
+    """(old, new) when `root`'s store project still sits under a pre-remote
+    name while origin now names a different repo; None otherwise."""
+    if _lookup_reg(reg.get("overrides", {}), root):
+        return None
+    new = _remote_repo_name(root)
+    if not new:
+        return None
+    projects = os.path.join(store, "projects")
+    projects_real = os.path.normcase(os.path.realpath(projects))
+    link = os.path.join(claude_projects, encode_root(root), "memory")
+    candidates = []
+    pointed = None
+    if os.path.islink(link) or _is_junction(link):
+        pointed = os.path.realpath(link)
+    else:
+        pointed = _managed_copy_target(link)
+        pointed = os.path.realpath(pointed) if pointed else None
+    if pointed and os.path.normcase(os.path.dirname(pointed)) == projects_real:
+        candidates.append(os.path.basename(pointed))
+    mapped = _lookup_reg(reg.get("map", {}), root)
+    if mapped:
+        candidates.append(mapped)
+    candidates.append(os.path.basename(root))
+    new_dir = os.path.join(projects, new)
+    for old in candidates:
+        old_dir = os.path.join(projects, old)
+        if old == new or not os.path.isdir(old_dir):
+            continue
+        if os.path.isdir(new_dir) and os.path.samefile(old_dir, new_dir):
+            continue
+        return old, new
+    return None
+
+
+def migrate_project_association(
+    store, claude_projects, reg, dry_run, assume_yes=False, non_interactive=None
+):
+    """Rename (or merge) the store project dir of a repo that gained a git
+    remote after `okfmem init`: `projects/<old>` -> `projects/<repo-name>`.
+
+    Rung-2 (moves user content in the store): `[y/N]` on a tty, `--yes`
+    consents, a non-interactive decline skips and prints the manual command.
+    When `projects/<repo-name>` already exists the old pages are merged in
+    without clobbering (`.orphan` suffix on collisions) before the old dir is
+    removed. The memory link is repointed by `link_project_memory` afterwards;
+    `okfmem sync` records the rename in the store.
+    Returns (status, message) with status in {"ok", "changed", "skip"}."""
+    if non_interactive is None:
+        non_interactive = not sys.stdin.isatty()
+    root = _current_project_root()
+    if not root:
+        return ("ok", "not inside a git repo")
+    cand = _association_rename_candidate(store, claude_projects, root, reg)
+    if cand is None:
+        return ("ok", "no association rename pending")
+    old, new = cand
+    old_dir = os.path.join(store, "projects", old)
+    new_dir = os.path.join(store, "projects", new)
+    merging = os.path.isdir(new_dir)
+    verb = "merge" if merging else "rename"
+    if dry_run:
+        return ("changed", f"would {verb} store project '{old}' -> '{new}'")
+    if not _prompt_yes_no(
+        f"Repo now has remote origin '{new}'; {verb} store project '{old}' "
+        f"to '{new}'?",
+        assume_yes=assume_yes,
+        non_interactive=non_interactive,
+        manual_hint="Apply later with: okfmem init --yes",
+    ):
+        return ("skip", f"store project '{old}' not moved to '{new}'")
+    if not merging:
+        try:
+            os.replace(old_dir, new_dir)
+        except OSError as e:
+            return ("skip", f"rename failed ({e}); '{old}' left intact")
+        return ("changed", f"renamed store project '{old}' -> '{new}'")
+    adopt, collide, old_memory = _scan_orphan_dir(old_dir, new_dir)
+    wholesale, failure = _copy_pages_non_clobbering(
+        old_dir, new_dir, adopt, collide, old_memory
+    )
+    if failure is not None:
+        return ("skip", f"merge failed ({failure[0]}); '{old}' left intact")
+    if old_memory is not None and not wholesale:
+        _merge_memory_index(old_dir, new_dir, adopt)
+    try:
+        shutil.rmtree(old_dir)
+    except OSError as e:
+        return ("skip", f"merged into '{new}' but could not remove '{old}' ({e})")
+    return (
+        "changed",
+        f"merged store project '{old}' into '{new}' "
+        f"({len(adopt)} adopted, {len(collide)} kept as .orphan)",
+    )
+
+
 def _adopt_and_link_orphan(
     link, proj_dir, target_real, name, dry_run, assume_yes, non_interactive
 ):
@@ -1176,45 +1349,21 @@ def _adopt_and_link_orphan(
                 f"{n_total} orphaned page(s) at the memory link path — {hint}",
             )
 
-    # --- 1. copy into the store (content now exists in BOTH places) ---------
-    copied = []  # (src, dest) pairs, verified below before anything is removed
-    try:
-        for rel in adopt:
-            src = os.path.join(link, rel)
-            dest = os.path.join(store_project_dir, rel)
-            os.makedirs(os.path.dirname(dest) or store_project_dir, exist_ok=True)
-            shutil.copy2(src, dest)
-            copied.append((src, dest))
-        for rel in collide:
-            src = os.path.join(link, rel)
-            dest = _preserved_orphan_path(store_project_dir, rel)
-            os.makedirs(os.path.dirname(dest) or store_project_dir, exist_ok=True)
-            shutil.copy2(src, dest)
-            copied.append((src, dest))
-        store_md = os.path.join(store_project_dir, "MEMORY.md")
-        wholesale_memory = orphan_memory is not None and not os.path.isfile(store_md)
-        if wholesale_memory:
-            src = os.path.join(link, "MEMORY.md")
-            shutil.copy2(src, store_md)
-            copied.append((src, store_md))
-    except OSError as e:
-        return (
-            "skip",
-            f"adoption copy failed ({e}); orphan dir left intact — {hint}",
-        )
-
-    # --- 2. verify every copy landed BEFORE removing the source -------------
-    for src, dest in copied:
-        try:
-            if not os.path.isfile(dest) or os.path.getsize(dest) != os.path.getsize(
-                src
-            ):
-                raise OSError("size mismatch")
-        except OSError:
+    # --- 1+2. copy into the store, then verify every copy landed ------------
+    wholesale_memory, failure = _copy_pages_non_clobbering(
+        link, store_project_dir, adopt, collide, orphan_memory
+    )
+    if failure is not None:
+        kind, err = failure
+        if kind == "copy":
             return (
                 "skip",
-                "adoption verification failed; orphan dir left intact — " + hint,
+                f"adoption copy failed ({err}); orphan dir left intact — {hint}",
             )
+        return (
+            "skip",
+            "adoption verification failed; orphan dir left intact — " + hint,
+        )
 
     # Store already had its own index -> union the orphan's pointer lines in
     # (the wholesale case above already carried the orphan's index over).
@@ -1291,7 +1440,7 @@ def project_link_state(store, claude_projects=None):
         if not root:
             return ("not-a-repo", None)
         reg = _load_registry(os.path.join(store, "registry.json"))
-        name = reg.get("overrides", {}).get(root, os.path.basename(root))
+        name = canonical_project_name(root, reg)
         link = os.path.join(claude_projects, encode_root(root), "memory")
         target_real = os.path.realpath(os.path.join(store, "projects", name))
         if os.path.islink(link) or _is_junction(link):
@@ -1367,7 +1516,7 @@ def link_project_memory(
     root = _current_project_root()
     if not root:
         return ("skip", "not inside a git repo")
-    name = reg.get("overrides", {}).get(root, os.path.basename(root))
+    name = canonical_project_name(root, reg)
     target = os.path.join(store, "projects", name)
     seeded = False
     if not os.path.isdir(target):
@@ -2046,6 +2195,21 @@ def cmd_run(
             non_interactive=non_interactive,
             manual_hint=config_hint,
         )
+
+    if apply_config and harnesses.get("claude_code"):
+        raction, rmsg = migrate_project_association(
+            store,
+            claude_projects,
+            _load_registry(os.path.join(store, "registry.json")),
+            dry_run,
+            assume_yes=assume_yes,
+            non_interactive=non_interactive,
+        )
+        if raction == "changed":
+            changes += 1
+            print(f"{glyph('chg')} project name {rmsg}")
+        elif raction == "skip":
+            print(f"{glyph('warn')} project name {rmsg}")
 
     resolved = resolve_project(store)
     if resolved["project"] and resolved["state"] != "ready":

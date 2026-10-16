@@ -399,14 +399,29 @@ def _finish_rebase_with_state_autoresolve(store, prefer_local):
         if _unmerged_paths(store):
             if not _auto_resolve_state_conflicts(store, prefer_local):
                 return False
-        cont = _git(store, "-c", "core.editor=true", "rebase", "--continue")
+        # Force GIT_EDITOR=true in env: GIT_EDITOR in the calling environment
+        # overrides core.editor in git's editor resolution hierarchy, which
+        # would cause rebase --continue to fail in headless runners where
+        # GIT_EDITOR=false.
+        editor_env = dict(os.environ, GIT_EDITOR="true")
+        cont = subprocess.run(
+            ["git", "-C", store, "-c", "core.editor=true", "rebase", "--continue"],
+            capture_output=True,
+            text=True,
+            env=editor_env,
+            timeout=120,
+        )
         if cont.returncode != 0:
             blob = ((cont.stdout or "") + (cont.stderr or "")).lower()
             if "--skip" in blob and not _unmerged_paths(store):
                 # The resolved pick became empty (incoming side won and the
                 # commit carried nothing else) — old-git stops; drop it.
-                if _git(
-                    store, "rebase", "--skip"
+                if subprocess.run(
+                    ["git", "-C", store, "rebase", "--skip"],
+                    capture_output=True,
+                    text=True,
+                    env=editor_env,
+                    timeout=120,
                 ).returncode != 0 and not _unmerged_paths(store):
                     return False
             elif not _unmerged_paths(store):

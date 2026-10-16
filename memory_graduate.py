@@ -56,6 +56,7 @@ from memory_init import (  # noqa: E402
     _load_registry,
     _prompt_yes_no,
     _shared_repo_root,
+    canonical_project_name,
 )
 from memory_reindex import index_files  # noqa: E402
 
@@ -80,9 +81,9 @@ class GraduateError(Exception):
 # project / page resolution
 # ---------------------------------------------------------------------------
 def resolve_project(store, explicit):
-    """--project if given; else the same `basename(git-root) unless
-    overridden` rule `okfmem init` uses to name the current repo's store dir,
-    with a worktree mapped to its main checkout (#62)."""
+    """--project if given; else the same remote-repo-name-or-basename rule
+    `okfmem init` uses to name the current repo's store dir, with a worktree
+    mapped to its main checkout (#62)."""
     if explicit:
         return explicit
     root = _current_git_root()
@@ -90,7 +91,7 @@ def resolve_project(store, explicit):
         return None
     root = _shared_repo_root(root)
     reg = _load_registry(os.path.join(store, "registry.json"))
-    return reg.get("overrides", {}).get(root, os.path.basename(root))
+    return canonical_project_name(root, reg)
 
 
 def page_title(text, slug):
