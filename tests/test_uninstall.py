@@ -192,6 +192,24 @@ def test_unlink_project_memory_removes_registered_link(tmp_path):
     assert not os.path.lexists(str(link))
 
 
+def test_unlink_project_memory_removes_pre_81_link(tmp_path):
+    store = tmp_path / "store"
+    (store / "projects" / "myproj").mkdir(parents=True)
+    claude_projects = tmp_path / "claude_projects"
+    root = tmp_path / "Application Support" / "myproj"
+    root.mkdir(parents=True)
+    legacy_dir = claude_projects / mi._legacy_encode_root(str(root))
+    legacy_dir.mkdir(parents=True)
+    os.symlink(str(store / "projects" / "myproj"), str(legacy_dir / "memory"),
+               target_is_directory=True)
+
+    reg = {"map": {str(root): "myproj"}}
+    actions = mu.unlink_project_memory(str(store), str(claude_projects), reg, dry_run=False)
+    assert actions == [(str(root), "myproj", "absent"),
+                       (str(root), "myproj", "removed (pre-#81 dir)")]
+    assert not os.path.lexists(str(legacy_dir))
+
+
 def test_unlink_project_memory_no_registrations_is_empty(tmp_path):
     store = tmp_path / "store"
     claude_projects = tmp_path / "claude_projects"
