@@ -258,12 +258,10 @@ def detect_harnesses():
 def _windows_drive_root(tokens):
     """If `tokens` starts with a drive letter and that drive actually exists
     on this machine, return (root, consumed) so the probe can start from
-    `C:\\` instead of `/`. The first token is either a bare letter `C` (from
-    an encoded `C-Users-name-project`) or a drive spec `C:` — the latter is
-    what Claude Code's encoding produces on Windows, where `str(Path)` uses
-    `\\` separators, so `C:\\Users` -> `C:-Users` -> first token `C:`. Returns
-    None on POSIX or when the first token isn't a real drive letter — the
-    caller then falls back to the original `/`-rooted behavior unchanged."""
+    `C:\\` instead of `/`. `decode_root` canonicalises the name first, so the
+    first token is the bare letter of Claude's `C--Users-…` (or the older
+    `C-Users-…`); a `C:` token is accepted too. Returns None on POSIX or when
+    the first token isn't a real drive letter."""
     if os.name != "nt" or not tokens:
         return None
     first = tokens[0]
@@ -276,58 +274,107 @@ def _windows_drive_root(tokens):
     return drive, 1
 
 
+_NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]")
+
+
+def _encode_name(name):
+    return _NON_ALNUM_RE.sub("-", name)
+
+
+def _probe_encoded(path, rest, matches):
+    """Walk `rest` (an encoded tail) down from `path`, matching each directory
+    entry by its encoded name, longest first. Appends every full decoding to
+    `matches`, and returns (deepest path reached, unmatched encoded tail)."""
+    if not rest:
+        matches.append(path)
+        return path, ""
+    best = (path, rest)
+    try:
+        entries = os.listdir(path)
+    except OSError:
+        return best
+    key = os.path.normcase(rest)
+    for name in sorted(entries, key=len, reverse=True):
+        enc = os.path.normcase(_encode_name(name))
+        if not (key == enc or key.startswith(enc + "-")):
+            continue
+        sub = os.path.join(path, name)
+        if not os.path.isdir(sub):
+            continue
+        found = _probe_encoded(sub, rest[len(name) + 1 :], matches)
+        if len(found[1]) < len(best[1]):
+            best = found
+    return best
+
+
 def decode_root(encoded):
     """`-Users-you-worktree-autosync` -> `/Users/you/worktree-autosync`.
 
-    Claude Code encodes a cwd by replacing '/' with '-', which is lossy because
-    directory names can themselves contain '-'. Reverse it by probing the real
-    filesystem: walk the '-'-split tokens left to right, greedily preferring the
-    longest existing directory at each step.
+    `encode_root` maps every non-alphanumeric character to '-', so the name is
+    lossy. Reverse it by probing the real filesystem: at each level, match the
+    entries whose encoded name prefixes what is left. An older okfmem name
+    (separators only) is canonicalised first, so it decodes the same way.
 
-    On Windows, an encoded path like `C-Users-name-project` (or
-    `-C-Users-name-project`) starts with a drive letter instead of a leading
-    slash; the probe root is switched to `C:\\` for that case (POSIX behavior,
-    including existing encodings like `-Users-you-worktree-autosync`, is
-    unchanged).
+    On Windows, an encoded path like `C--Users-name-project` (or the bare
+    `C-Users-name-project`) starts with a drive letter instead of a leading
+    slash; the probe starts from `C:\\` for that case. An unresolvable tail is
+    kept verbatim under the deepest directory found, and a Windows name with no
+    drive (a UNC share) is returned as given. See `_resolve_encoded` for when
+    the answer cannot be trusted.
     """
-    tokens = encoded.lstrip("-").split("-")
-    path = "/"
-    i = 0
+    path, _ = _resolve_encoded(encoded)
+    return encoded if path is None else path
+
+
+def _resolve_encoded(encoded):
+    """Decode as `decode_root` does. Returns (path, problem): `problem` is None,
+    or why `path` must not be recorded as the root, with `path` None when no
+    root can be probed at all."""
+    canonical = _encode_name(encoded)
+    tokens = canonical.split("-")
     drive = _windows_drive_root(tokens)
     if drive is not None:
-        path, i = drive
-    while i < len(tokens):
-        # extend the current segment with as many '-'-joined tokens as still
-        # name a real directory; fall back to the single token.
-        best = None
-        cand = tokens[i]
-        j = i
-        if os.path.isdir(os.path.join(path, cand)):
-            best, best_j = cand, j
-        while j + 1 < len(tokens):
-            j += 1
-            cand = cand + "-" + tokens[j]
-            if os.path.isdir(os.path.join(path, cand)):
-                best, best_j = cand, j
-        if best is None:
-            # nothing on disk matches — reconstruct verbatim and stop probing
-            return os.path.normpath(os.path.join(path, "-".join(tokens[i:])))
-        path = os.path.join(path, best)
-        i = best_j + 1
-    return os.path.normpath(path)
+        path = drive[0]
+        rest = canonical[len(tokens[0]) :]
+        # Claude's `C--` stands for `C:\`, the older bare `C-` for `C\`; a
+        # further dash belongs to the tail (`C:\.x` -> `C---x`).
+        rest = rest[2:] if rest.startswith("--") else rest[1:]
+    elif os.name == "nt":
+        # A local Windows root always has a drive; a UNC share cannot be probed.
+        return None, "names no drive (a UNC share?), so its root cannot be decoded"
+    else:
+        path = "/"
+        rest = canonical[1:] if canonical.startswith("-") else canonical
+    matches = []
+    path, tail = _probe_encoded(path, rest, matches)
+    if len(matches) > 1:
+        # Only an older okfmem name, which kept ' ', '.' and '_', can tell
+        # same-encoded siblings apart.
+        spelled = [
+            m for m in matches
+            if os.path.normcase(_legacy_encode_root(m)) == os.path.normcase(encoded)
+        ]
+        if encoded != canonical and len(spelled) == 1:
+            return os.path.normpath(spelled[0]), None
+        listed = ", ".join(os.path.normpath(m) for m in matches)
+        return os.path.normpath(matches[0]), f"matches several directories ({listed})"
+    return os.path.normpath(os.path.join(path, tail) if tail else path), None
 
 
 def encode_root(root):
     """Inverse of `decode_root`: turn an absolute git root into the on-disk
-    Claude Code project-dir encoding (`~/.claude/projects/<encoded>/`).
+    Claude Code project-dir name (`~/.claude/projects/<encoded>/`).
 
-    Claude Code encodes a cwd by replacing path separators with '-'. On
-    Windows, `str(WindowsPath)` uses '\\', and the drive colon is ALSO
-    replaced (`C:\\Users\\name\\proj` -> `C--Users-name-proj`, a double dash
-    between the drive letter and the next segment) -- `decode_root`'s
-    `_windows_drive_root` already tolerates both the bare-letter and
-    colon-suffixed first-token shapes, so this stays the single inverse for
-    both. POSIX is untouched: only '/' is replaced."""
+    Claude Code replaces every character outside `[A-Za-z0-9]` with '-', on
+    every OS: `/Users/you/Application Support/x` -> `-Users-you-Application-Support-x`,
+    `/home/you/.local/x` -> `-home-you--local-x`, `C:\\Users\\you\\proj` ->
+    `C--Users-you-proj` (observed 2026-10-16 on macOS, Linux and Windows, #81)."""
+    return _encode_name(os.path.normpath(root))
+
+
+def _legacy_encode_root(root):
+    """The separator-only name okfmem used before #81. Kept only to find and
+    retire links it created in a dir Claude Code never reads."""
     root = os.path.normpath(root)
     if os.name == "nt":
         root = root.replace(":", "-")
@@ -356,7 +403,15 @@ def build_registry(store, claude_projects):
         if not target.startswith(store_projects + os.sep) and target != store_projects:
             continue  # symlink points outside this store — not ours
         project = os.path.basename(target)
-        root = decode_root(entry)
+        root, problem = _resolve_encoded(entry)
+        if problem:
+            drift.append(f"{entry}: {problem} — not recorded")
+            continue
+        if not os.path.isdir(root):
+            # A guessed root that isn't on disk is how `…/checkouts/116-Labs-gaal`
+            # reached a registry (#81); report it rather than record it.
+            drift.append(f"{entry}: decodes to {root}, which does not exist — not recorded")
+            continue
         mapping[root] = project
         if os.path.basename(root) != project:
             overrides[root] = project
@@ -1359,6 +1414,9 @@ def link_project_memory(
     ADOPT the pages into the store, gated by `assume_yes`/`non_interactive`
     (rung-2; see `_adopt_and_link_orphan`). `non_interactive` defaults to
     "stdin is not a TTY" when left None.
+
+    Once the correct dir is linked, okfmem's own link in the dir an older
+    okfmem used (`_legacy_encode_root`) is removed (`_retire_legacy_link`, #81).
     """
     if non_interactive is None:
         non_interactive = not sys.stdin.isatty()
@@ -1383,6 +1441,49 @@ def link_project_memory(
         seeded = True
     target_real = os.path.realpath(target)
     proj_dir = os.path.join(claude_projects, encode_root(root))
+    status, msg = _link_memory_dir(
+        proj_dir, target_real, name, seeded, dry_run, assume_yes, non_interactive
+    )
+    if status != "skip":
+        retired = _retire_legacy_link(claude_projects, root, proj_dir, target_real, dry_run)
+        if retired:
+            status, msg = "changed", msg + retired
+    return status, msg
+
+
+def _retire_legacy_link(claude_projects, root, proj_dir, target_real, dry_run):
+    """Remove okfmem's own link at the pre-#81 encoded dir once the correct dir
+    is linked, so a re-run moves the link. Only a symlink or junction to
+    `target_real` is removed; a copy or anything else holds data and is left
+    alone. Returns a message suffix, or "" if nothing to do."""
+    legacy_dir = os.path.join(claude_projects, _legacy_encode_root(root))
+    if os.path.normcase(legacy_dir) == os.path.normcase(proj_dir):
+        return ""
+    link = os.path.join(legacy_dir, "memory")
+    is_symlink = os.path.islink(link)
+    if not (is_symlink or _is_junction(link)):
+        return ""
+    if os.path.normcase(os.path.realpath(link)) != os.path.normcase(target_real):
+        return ""
+    entry = os.path.basename(legacy_dir)
+    if dry_run:
+        return f"; would remove old link in {entry}"
+    if is_symlink:
+        os.remove(link)
+    else:
+        os.rmdir(link)  # unlink the reparse point, not the target
+    try:
+        os.rmdir(legacy_dir)  # only if okfmem's link was all it held
+    except OSError:
+        pass
+    return f"; removed old link in {entry}"
+
+
+def _link_memory_dir(
+    proj_dir, target_real, name, seeded, dry_run, assume_yes, non_interactive
+):
+    """Create/repair `<proj_dir>/memory` -> `target_real`; the body of
+    `link_project_memory` once the root, name and store project are resolved."""
     link = os.path.join(proj_dir, "memory")
 
     # A tier-3 managed copy is a plain directory carrying our marker (the box
@@ -2085,7 +2186,12 @@ def cmd_run(
     if harnesses.get("codex") or harnesses.get("antigravity"):
         existing = _load_registry(os.path.join(store, "registry.json"))
         for key in ("map", "overrides"):
-            reg[key] = {**existing.get(key, {}), **reg[key]}
+            # A local root that is gone is drift, as in `build_registry` (#81).
+            kept = {
+                r: p for r, p in existing.get(key, {}).items()
+                if _is_foreign_root(r) or os.path.isdir(r)
+            }
+            reg[key] = {**kept, **reg[key]}
     if resolved.get("root"):
         reg["map"][resolved["root"]] = resolved["project"]
     reg_path, reg_changed, merged = write_registry(store, reg, dry_run)

@@ -162,11 +162,16 @@ def unlink_project_memory(store, claude_projects, reg, dry_run):
     """Remove the per-project memory link for every root registered in
     `reg["map"]`. Never removes a real (unmanaged) directory. A foreign
     (other-machine) root simply resolves to a link path that doesn't exist
-    here and reports 'absent'. Returns a list of (root, project, action)."""
+    here and reports 'absent'. okfmem's own link in the pre-#81 dir is removed
+    too. Returns a list of (root, project, action)."""
     actions = []
     for root, project in sorted(reg.get("map", {}).items()):
-        link = os.path.join(claude_projects, mi.encode_root(root), "memory")
+        proj_dir = os.path.join(claude_projects, mi.encode_root(root))
+        link = os.path.join(proj_dir, "memory")
         actions.append((root, project, _teardown_link(link, dry_run)))
+        target_real = os.path.realpath(os.path.join(store, "projects", project))
+        if mi._retire_legacy_link(claude_projects, root, proj_dir, target_real, dry_run):
+            actions.append((root, project, "removed (pre-#81 dir)"))
     return actions
 
 

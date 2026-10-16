@@ -1,7 +1,6 @@
 import os
 import shutil
 import subprocess
-import sys
 
 import pytest
 
@@ -16,19 +15,20 @@ def test_encode_root_matches_decode_root_round_trip(tmp_path):
     project = tmp_path / "my-cool-project"
     project.mkdir()
     encoded = mi.encode_root(str(project))
-    if os.name != "nt":
-        # POSIX: only '/' is meaningful, so encode is a plain separator swap.
-        # On Windows the drive colon is also encoded ('C:\\' -> 'C--'), so this
-        # naive replacement doesn't hold -- the round-trip below is the invariant.
-        assert encoded == str(project).replace(os.sep, "-")
+    assert all(c.isalnum() and c.isascii() or c == "-" for c in encoded)
     assert mi.decode_root(encoded) == os.path.normpath(str(project))
 
 
-@pytest.mark.skipif(sys.platform == "win32",
-                     reason="asserts the POSIX-only replacement rule")
-def test_encode_root_posix_leaves_colon_alone():
-    # No drive letters on POSIX -- only '/' is meaningful to replace.
-    assert mi.encode_root("/Users/you/okfmem") == "-Users-you-okfmem"
+@pytest.mark.parametrize("root, expected", [
+    ("/Users/you/okfmem", "-Users-you-okfmem"),
+    ("/Users/you/Library/Application Support/gaal/checkouts/116-Ideas/gaal",
+     "-Users-you-Library-Application-Support-gaal-checkouts-116-Ideas-gaal"),
+    ("/home/you/.local/share/gaal", "-home-you--local-share-gaal"),
+    ("/home/you/my_proj", "-home-you-my-proj"),
+    ("/home/you/a:b", "-home-you-a-b"),
+])
+def test_encode_root_matches_claude_code_dir_name(root, expected):
+    assert mi.encode_root(root) == expected
 
 
 def test_encode_root_windows_double_dashes_the_drive_colon(monkeypatch):
@@ -43,6 +43,12 @@ def test_encode_root_windows_double_dashes_the_drive_colon(monkeypatch):
     monkeypatch.setattr(mi.os.path, "isdir",
                          lambda p: True if p == "C:\\" else real_isdir(p))
     assert mi._windows_drive_root(tokens) == ("C:\\", 1)
+
+
+def test_encode_root_windows_dot_and_space(monkeypatch):
+    monkeypatch.setattr(mi.os, "name", "nt")
+    assert mi.encode_root("C:\\Users\\you\\My Repos\\v1.2_x") == (
+        "C--Users-you-My-Repos-v1-2-x")
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +425,108 @@ def test_honors_registry_override_for_project_name(tmp_path, monkeypatch):
     link = os.path.join(str(claude_projects), encoded, "memory")
     assert os.path.realpath(link) == os.path.realpath(
         os.path.join(str(store), "projects", "renamed"))
+
+
+@pytest.fixture
+def spaced_env(env, monkeypatch):
+    root = env["root"].parent / "Application Support" / ".local" / "myproj"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(mi, "_current_git_root", lambda: str(root))
+    env["root"] = root
+    env["legacy"] = os.path.join(
+        env["claude_projects"], mi._legacy_encode_root(str(root)), "memory")
+    env["target"] = os.path.realpath(
+        os.path.join(env["store"], "projects", "myproj"))
+    return env
+
+
+def _run(env, dry_run=False):
+    return mi.link_project_memory(
+        env["store"], env["claude_projects"], env["harnesses"], env["reg"],
+        dry_run=dry_run)
+
+
+def test_links_claude_code_dir_for_root_with_space_and_dot(spaced_env):
+    status, _ = _run(spaced_env)
+    assert status == "changed"
+    link = _link_path(spaced_env)
+    assert " " not in os.path.basename(os.path.dirname(link))
+    assert os.path.realpath(link) == spaced_env["target"]
+    assert not os.path.lexists(spaced_env["legacy"])
+
+
+def test_rerun_moves_link_from_legacy_dir(spaced_env):
+    os.makedirs(os.path.dirname(spaced_env["legacy"]))
+    os.symlink(spaced_env["target"], spaced_env["legacy"],
+               target_is_directory=True)
+
+    status, msg = _run(spaced_env)
+    assert status == "changed"
+    assert "removed old link" in msg
+    assert os.path.realpath(_link_path(spaced_env)) == spaced_env["target"]
+    assert not os.path.lexists(os.path.dirname(spaced_env["legacy"]))
+    assert _run(spaced_env)[0] == "ok"
+
+
+def test_rerun_adopts_pages_claude_wrote_and_retires_legacy_link(spaced_env):
+    os.makedirs(os.path.dirname(spaced_env["legacy"]))
+    os.symlink(spaced_env["target"], spaced_env["legacy"],
+               target_is_directory=True)
+    orphan = _link_path(spaced_env)
+    os.makedirs(orphan)
+    with open(os.path.join(orphan, "note.md"), "w", encoding="utf-8") as f:
+        f.write("claude wrote this\n")
+
+    status, msg = mi.link_project_memory(
+        spaced_env["store"], spaced_env["claude_projects"],
+        spaced_env["harnesses"], spaced_env["reg"], dry_run=False,
+        assume_yes=True)
+    assert status == "changed" and "adopted 1 page(s)" in msg
+    assert os.path.isfile(os.path.join(spaced_env["target"], "note.md"))
+    assert not os.path.lexists(spaced_env["legacy"])
+
+
+def test_dry_run_reports_legacy_link_without_removing_it(spaced_env):
+    os.makedirs(os.path.dirname(spaced_env["legacy"]))
+    os.symlink(spaced_env["target"], spaced_env["legacy"],
+               target_is_directory=True)
+    status, msg = _run(spaced_env, dry_run=True)
+    assert status == "changed" and "would remove old link" in msg
+    assert os.path.islink(spaced_env["legacy"])
+    assert not os.path.lexists(os.path.dirname(_link_path(spaced_env)))
+
+
+def test_legacy_link_to_another_project_is_left_alone(spaced_env, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    os.makedirs(os.path.dirname(spaced_env["legacy"]))
+    os.symlink(str(elsewhere), spaced_env["legacy"], target_is_directory=True)
+    status, msg = _run(spaced_env)
+    assert status == "changed" and "old link" not in msg
+    assert os.path.islink(spaced_env["legacy"])
+
+
+# ---------------------------------------------------------------------------
+# build_registry
+# ---------------------------------------------------------------------------
+
+def test_build_registry_records_root_with_space_and_dot(spaced_env):
+    _run(spaced_env)
+    reg, drift = mi.build_registry(spaced_env["store"],
+                                   spaced_env["claude_projects"])
+    assert reg["map"] == {os.path.normpath(str(spaced_env["root"])): "myproj"}
+    assert drift == []
+
+
+def test_build_registry_skips_root_missing_on_disk(env):
+    ghost = env["root"].parent / "116-Labs" / "gone"
+    proj_dir = os.path.join(env["claude_projects"], mi.encode_root(str(ghost)))
+    os.makedirs(proj_dir)
+    os.symlink(os.path.join(env["store"], "projects", "myproj"),
+               os.path.join(proj_dir, "memory"), target_is_directory=True)
+    reg, drift = mi.build_registry(env["store"], env["claude_projects"])
+    assert reg["map"] == {}
+    assert len(drift) == 1 and "does not exist" in drift[0]
 
 
 # ---------------------------------------------------------------------------
