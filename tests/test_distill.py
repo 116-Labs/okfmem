@@ -168,6 +168,18 @@ def test_store_project_for_claude_uses_registry_then_basename(tmp_path):
     assert md.store_project_for("claude-code", token, {}) == "demoproj"
 
 
+def test_store_project_for_colliding_dirs_without_mapping_is_no_project(tmp_path):
+    # `a.b` and `a-b` share one Claude dir name; build_registry leaves it unmapped.
+    for leaf in ("a.b", "a-b"):
+        (tmp_path / leaf).mkdir()
+    token = encode_root(str(tmp_path / "a-b"))
+    assert md.store_project_for("claude-code", token, {}) is None
+    turns = [turn(token, f"s{i}", "alpha beta gamma", harness="claude-code")
+             for i in range(4)]
+    assert md.collect_candidates(turns, {"a.b": [], "a-b": []}, {},
+                                 min_sessions=3, all_projects=True) == {}
+
+
 # ---------------------------------------------------------------------------
 # determinism / idempotency
 # ---------------------------------------------------------------------------

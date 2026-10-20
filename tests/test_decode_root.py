@@ -64,6 +64,13 @@ def test_same_encoded_full_matches_are_reported_ambiguous(tmp_path):
     assert problem and "several" in problem
 
 
+def test_decode_root_leaves_an_ambiguous_name_unresolved(tmp_path):
+    for leaf in ("a.b", "a-b"):
+        (tmp_path / leaf).mkdir()
+    encoded = _encode(str(tmp_path / "a-b"))
+    assert mi.decode_root(encoded) == encoded
+
+
 def test_legacy_name_picks_the_sibling_it_spells(tmp_path):
     for leaf in ("Application Support", "Application-Support"):
         (tmp_path / leaf / "gaal").mkdir(parents=True)
