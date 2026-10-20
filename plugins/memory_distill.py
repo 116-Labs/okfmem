@@ -289,10 +289,13 @@ def store_project_for(harness, token, registry_map):
     """Map a corpus turn's `project` field to a store project name.
 
     claude-code: the token is Claude's encoded cwd (`-Users-you-proj`); decode
-    (filesystem-probed) then registry-map, falling back to basename. agy: the
-    token is already a workspace basename — use it directly."""
+    (filesystem-probed) then registry-map, falling back to basename; None when
+    the token decodes to no single directory (#89). agy: the token is already a
+    workspace basename — use it directly."""
     if harness == "claude-code":
         path = decode_root(token)
+        if path == token:
+            return None
         return registry_map.get(path) or os.path.basename(path.rstrip("/")) or token
     return os.path.basename((token or "").rstrip("/")) or token
 
@@ -342,7 +345,7 @@ def collect_candidates(turns, coverage, registry_map, *,
         if roles is not None and t.get("role") not in roles:
             continue
         proj = store_project_for(t.get("harness"), t.get("project"), registry_map)
-        if proj not in coverage and not all_projects:
+        if proj is None or (proj not in coverage and not all_projects):
             continue
         sess = t.get("session_id")
         proj_sessions.setdefault(proj, set()).add(sess)

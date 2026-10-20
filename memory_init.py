@@ -364,12 +364,12 @@ def decode_root(encoded):
     On Windows, an encoded path like `C--Users-name-project` (or the bare
     `C-Users-name-project`) starts with a drive letter instead of a leading
     slash; the probe starts from `C:\\` for that case. An unresolvable tail is
-    kept verbatim under the deepest directory found, and a Windows name with no
-    drive (a UNC share) is returned as given. See `_resolve_encoded` for when
-    the answer cannot be trusted.
+    kept verbatim under the deepest directory found. A name `_resolve_encoded`
+    cannot trust (no drive, or several directories match, #89) is returned as
+    given, so callers never act on a guessed directory.
     """
-    path, _ = _resolve_encoded(encoded)
-    return encoded if path is None else path
+    path, problem = _resolve_encoded(encoded)
+    return encoded if path is None or problem else path
 
 
 def _resolve_encoded(encoded):
