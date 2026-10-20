@@ -1,5 +1,5 @@
 # Gaal project profile. Edit freely: `gaal onboard` keeps your values on re-runs.
-# Schema: https://github.com/116-Labs/gaal/blob/main/schemas/project.schema.json
+# Schema: https://github.com/116-Ideas/gaal/blob/main/schemas/project.schema.json
 schema_version: 1
 repo: 116-Labs/okfmem
 default_branch: main
@@ -20,7 +20,7 @@ commits:
 branches:
   prefix: gaal/
 merge:
-  queue: true
+  queue: false
   method: squash
   message_source: commits
 review:
@@ -31,6 +31,11 @@ review:
   identity:
     reviewer: separate
     login: 116-labs-gaal-review[bot]
+  dismiss_stale_approvals: true
+  require_last_push_approval: false
+  code_owner_reviews: true
+  required_checks:
+    - verify
 identities:
   push:
     - 116-labs-gaal-push[bot]
