@@ -37,7 +37,8 @@ Guards:
   - A pre-commit rebase conflict confined to per-project STATE.md snapshots
     is auto-resolved (#25): STATE.md is a whole-file last-write-wins snapshot,
     so the newer `modified:` frontmatter timestamp wins (tie → the local,
-    actively-saving side). Any conflict touching a durable page or MEMORY.md
+    actively-saving side); registry.json and bookkeeping-only page conflicts
+    are merged too (#80). Any other conflict on a durable page or MEMORY.md
     aborts the half-done rebase, commits nothing, and refuses to push (never
     force) — the caller surfaces it to the user. A rebase already in progress
     at call time (a human hand-resolving one) makes the whole sync bail early
@@ -52,6 +53,7 @@ Store location: --store, else $OKFMEM_STORE, else ~/okfmem-store.
 """
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -64,10 +66,29 @@ from datetime import datetime, timezone
 LOCK_STALE_SECONDS = 600  # 10 minutes
 
 
-def _git(store, *args, timeout=120):
+def _git(store, *args, env=None, timeout=120, encoding=None):
+    cmd_env = None
+    if env is not None:
+        cmd_env = {**os.environ, **env}
     return subprocess.run(
-        ["git", "-C", store, *args], capture_output=True, text=True, timeout=timeout
+        ["git", "-C", store, *args],
+        capture_output=True,
+        text=True,
+        encoding=encoding,
+        timeout=timeout,
+        env=cmd_env,
     )
+
+
+def _show_blob(store, stage, path):
+    """`git show :<stage>:<path>` decoded as UTF-8 (not the locale code page,
+    since the merged text is written back as UTF-8). None on a missing blob or
+    undecodable bytes."""
+    try:
+        r = _git(store, "show", f":{stage}:{path}", encoding="utf-8")
+    except UnicodeDecodeError:
+        return None
+    return r.stdout if r.returncode == 0 else None
 
 
 def _git_dir(store):
@@ -298,16 +319,152 @@ def _side_commit_ts(store, path, ref):
     return ts
 
 
-def _auto_resolve_state_conflicts(store, prefer_local):
-    """#25: resolve the CURRENT unmerged set iff it is confined to per-project
-    STATE.md snapshots. Returns True with every path resolved + staged, or
-    False having decided nothing is safe to touch (callers then unwind
-    exactly as before #25 — abort the rebase / reset + stash pop).
+_NOOP_EDITOR = "true"
+
+
+def _merge_registry_conflict(incoming_text, local_text):
+    """Merge stage 2 (incoming) and stage 3 (local) registry JSON content (#80).
+    The registry is a map whose keys are per-machine native paths, so a union
+    of both sides is always the right answer. Where both sides set the same key,
+    the incoming value wins, and the local value is reported to stderr.
+    Sections ('map', 'overrides') are sorted by key.
+    Returns formatted JSON string with trailing newline, or None if either side
+    is malformed (including a non-object section), so no side's entries are lost."""
+    try:
+        incoming = json.loads(incoming_text)
+        local = json.loads(local_text)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(incoming, dict) or not isinstance(local, dict):
+        return None
+
+    def merge_section(key):
+        out = {}
+        inc_sec = incoming.get(key, {})
+        loc_sec = local.get(key, {})
+        if not isinstance(inc_sec, dict) or not isinstance(loc_sec, dict):
+            return None
+        for root, proj in loc_sec.items():
+            out[root] = proj
+        for root, proj in inc_sec.items():
+            if root in out and out[root] != proj:
+                print(
+                    f"okfmem: registry.json conflict on '{root}': "
+                    f"incoming '{proj}' wins (local was '{out[root]}')",
+                    file=sys.stderr,
+                )
+            out[root] = proj
+        return dict(sorted(out.items()))
+
+    merged = dict(local)
+    merged.update(incoming)
+    for key in ("map", "overrides"):
+        section = merge_section(key)
+        if section is None:
+            return None
+        merged[key] = section
+    return json.dumps(merged, indent=2) + "\n"
+
+
+# Per-machine access bookkeeping the Stop hook bumps (memory_consolidate
+# apply_bumps) on every machine, including pull-only workers that never sync.
+_BOOKKEEPING_KEYS = ("last_accessed", "access_count")
+_BOOKKEEPING_LINE = re.compile(r"^(last_accessed|access_count):[ \t]*(.*?)[ \t]*$")
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _frontmatter_span(text):
+    """(start, end) of the frontmatter body lines, or None without frontmatter."""
+    if not text.startswith("---\n"):
+        return None
+    end = text.find("\n---", 3)
+    if end == -1:
+        return None
+    return 4, end + 1
+
+
+def _split_bookkeeping(text):
+    """(text minus the bookkeeping frontmatter lines, {key: raw value}), or None
+    when the page has no frontmatter."""
+    span = _frontmatter_span(text)
+    if span is None:
+        return None
+    start, end = span
+    kept, values = [], {}
+    for ln in text[start:end].splitlines(keepends=True):
+        m = _BOOKKEEPING_LINE.match(ln.rstrip("\n"))
+        if m:
+            values[m.group(1)] = m.group(2)
+        else:
+            kept.append(ln)
+    return text[:start] + "".join(kept) + text[end:], values
+
+
+def _merge_bookkeeping_conflict(base_text, incoming_text, local_text):
+    """Resolve a durable-page conflict where one side changed only the access
+    bookkeeping (#80): keep the other side's content, with the later
+    `last_accessed` and the higher `access_count`. Returns the merged text, or
+    None when both sides changed real content (a human's job)."""
+    inc = _split_bookkeeping(incoming_text)
+    loc = _split_bookkeeping(local_text)
+    if inc is None or loc is None:
+        return None
+    base = _split_bookkeeping(base_text) if base_text is not None else None
+    if inc[0] == loc[0] or (base is not None and loc[0] == base[0]):
+        chosen = incoming_text
+    elif base is not None and inc[0] == base[0]:
+        chosen = local_text
+    else:
+        return None
+
+    merged = {}
+    dates = [v["last_accessed"] for v in (inc[1], loc[1]) if "last_accessed" in v]
+    if dates:
+        if not all(_ISO_DATE.match(d) for d in dates):
+            return None
+        merged["last_accessed"] = max(dates)
+    counts = [v["access_count"] for v in (inc[1], loc[1]) if "access_count" in v]
+    if counts:
+        if not all(c.isdigit() for c in counts):
+            return None
+        merged["access_count"] = str(max(int(c) for c in counts))
+
+    start, end = _frontmatter_span(chosen)
+    lines = []
+    for ln in chosen[start:end].splitlines(keepends=True):
+        m = _BOOKKEEPING_LINE.match(ln.rstrip("\n"))
+        if m and m.group(1) in merged:
+            lines.append(f"{m.group(1)}: {merged.pop(m.group(1))}\n")
+        else:
+            lines.append(ln)
+    lines.extend(f"{k}: {merged[k]}\n" for k in _BOOKKEEPING_KEYS if k in merged)
+    return chosen[:start] + "".join(lines) + chosen[end:]
+
+
+def _is_bookkeeping_page(path):
+    """A durable page that carries access bookkeeping: any `.md` but the
+    MEMORY*.md indexes and the STATE.md snapshot."""
+    name = path.rsplit("/", 1)[-1]
+    return name.endswith(".md") and not name.startswith("MEMORY") and name != "STATE.md"
+
+
+def _auto_resolve_conflicts(store, prefer_local):
+    """Resolve the CURRENT unmerged set if it is confined to per-project
+    STATE.md snapshots, registry.json and/or bookkeeping-only durable pages
+    (#25, #80). Returns True with every
+    path resolved + staged, or False having decided nothing is safe to touch
+    (callers then unwind exactly as before — abort the rebase / reset + stash pop).
 
     STATE.md is a whole-file last-write-wins snapshot, so "which side wins"
     is decided by the newer `modified:` frontmatter timestamp; `prefer_local`
     only breaks an exact tie (sync — this machine is actively saving — passes
     True; read-side pull passes False).
+
+    registry.json (#80) is a union of native-path maps from both sides, with
+    incoming winning on key collision and local reported to stderr.
+
+    A durable page (#80) resolves only when one side changed nothing but its
+    `last_accessed`/`access_count` bookkeeping (see _merge_bookkeeping_conflict).
 
     Stage mapping (verified empirically; identical at both conflict points
     this hooks — a rebase content conflict and a post-rebase autostash-pop
@@ -315,91 +472,105 @@ def _auto_resolve_state_conflicts(store, prefer_local):
     (`--theirs`) is this machine's side (the replayed local commit, or the
     stashed local working-tree edit).
 
-    `modified:`-less fallback (#25/#26): a STATE.md whose frontmatter carries
-    no parseable `modified:` (a legacy page, or one not yet re-saved under the
-    `modified:`-stamping template) falls back to that side's git commit time
-    so auto-resolve still engages instead of silently deferring the whole
-    common-transition case to the human path. Ref → side (verified empirically
-    at both points): the incoming/ours side (stage 2) is always the current
-    branch tip, so `HEAD -- <path>` dates it (`@{u}` is unusable mid-rebase —
-    HEAD is detached). The local/theirs side (stage 3) is `REBASE_HEAD` while a
-    rebase is in progress (the replayed local commit) and `stash@{0}` once the
-    rebase has finished (the retained autostash holding the working-tree edit).
-
     Abort-safety guard: this function returns False — resolving NOTHING —
     unless every one of these holds for the ENTIRE unmerged set:
       - the set is non-empty and enumerable;
-      - every path's basename is exactly `STATE.md` (a durable `<topic>.md`
-        or `MEMORY.md` in the set fails this and reaches the human);
+      - every path is `registry.json`, a `STATE.md`, or a durable page (a
+        `MEMORY*.md` index or any other file in the set reaches the human);
       - both sides' blobs exist (no add/delete conflicts);
-      - both sides yield a timestamp — a parseable `modified:` OR, failing
-        that, a git commit time. Only when BOTH sources are unavailable for a
-        side does it defer to the human.
-    The git-time fallback only ever supplies a timestamp for a path that has
-    already passed the STATE.md-only gate above, so it never weakens the
-    abort-safety guard: a conflict touching any `<topic>.md`/`MEMORY.md` still
-    aborts. All decisions are made before the first write, so a refusal never
-    leaves a half-resolved tree behind."""
+      - STATE.md sides yield timestamps; registry.json sides yield valid JSON;
+        durable pages differ on one side only in bookkeeping.
+    All decisions are made before the first write, so a refusal never leaves a
+    half-resolved tree behind."""
     paths = _unmerged_paths(store)
     if not paths:
         return False
-    if any(p.rsplit("/", 1)[-1] != "STATE.md" for p in paths):
-        return False  # durable memory content is in dispute — a human's job
-    # Local/theirs side (stage 3) git-time ref depends on the conflict point:
-    # a rebase still in progress means we're at a content conflict on the
-    # replayed local commit (REBASE_HEAD); otherwise the rebase finished and
-    # this is the autostash-pop conflict, whose local edit lives in the
-    # retained stash (stash@{0}).
-    local_ref = "REBASE_HEAD" if _rebase_in_progress(store) else "stash@{0}"
-    picks = []
     for p in paths:
-        incoming = _git(store, "show", f":2:{p}")
-        local = _git(store, "show", f":3:{p}")
-        if incoming.returncode != 0 or local.returncode != 0:
-            return False  # add/delete conflict — no both-sides snapshot
-        t_inc = _state_modified_ts(incoming.stdout)
-        if t_inc is None:
-            t_inc = _side_commit_ts(store, p, "HEAD")
-        t_loc = _state_modified_ts(local.stdout)
-        if t_loc is None:
-            t_loc = _side_commit_ts(store, p, local_ref)
-        if t_inc is None or t_loc is None:
-            return False  # neither frontmatter nor git time — human path
-        if t_loc != t_inc:
-            local_wins = t_loc > t_inc
+        if (p != "registry.json" and p.rsplit("/", 1)[-1] != "STATE.md"
+                and not _is_bookkeeping_page(p)):
+            return False  # an index or unknown file is in dispute — a human's job
+
+    local_ref = "REBASE_HEAD" if _rebase_in_progress(store) else "stash@{0}"
+    state_picks = []
+    written_resolutions = []
+    for p in paths:
+        incoming = _show_blob(store, 2, p)
+        local = _show_blob(store, 3, p)
+        if incoming is None or local is None:
+            return False  # add/delete conflict or non-UTF-8 — no safe snapshot
+
+        if p == "registry.json":
+            merged_json = _merge_registry_conflict(incoming, local)
+            if merged_json is None:
+                return False
+            written_resolutions.append((p, merged_json))
+        elif _is_bookkeeping_page(p):
+            merged_page = _merge_bookkeeping_conflict(
+                _show_blob(store, 1, p), incoming, local)
+            if merged_page is None:
+                return False  # durable memory content is in dispute — a human's job
+            written_resolutions.append((p, merged_page))
         else:
-            local_wins = prefer_local
-        picks.append((p, "--theirs" if local_wins else "--ours"))
-    for p, side in picks:
+            t_inc = _state_modified_ts(incoming)
+            if t_inc is None:
+                t_inc = _side_commit_ts(store, p, "HEAD")
+            t_loc = _state_modified_ts(local)
+            if t_loc is None:
+                t_loc = _side_commit_ts(store, p, local_ref)
+            if t_inc is None or t_loc is None:
+                return False  # neither frontmatter nor git time — human path
+            if t_loc != t_inc:
+                local_wins = t_loc > t_inc
+            else:
+                local_wins = prefer_local
+            state_picks.append((p, "--theirs" if local_wins else "--ours"))
+
+    for p, side in state_picks:
         if _git(store, "checkout", side, "--", p).returncode != 0:
             return False
         if _git(store, "add", "--", p).returncode != 0:
             return False
+
+    for p, content in written_resolutions:
+        full_path = os.path.join(store, *p.split("/"))
+        try:
+            with open(full_path, "w", encoding="utf-8", newline="") as f:
+                f.write(content)
+        except OSError:
+            return False
+        if _git(store, "add", "--", p).returncode != 0:
+            return False
+
     return True
 
 
-def _finish_rebase_with_state_autoresolve(store, prefer_local):
-    """We just saw `rebase` fail mid-flight. If (and only if) every stop is a
-    STATE.md-only conflict, resolve each and drive the rebase to completion.
-    Returns True when the rebase fully finished; False when anything wasn't
-    safely auto-resolvable — the caller then runs the same `rebase --abort`
-    unwind as before #25 (which also re-applies the autostash, so a partial
-    walk loses nothing).
+_auto_resolve_state_conflicts = _auto_resolve_conflicts
 
-    A rebase replays commits one at a time, so this loops: resolve the
-    current stop, `--continue`, and handle the next stop if a later commit
-    conflicts too. A commit whose STATE.md change is superseded by the
-    incoming side can become empty; modern git drops it on `--continue`,
-    older git stops and asks for `--skip` — both are handled."""
+
+def _finish_rebase_with_autoresolve(store, prefer_local):
+    """We just saw `rebase` fail mid-flight. If (and only if) every stop is an
+    auto-resolvable conflict (STATE.md, registry.json or a bookkeeping-only
+    durable page), resolve each and drive
+    the rebase to completion. Returns True when the rebase fully finished;
+    False when anything wasn't safely auto-resolvable — the caller then runs
+    the same `rebase --abort` unwind as before #25 (which also re-applies the
+    autostash, so a partial walk loses nothing)."""
     if not _rebase_in_progress(store):
         return False  # rebase failed without leaving a conflict to resolve
     for _ in range(100):  # hard bound: a rebase replays finitely many commits
         if not _rebase_in_progress(store):
             return True
         if _unmerged_paths(store):
-            if not _auto_resolve_state_conflicts(store, prefer_local):
+            if not _auto_resolve_conflicts(store, prefer_local):
                 return False
-        cont = _git(store, "-c", "core.editor=true", "rebase", "--continue")
+        cont = _git(
+            store,
+            "-c",
+            f"core.editor={_NOOP_EDITOR}",
+            "rebase",
+            "--continue",
+            env={"GIT_EDITOR": _NOOP_EDITOR},
+        )
         if cont.returncode != 0:
             blob = ((cont.stdout or "") + (cont.stderr or "")).lower()
             if "--skip" in blob and not _unmerged_paths(store):
@@ -414,6 +585,9 @@ def _finish_rebase_with_state_autoresolve(store, prefer_local):
             # else: --continue/--skip surfaced the NEXT commit's conflict —
             # loop back and try to resolve that one too.
     return False
+
+
+_finish_rebase_with_state_autoresolve = _finish_rebase_with_autoresolve
 
 
 def _release_lock(store, fd):
@@ -491,14 +665,12 @@ def sync_store(store, message, do_push=True, do_pull=True):
                         # tree is clean here and this pull's own rebase is safe.
                         rb = _git(store, "rebase", "--autostash", "@{u}")
                         if rb.returncode != 0:
-                            # Rebase failed mid-flight. #25: a conflict
-                            # confined to STATE.md snapshots is decided
-                            # by the newer `modified:` frontmatter
-                            # (prefer_local=True — this machine is the
-                            # one actively saving); anything touching a
-                            # durable page or MEMORY.md falls through to
-                            # the normal abort so a human reconciles it.
-                            if not _finish_rebase_with_state_autoresolve(
+                            # Rebase failed mid-flight. #25, #80: a conflict
+                            # confined to STATE.md, registry.json or a
+                            # bookkeeping-only page is auto-resolved
+                            # (prefer_local=True); a content conflict on a
+                            # page or MEMORY.md takes the normal abort.
+                            if not _finish_rebase_with_autoresolve(
                                 store, prefer_local=True
                             ):
                                 _git(store, "rebase", "--abort")
@@ -513,15 +685,15 @@ def sync_store(store, message, do_push=True, do_pull=True):
                             # The rebase completed (branch moved), but
                             # the trailing autostash-pop conflicted —
                             # git doesn't reflect that in the rebase's
-                            # exit code. #25: if the pop conflict is
-                            # STATE.md-only, resolve it in place and
-                            # drop the retained autostash; otherwise
+                            # exit code. #25, #80: if the pop conflict is
+                            # STATE.md, registry.json or bookkeeping-only, resolve in
+                            # place and drop the retained autostash; otherwise
                             # undo the rebase and restore the original
                             # dirty tree exactly: ORIG_HEAD is the
                             # pre-rebase commit, and the stash (never
                             # dropped because the pop conflicted)
                             # re-applies cleanly there.
-                            if _auto_resolve_state_conflicts(store, prefer_local=True):
+                            if _auto_resolve_conflicts(store, prefer_local=True):
                                 _git(store, "stash", "drop")
                             else:
                                 _git(store, "reset", "--hard", "ORIG_HEAD")
