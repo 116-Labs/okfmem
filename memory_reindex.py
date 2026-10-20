@@ -433,8 +433,8 @@ class Scan(object):
 def resolve_target(args):
     """The memory dir to inspect. Explicit path wins; else
     ``<store>/projects/<project>``, with the project resolved the same way
-    `okfmem graduate` does (``--project``, else the cwd's git-root name with a
-    worktree mapped to its main checkout, registry overrides applied)."""
+    `okfmem graduate` does (``--project``, else `canonical_project_name` for
+    the cwd's git root with a worktree mapped to its main checkout)."""
     if args.target:
         d = os.path.abspath(os.path.expanduser(args.target))
         if not os.path.isdir(d):
@@ -448,14 +448,18 @@ def resolve_target(args):
         # curate inventory script, which has no business loading the init
         # module just to read an index file.
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from memory_init import _current_project_root, _load_registry
+        from memory_init import (
+            _current_project_root,
+            _load_registry,
+            canonical_project_name,
+        )
         root = _current_project_root()
         if not root:
             raise ReindexError(
                 "no TARGET given and cwd is not inside a git repo -- pass a "
                 "memory dir, or --project NAME")
         reg = _load_registry(os.path.join(store, "registry.json"))
-        project = reg.get("overrides", {}).get(root, os.path.basename(root))
+        project = canonical_project_name(root, reg, store)
 
     d = os.path.join(store, "projects", project)
     if not os.path.isdir(d):
