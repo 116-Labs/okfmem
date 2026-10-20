@@ -12,11 +12,15 @@ Sequence:  fetch  →  no-op if already up to date  →
 
 Fail-open contract (this is the part #16's SessionStart hook depends on):
   - Offline / fetch failure: swallowed. Never raises, never exits non-zero.
-  - Rebase conflict confined to per-project STATE.md snapshots: auto-resolved
-    (#25) — STATE.md is a whole-file last-write-wins snapshot, so the newer
-    `modified:` frontmatter timestamp wins (tie → the incoming side; a
-    read-side pull is consuming, not saving). Any conflict touching a durable
-    page or MEMORY.md: the half-done rebase is aborted (tree left clean) and
+  - Rebase conflict confined to per-project STATE.md snapshots or
+    registry.json: auto-resolved (#25, #80) — STATE.md is a whole-file
+    last-write-wins snapshot, so the newer `modified:` frontmatter timestamp
+    wins (tie → the incoming side; a read-side pull is consuming, not saving).
+    registry.json is a union of native-path maps from both sides (incoming wins
+    on key collisions). A durable page where one side changed only its
+    `last_accessed`/`access_count` bookkeeping keeps the other side's content
+    with the later date and higher count. Any other conflict on a durable page,
+    or one on MEMORY.md: the half-done rebase is aborted (tree left clean) and
     reported; `okfmem pull` run manually exits 1 so a human notices and
     resolves the store by hand. This is the ONLY non-zero exit case.
   - No upstream configured, or already up to date: clean no-op, exit 0.
@@ -91,6 +95,7 @@ def pull_store(store, timeout=DEFAULT_TIMEOUT):
         return res
 
     lock = None
+    registry_note = ""
     try:
         # Short lock timeout: this may run on the SessionStart path and must
         # never make a session wait meaningfully long. A concurrent okfmem
@@ -111,6 +116,30 @@ def pull_store(store, timeout=DEFAULT_TIMEOUT):
         if upstream.returncode != 0:
             res["reason"] = "no upstream configured — nothing to pull."
             return res
+
+        # #80: On read-only machines (e.g. gaal workers), `okfmem init --yes` writes
+        # this machine's roots into registry.json but never commits them. A trailing
+        # uncommitted registry edit causes every later `pull --rebase --autostash`
+        # to conflict when popping the stash after remote changes.
+        # Commit the pending registry.json edit locally before integrating so the
+        # edit becomes a normal commit that rebases cleanly over upstream.
+        # Never while a human is mid-rebase: `add` would mark a conflicted
+        # registry.json resolved (the guard below skips the pull itself).
+        reg_st = _safe_git(store, "status", "--porcelain", "--", "registry.json")
+        if (reg_st.returncode == 0 and reg_st.stdout.strip()
+                and not _rebase_in_progress(store)):
+            add = _safe_git(store, "add", "--", "registry.json")
+            commit = None
+            if add.returncode == 0:
+                commit = _safe_git(store, "commit", "-m",
+                                   "chore(registry): update registry.json",
+                                   "--", "registry.json")
+            if commit is None or commit.returncode != 0:
+                _safe_git(store, "reset", "-q", "--", "registry.json")
+                failed = add if commit is None else commit
+                detail = (failed.stderr or failed.stdout or "").strip()
+                registry_note = ("could not commit the pending registry.json"
+                                 + (f": {detail.splitlines()[0]}" if detail else ""))
 
         local = _safe_git(store, "rev-parse", "HEAD")
         if local.returncode == 0 and local.stdout.strip() == upstream.stdout.strip():
@@ -144,14 +173,14 @@ def pull_store(store, timeout=DEFAULT_TIMEOUT):
 
         rb = _safe_git(store, "pull", "--rebase", "--autostash", timeout=timeout)
         if rb.returncode != 0:
-            # #25: a conflict confined to STATE.md snapshots is decided by
-            # the newer `modified:` frontmatter (prefer_local=False — a
-            # read-side pull prefers the incoming snapshot on a tie);
-            # anything touching a durable page or MEMORY.md falls through
+            # #25, #80: a conflict confined to STATE.md snapshots, registry.json
+            # or page bookkeeping is auto-resolved (prefer_local=False — a
+            # read-side pull prefers the incoming snapshot on a tie; registry.json
+            # takes union of maps); real page content or MEMORY.md falls through
             # to the normal abort so a human reconciles it. Post-fetch the
             # rebase is local-only, so ms helpers (no _safe_git wrapper)
             # are fine here.
-            if not ms._finish_rebase_with_state_autoresolve(
+            if not ms._finish_rebase_with_autoresolve(
                     store, prefer_local=False):
                 _safe_git(store, "rebase", "--abort")
                 res["conflict"] = True
@@ -161,15 +190,15 @@ def pull_store(store, timeout=DEFAULT_TIMEOUT):
         if ms._has_unmerged_paths(store):
             # The rebase completed (branch moved) but the trailing
             # autostash-pop conflicted — git exits 0 for that, so it must be
-            # caught here (same latent gap #26 closed in memory_sync). #25:
-            # a STATE.md-only pop conflict is resolved in place (newer
-            # `modified:` wins, incoming on a tie) and the retained
-            # autostash dropped; the mixed reset then unstages the
-            # resolution so surviving local edits sit in the working tree
+            # caught here (same latent gap #26 closed in memory_sync). #25/#80:
+            # a STATE.md-, registry.json- or bookkeeping-only pop conflict is
+            # resolved in place
+            # and the retained autostash dropped; the mixed reset then unstages
+            # the resolution so surviving local edits sit in the working tree
             # exactly as a clean autostash-pop would have left them.
             # Anything else: undo the rebase (ORIG_HEAD) and re-apply the
             # stash, restoring the original dirty tree for a human.
-            if ms._auto_resolve_state_conflicts(store, prefer_local=False):
+            if ms._auto_resolve_conflicts(store, prefer_local=False):
                 _safe_git(store, "stash", "drop")
                 _safe_git(store, "reset", "-q")
             else:
@@ -198,6 +227,9 @@ def pull_store(store, timeout=DEFAULT_TIMEOUT):
     finally:
         if lock is not None:
             ms._release_lock(store, lock)
+        # Every return path above carries the failed pre-pull commit's cause.
+        if registry_note:
+            res["reason"] = f"{res['reason']} ({registry_note})"
 
 
 def unlinked_repo_notice(store):
