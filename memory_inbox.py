@@ -176,7 +176,9 @@ def build_commit(store, pages, meta):
     tree = _git(store, "mktree", data=listing.encode("utf-8"))
     if tree.returncode != 0:
         raise RuntimeError(f"git mktree failed: {_err(tree)}")
-    msg = f"okfmem inbox: {len(pages)} page(s) from {meta['source']}@{meta['machine']}"
+    # .get: pending() drops non-string meta values, so a shrunk push may lack them.
+    msg = (f"okfmem inbox: {len(pages)} page(s) from "
+           f"{meta.get('source') or '?'}@{meta.get('machine') or '?'}")
     commit = _git(store, "commit-tree", _out(tree), "-m", msg)
     if commit.returncode != 0:
         raise RuntimeError(f"git commit-tree failed: {_err(commit)}")
@@ -291,6 +293,7 @@ def pending(store):
             meta = {}
         if not isinstance(meta, dict):
             meta = {}
+        meta = {k: v for k, v in meta.items() if isinstance(v, str)}
         names = _git(store, "ls-tree", "--name-only", sha)
         pages = []
         for name in _out(names).splitlines():
@@ -312,14 +315,15 @@ def pending(store):
 
 
 def _origin_line(meta):
-    return (f"source={meta.get('source') or '?'} repo={meta.get('repo') or '-'} "
-            f"ref={meta.get('ref') or '-'} machine={meta.get('machine') or '?'}")
+    return _safe(f"source={meta.get('source') or '?'} repo={meta.get('repo') or '-'} "
+                 f"ref={meta.get('ref') or '-'} machine={meta.get('machine') or '?'}")
 
 
 def render_pending(pushes):
     rows = []
     for p in pushes:
-        project = p["project"] or f"(unresolved: {p['meta'].get('repo') or 'no repo'})"
+        project = p["project"] or _safe(
+            f"(unresolved: {p['meta'].get('repo') or 'no repo'})")
         for page in p["pages"]:
             rows.append((project, page["slug"], p["meta"]))
     if not rows:
@@ -616,7 +620,7 @@ def _interactive_decide(push_, page, flags):
 
 def _interactive_project(repo):
     try:
-        return input(f"  project for repo {repo or '(none)'}: ").strip() or None
+        return input(f"  project for repo {_safe(repo or '(none)')}: ").strip() or None
     except EOFError:
         return None
 

@@ -267,6 +267,56 @@ def test_pending_ignores_index_and_state_names_from_a_hand_built_ref(env):
     assert [p["name"] for p in push_["pages"]] == ["ok-page.md"]
 
 
+def _push_hand_built(env, meta, ref_name):
+    page = _page("Hand built", "A hand built page").encode("utf-8")
+    sha = mx.build_commit(env["worker"], [("hand.md", page)], meta)
+    _git(env["worker"], "push", "-q", "origin", f"{sha}:refs/okfmem/inbox/{ref_name}")
+
+
+def test_pending_drops_non_string_meta_values_and_still_lists_other_refs(env):
+    _push(env)
+    _push_hand_built(env, {"source": "x", "machine": "evil", "repo": 5, "ref": ["a"]},
+                     "evil/1")
+    mx.fetch_inbox(env["store"])
+    pushes = mx.pending(env["store"])
+    assert len(pushes) == 2
+    bad = next(p for p in pushes if p["meta"].get("machine") == "evil")
+    assert "repo" not in bad["meta"] and "ref" not in bad["meta"]
+    assert bad["project"] is None
+    assert mx.render_pending(pushes)
+
+
+def test_partial_review_of_a_ref_with_non_string_source_shrinks_it(env):
+    pages = [("keep.md", _page("Keep", "Accept this page").encode("utf-8")),
+             ("later.md", _page("Later", "Skip this page").encode("utf-8"))]
+    sha = mx.build_commit(env["worker"], pages,
+                          {"source": 5, "machine": None, "repo": "acme/demo"})
+    _git(env["worker"], "push", "-q", "origin", f"{sha}:refs/okfmem/inbox/evil/3")
+
+    mx.review(env["store"], lambda p, page, f: ("accept", None) if page["slug"] == "keep"
+              else ("skip", None), lambda repo: None, out=lambda _: None, do_sync=False)
+
+    remaining = _git(env["origin"], "ls-tree", "--name-only", "refs/okfmem/inbox/evil/3")
+    assert remaining.splitlines() == ["later.md", "meta.json"]
+    assert os.path.isfile(os.path.join(env["store"], "projects", "demo", "keep.md"))
+
+
+def test_render_pending_escapes_control_characters_in_meta(env):
+    _push_hand_built(env, {"source": "\x1b[2Kfake row", "machine": "m\x1b[2K",
+                           "repo": "\x1b[2Kfake/repo", "ref": "r\x1b[2K"}, "evil/2")
+    mx.fetch_inbox(env["store"])
+    text = "\n".join(mx.render_pending(mx.pending(env["store"])))
+    assert "\x1b" not in text
+    assert "?[2Kfake/repo" in text and "source=?[2Kfake row" in text
+
+
+def test_interactive_project_prompt_escapes_control_characters(monkeypatch):
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda p: prompts.append(p) or "")
+    mx._interactive_project("\x1b[2Kfake/repo")
+    assert "\x1b" not in prompts[0] and "?[2Kfake/repo" in prompts[0]
+
+
 def test_importable_name_refuses_case_variants_of_index_and_state():
     for name in ("state.md", "State.md", "memory.md", "Memory-lane.md", "context.MD"):
         assert not mx.importable_name(name), name
