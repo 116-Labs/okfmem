@@ -16,6 +16,10 @@ Usage:
                                                  # bytes sit, link integrity across
                                                  # every MEMORY*.md, and pointer
                                                  # lines over the char budget — #54
+  okfmem inbox push <dir> --source NAME [--repo R] [--ref T] [--machine M]
+  okfmem inbox pull                              # candidate pages pushed from
+  okfmem inbox review                            # other machines; nothing is
+                                                 # imported without review — #84
 
 Core subcommands map to the memory_*.py modules living beside this script. Store
 is resolved by each module: --store, else $OKFMEM_STORE, else ~/okfmem-store.
@@ -36,7 +40,8 @@ HERE = os.path.dirname(os.path.realpath(__file__))  # realpath: resolve symlink 
 MODULES = {"backfill": "memory_backfill.py", "init": "memory_init.py",
            "consolidate": "memory_consolidate.py", "sync": "memory_sync.py",
            "pull": "memory_pull.py", "update": "memory_update.py",
-           "graduate": "memory_graduate.py", "reindex": "memory_reindex.py"}
+           "graduate": "memory_graduate.py", "reindex": "memory_reindex.py",
+           "inbox": "memory_inbox.py"}
 # Opt-in plugin commands -> plugins/<file>. Loaded ONLY if the file is present,
 # so core install stays harness-agnostic. Several commands may share one plugin.
 PLUGINS = {"index": "memory_search.py", "search": "memory_search.py",

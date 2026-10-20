@@ -275,6 +275,21 @@ okfmem reindex --budget-check    # pointer lines over the per-line char budget
 
 The parsing is anchored on the link **target**, at both ends of the line: a pointer whose *title* starts with a filename (`- [CLAUDE.md subdir lanes](real-slug.md)`) resolves to `real-slug.md`, and a filename named in the *hook* stays prose. Retired `ck_*.md` snapshots are skipped as orphan candidates, the same way `consolidate` and `backfill` skip them — they were never indexed by design, and counting them would make `--verify` fail on most real stores for a known-benign reason. This lives in Python rather than shell on purpose — the obvious `grep | sed` version of the same check uses a GNU-only BRE that BSD `sed` ignores, so on macOS it silently reported nothing, and the `awk` version of the budget count was blind to bare pointers *and* counting bytes. A checker that fails open is worse than no checker.
 
+### 9. Inbox (`okfmem inbox`)
+Headless agent runs on other machines learn things worth keeping, but they never write to the store: their input is untrusted, and the store is auto-loaded into your sessions. The inbox carries their candidate pages to you for review, inside the store's own git repository but never among the pages a session loads.
+
+```bash
+okfmem inbox push ./pages --source gaal --repo owner/repo --ref '#12'   # on the worker
+okfmem inbox pull                                                       # list what is pending
+okfmem inbox review                                                     # accept, merge or drop each page
+```
+
+**`push`** puts the directory's valid OKF pages (frontmatter with `name`, `description`, `type`; anything else is skipped with a line) plus a `meta.json` (source, repo, ref, machine, time) into one parentless commit at `refs/okfmem/inbox/<machine>/<id>` on the store remote. The id comes from the pages' content, so pushing the same pages again adds nothing, and a ref per push means machines never race on a branch. It never touches the store's working tree, branches, `MEMORY.md` or `STATE.md`. **`pull`** fetches those refs and lists the pending pages by project, then slug, with their source, repo, ref and machine. The repo maps to the project of a registered checkout whose `origin` is that repo, else the project named like it.
+
+**`review`** (interactive only) shows each page with its origin and the first lines of its body, control characters replaced so no escape sequence can hide text, and flags it when its slug matches an existing page, or its name or description closely matches an existing or another pending page (deterministic text similarity, no model). You then **accept** it (written as a normal page with a `MEMORY.md` pointer; an unresolved repo asks for the project), **merge** it into a page you name (its body is appended under a dated heading naming its source), **drop** it, or **skip** it for later. A push whose pages are all handled has its ref deleted on the remote, and a partly handled one keeps only the rest, even when you stop the review with Ctrl-C; the review ends with `okfmem sync`.
+
+**Inbox text is untrusted until you review it.** Nothing in the inbox reaches a loaded page without `okfmem inbox review`: `okfmem pull`, `consolidate` and the Stop hook fetch only the store's branches, never the inbox refs. Read a page before you accept or merge it the way you would read any text from the internet.
+
 ```mermaid
 flowchart TD
     subgraph Harness [AI Coding Agent]
