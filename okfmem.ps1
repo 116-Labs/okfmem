@@ -13,3 +13,4 @@ if (-not $PyCmd) {
 
 $OkfmemPy = Join-Path $PSScriptRoot "okfmem"
 & $PyCmd $OkfmemPy @args
+exit $LASTEXITCODE
