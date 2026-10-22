@@ -11,7 +11,8 @@ the maintainer without letting them anywhere near a loaded page:
       to `refs/okfmem/inbox/<machine>/<id>` on the store remote. The id comes
       from the pages' content, so a re-push adds nothing; a ref per push means
       machines never race on a branch. The store's working tree, branches,
-      MEMORY.md and STATE.md are never touched.
+      MEMORY.md and STATE.md are never touched. With --json, stdout is one object
+      {"ref", "pages", "created"} (or {"error"} and a non-zero exit); text goes to stderr.
   okfmem inbox pull
       Fetch `refs/okfmem/inbox/*` and list what is pending, by project then slug.
   okfmem inbox review
@@ -193,26 +194,38 @@ def remote_has_ref(store, ref):
     return any(line.split("\t")[-1] == ref for line in _out(r).splitlines())
 
 
-def push(store, src_dir, source, repo=None, ref=None, machine=None, out=print):
-    """Returns (exit_code, inbox ref or None)."""
+def push(store, src_dir, source, repo=None, ref=None, machine=None, out=print,
+         result=None):
+    """Returns (exit_code, inbox ref or None). `result`, when given, is filled with
+    the machine-readable outcome: pages, created, and error on failure."""
+    result = {} if result is None else result
+    result.pop("error", None)
+    result.update(pages=0, created=False)
+
+    def fail(code, message):
+        result["error"] = message
+        out(f"okfmem inbox push: {message}")
+        return code, None
+
     if not os.path.isdir(os.path.join(store, ".git")):
-        out(f"okfmem inbox push: {store} is not a git repo.")
-        return 2, None
+        return fail(2, f"{store} is not a git repo.")
     if not os.path.isdir(src_dir):
-        out(f"okfmem inbox push: {src_dir} is not a directory.")
-        return 2, None
-    pages, skipped = collect_pages(src_dir)
+        return fail(2, f"{src_dir} is not a directory.")
+    try:
+        pages, skipped = collect_pages(src_dir)
+    except OSError as e:
+        return fail(1, str(e))
     for line in skipped:
         out(f"  {line}")
     if not pages:
         out("okfmem inbox push: no valid OKF pages — nothing pushed.")
         return 0, None
+    result["pages"] = len(pages)
     machine = _ref_part(machine) if machine else default_machine()
     inbox_ref = f"{INBOX_NS}/{machine}/{content_id(pages)}"
     present = remote_has_ref(store, inbox_ref)
     if present is None:
-        out(f"okfmem inbox push: cannot read remote '{REMOTE}' — nothing pushed.")
-        return 1, None
+        return fail(1, f"cannot read remote '{REMOTE}' — nothing pushed.")
     if present:
         out(f"okfmem inbox push: already in the inbox ({inbox_ref}) — nothing pushed.")
         return 0, inbox_ref
@@ -222,12 +235,11 @@ def push(store, src_dir, source, repo=None, ref=None, machine=None, out=print):
     try:
         sha = build_commit(store, pages, meta)
     except RuntimeError as e:
-        out(f"okfmem inbox push: {e}")
-        return 1, None
+        return fail(1, str(e))
     p = _git(store, "push", "-q", REMOTE, f"{sha}:{inbox_ref}")
     if p.returncode != 0:
-        out(f"okfmem inbox push: push failed: {_err(p)}")
-        return 1, None
+        return fail(1, f"push failed: {_err(p)}")
+    result["created"] = True
     out(f"okfmem inbox push: {len(pages)} page(s) -> {inbox_ref}")
     return 0, inbox_ref
 
@@ -645,8 +657,10 @@ def main():
     p.add_argument("--repo", help="owner/repo the pages are about")
     p.add_argument("--ref", help="free text: issue, PR or run the pages came from")
     p.add_argument("--machine", help="this machine's name (default: hostname)")
+    p.add_argument("--json", action="store_true",
+                   help="print one JSON object on stdout; messages go to stderr")
     p.add_argument("--store", default=argparse.SUPPRESS)
-    q = sub.add_parser("pull", help="fetch the inbox and list pending pages")
+    q =sub.add_parser("pull", help="fetch the inbox and list pending pages")
     q.add_argument("--store", default=argparse.SUPPRESS)
     r = sub.add_parser("review", help="accept, merge or drop each pending page")
     r.add_argument("--store", default=argparse.SUPPRESS)
@@ -654,7 +668,20 @@ def main():
     store = os.path.abspath(os.path.expanduser(args.store))
 
     if args.cmd == "push":
-        code, _ = push(store, args.dir, args.source, args.repo, args.ref, args.machine)
+        if not args.json:
+            code, _ = push(store, args.dir, args.source, args.repo, args.ref,
+                           args.machine)
+            sys.exit(code)
+        result = {}
+        code, inbox_ref = push(store, args.dir, args.source, args.repo, args.ref,
+                               args.machine, out=lambda m: print(m, file=sys.stderr),
+                               result=result)
+        if result.get("error"):
+            payload = {"error": " ".join(result["error"].split())}
+        else:
+            payload = {"ref": inbox_ref, "pages": result["pages"],
+                       "created": result["created"]}
+        print(json.dumps(payload))
         sys.exit(code)
     if args.cmd == "pull":
         sys.exit(pull(store))

@@ -6,3 +6,4 @@ if %ERRORLEVEL%==0 (
 ) else (
     python "%~dp0okfmem" %*
 )
+exit /b %ERRORLEVEL%

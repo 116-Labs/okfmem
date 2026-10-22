@@ -434,3 +434,92 @@ def test_review_refuses_non_interactive(env, monkeypatch, capsys):
 
 def test_dispatcher_routes_inbox():
     assert '"inbox": "memory_inbox.py"' in _read(os.path.join(ROOT, "okfmem"))
+
+
+def _cli_push_json(env, src=None, store=None):
+    return subprocess.run(
+        [sys.executable, os.path.join(ROOT, "okfmem"), "inbox", "push",
+         src or env["cand"], "--source", "gaal", "--machine", "ak47", "--json",
+         "--store", store or env["worker"]],
+        capture_output=True, text=True)
+
+
+def test_push_json_reports_created_then_noop(env):
+    first = _cli_push_json(env)
+    assert first.returncode == 0, first.stderr
+    got = json.loads(first.stdout)
+    assert got["created"] is True and got["pages"] == 3
+    assert got["ref"] == _remote_refs(env["origin"])
+    assert "skip notes.md" in first.stderr
+
+    again = _cli_push_json(env)
+    assert again.returncode == 0, again.stderr
+    assert json.loads(again.stdout) == {"ref": got["ref"], "pages": 3, "created": False}
+
+
+def test_push_json_with_no_valid_pages_has_null_ref(env, tmp_path):
+    empty = str(tmp_path / "empty")
+    os.makedirs(empty)
+    r = _cli_push_json(env, src=empty)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == {"ref": None, "pages": 0, "created": False}
+
+
+def test_push_json_failure_exits_nonzero_with_one_line_error(env, tmp_path):
+    _git(env["worker"], "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    r = _cli_push_json(env)
+    assert r.returncode != 0
+    got = json.loads(r.stdout)
+    assert list(got) == ["error"] and got["error"] and "\n" not in got["error"]
+
+
+def test_push_clears_a_previous_error_on_success(env):
+    result = {"error": "previous failure"}
+    code, ref = mx.push(env["worker"], env["cand"], "gaal", machine="ak47",
+                        out=lambda _: None, result=result)
+    assert code == 0 and ref
+    assert "error" not in result
+    assert result["created"] is True and result["pages"] == 3
+
+
+def test_push_json_reports_page_collection_oserror(env, monkeypatch, tmp_path, capsys):
+    src = str(tmp_path / "pages")
+    os.makedirs(src)
+    monkeypatch.setattr(mx, "collect_pages",
+                        lambda _: (_ for _ in ()).throw(PermissionError("cannot read pages")))
+    monkeypatch.setattr(sys, "argv", ["memory_inbox.py", "push", src,
+                                       "--source", "gaal", "--json",
+                                       "--store", env["worker"]])
+    with pytest.raises(SystemExit) as exc:
+        mx.main()
+    captured = capsys.readouterr()
+    assert exc.value.code != 0
+    result = json.loads(captured.out)
+    assert result == {"error": "cannot read pages"}
+    assert "\n" not in result["error"]
+    assert "cannot read pages" in captured.err
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell wrapper is Windows-only")
+def test_powershell_wrapper_propagates_json_push_failure(env, tmp_path):
+    _git(env["worker"], "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    r = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+         os.path.join(ROOT, "okfmem.ps1"), "inbox", "push", env["cand"],
+         "--source", "gaal", "--machine", "ak47", "--json", "--store",
+         env["worker"]], capture_output=True, text=True)
+    assert r.returncode != 0
+    got = json.loads(r.stdout)
+    assert list(got) == ["error"] and got["error"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="cmd wrapper is Windows-only")
+def test_cmd_wrapper_propagates_json_push_failure(env, tmp_path):
+    _git(env["worker"], "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    r = subprocess.run(
+        ["cmd", "/d", "/c", os.path.join(ROOT, "okfmem.cmd"),
+         "inbox", "push", env["cand"], "--source", "gaal", "--machine", "ak47",
+         "--json", "--store", env["worker"]], capture_output=True, text=True)
+    assert r.returncode != 0
+    got = json.loads(r.stdout)
+    assert list(got) == ["error"] and got["error"]

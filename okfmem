@@ -16,7 +16,8 @@ Usage:
                                                  # bytes sit, link integrity across
                                                  # every MEMORY*.md, and pointer
                                                  # lines over the char budget — #54
-  okfmem inbox push <dir> --source NAME [--repo R] [--ref T] [--machine M]
+  okfmem --version                               # also `okfmem version`
+  okfmem inbox push <dir> --source NAME [--repo R] [--ref T] [--machine M] [--json]
   okfmem inbox pull                              # candidate pages pushed from
   okfmem inbox review                            # other machines; nothing is
                                                  # imported without review — #84
@@ -34,6 +35,7 @@ exists. Session search (issue #2) ships this way:
 """
 import os
 import runpy
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.realpath(__file__))  # realpath: resolve symlink -> real engine dir
@@ -48,10 +50,30 @@ PLUGINS = {"index": "memory_search.py", "search": "memory_search.py",
            "distill": "memory_distill.py"}
 
 
+def version_line():
+    with open(os.path.join(HERE, "VERSION"), encoding="utf-8") as f:
+        version = f.read().strip()
+    try:
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        r = subprocess.run(["git", "-C", HERE, "rev-parse", "--show-toplevel",
+                            "--short", "HEAD"], capture_output=True, text=True,
+                           timeout=10, env=env)
+        lines = r.stdout.splitlines()
+        root = os.path.normcase(os.path.realpath(lines[0])) if lines else ""
+        commit = (lines[1].strip() if r.returncode == 0 and len(lines) == 2
+                  and root == os.path.normcase(HERE) else "")
+    except (OSError, subprocess.TimeoutExpired):
+        commit = ""
+    return f"okfmem {version} ({commit or 'unknown'})"
+
+
 def main():
     argv = sys.argv[1:]
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
+        sys.exit(0)
+    if argv[0] in ("--version", "version"):
+        print(version_line())
         sys.exit(0)
 
     cmd, rest = argv[0], argv[1:]
