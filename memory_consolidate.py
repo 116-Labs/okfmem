@@ -5,21 +5,24 @@ Runs at Claude Code session end (Stop hook) — or by hand — to keep the OKF
 store self-maintaining without `/memory-curate`:
 
   1. Access tracking. Parse the session transcript for reads/greps of pages
-     under any `projects/*/` memory dir; bump `last_accessed`/`access_count`.
+     in the flat `pages/` pool; bump `last_accessed`/`access_count`. The bump
+     is page-level, so a page shared by several repos decays only when no
+     repo's session has touched it.
   2. Decay scoring. `R = exp(-t_days / S)`, `S = access_count + 1`,
      `t_days` = days since `last_accessed` (MemoryBank Ebbinghaus).
-  3. Graceful archival (never delete). Move page → `projects/<proj>/archive/`,
-     set `status: archived`, drop its `MEMORY.md` line, iff:
-       not pinned AND type not in {user,feedback}
+  3. Graceful archival (never delete). Move page →
+     `pages/archive/<year>/<slug>.md`, set `status: archived`, iff:
+       not pinned AND type not in {user,feedback} AND scope != evergreen
        AND t_days > 30 AND R < 0.40 AND age > 14d
      Cap: <= N archives/run (default 20).
   4. Commit + push the store (guarded; reuses git, no daemon).
 
 Guardrails: `--dry-run` prints the plan and writes nothing; never `rm` (archive
-+ git history are the backstop); never touch `type: user|feedback` or
-`pinned: true`; refuses to run in apply mode if the store working tree already
-has uncommitted changes (unless --force / --no-commit) so it never sweeps
-unrelated edits into its commit.
++ git history are the backstop); never touch `type: user|feedback`,
+`pinned: true` or `scope: evergreen`; refuses an un-migrated `projects/` store
+(no `layout: labels` marker) and, in apply mode, a store working tree that
+already has uncommitted changes (unless --force / --no-commit) so it never
+sweeps unrelated edits into its commit.
 
 Store location: --store, else $OKFMEM_STORE, else ~/okfmem-store.
 
@@ -42,14 +45,14 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from memory_sync import sync_store  # noqa: E402
 # Re-exported: memory_graduate and memory_inbox import these names from here.
-from memory_frontmatter import find_frontmatter, parse_fields  # noqa: E402,F401
-# Index enumeration: since #53's write-time lane routing, a page's pointer may
-# live in any `MEMORY*.md`, not just the root one. One shared enumerator so
-# this pass and `okfmem reindex --verify` can never disagree about the file set.
-from memory_reindex import index_files  # noqa: E402
+from memory_frontmatter import find_frontmatter, parse_fields, parse_scope  # noqa: E402,F401
 
 SKIP_NAMES = {"MEMORY.md", "STATE.md", "CONTEXT.md"}
 DECAY_EXEMPT_TYPES = {"user", "feedback"}
+
+# The cutover to the flat pool is big-bang: a store that still has `projects/`
+# and no `layout: labels` marker is refused, pointing at the migration (#100).
+MIGRATE_CMD = "okfmem migrate-to-labels"
 
 ARCHIVE_R_MAX = 0.40      # R below this is a decay candidate
 ARCHIVE_T_DAYS = 30       # untouched-for-a-month plain-language gate
@@ -83,11 +86,11 @@ def update_fields(text, fm, updates):
 # access tracking
 # ---------------------------------------------------------------------------
 def build_alias_index(store):
-    """Map each store project dir -> list of Claude-Code symlink alias dirs.
+    """Map each symlink target dir -> list of Claude-Code symlink alias dirs.
 
-    A page at `<store>/projects/<name>/<rel>` is read by the agent through the
-    symlink `~/.claude/projects/<enc>/memory/<rel>`, so both spellings must be
-    matched in the transcript. Returns {abs project dir: [alias dir, ...]}.
+    A page at `<store>/pages/<rel>` may be read by the agent through a symlink
+    `~/.claude/projects/<enc>/memory/<rel>` resolving to `pages/`, so both
+    spellings must be matched in the transcript. Returns {real dir: [alias dir, ...]}.
     """
     aliases = {}
     pattern = os.path.expanduser("~/.claude/projects/*/memory")
@@ -462,11 +465,11 @@ def update_statusline(args, store, today):
     return transcript
 
 
-def page_touched(transcript, real_path, alias_dirs, proj_dir):
+def page_touched(transcript, real_path, alias_dirs, pages_dir):
     """True if the transcript references this page by store or symlink path."""
     if transcript is None:
         return False
-    rel = os.path.relpath(real_path, proj_dir)
+    rel = os.path.relpath(real_path, pages_dir)
     candidates = [real_path]
     for adir in alias_dirs:
         candidates.append(os.path.join(adir, rel))
@@ -546,19 +549,25 @@ def drop_memory_lines(memory_path, slugs, dry_run):
 # ---------------------------------------------------------------------------
 # main pass
 # ---------------------------------------------------------------------------
-def scan_project(proj_dir, transcript, alias_dirs, today, epoch):
-    """Return (bumps, candidates) for one project.
+def is_exempt(pinned, typ, scope):
+    """Decay exemption is additive (#101); an `org:*` label exempts nothing."""
+    return pinned or typ in DECAY_EXEMPT_TYPES or scope == "evergreen"
+
+
+def scan_pages(pages_dir, transcript, alias_dirs, today, epoch):
+    """Return (bumps, candidates) for the flat `pages/` pool.
 
     bumps: [(path, fm-updates)] access-reinforced pages (write even if kept).
     candidates: [dict] archivable pages, each with r/t_days/slug for sorting.
     """
     bumps, candidates = [], []
-    for path in sorted(glob.glob(os.path.join(proj_dir, "**", "*.md"),
+    for path in sorted(glob.glob(os.path.join(glob.escape(pages_dir), "**", "*.md"),
                                  recursive=True)):
         base = os.path.basename(path)
-        if base in SKIP_NAMES or base.startswith("ck_"):
+        if (base in SKIP_NAMES or base.startswith("MEMORY")
+                or base.startswith("ck_")):
             continue
-        if (os.sep + "archive" + os.sep) in path:
+        if "archive" in os.path.relpath(path, pages_dir).split(os.sep)[:-1]:
             continue
         try:
             with open(path, "r", encoding="utf-8", newline="") as f:
@@ -581,8 +590,9 @@ def scan_project(proj_dir, transcript, alias_dirs, today, epoch):
             access_count = 0
         pinned = fields.get("pinned", "false").strip().lower() == "true"
         status = fields.get("status", "active").strip().lower()
+        scope = parse_scope(text, fm, source=path)
 
-        touched = page_touched(transcript, path, alias_dirs, proj_dir)
+        touched = page_touched(transcript, path, alias_dirs, pages_dir)
         if touched:
             last_acc, access_count = today, access_count + 1
             bumps.append((path, {
@@ -590,7 +600,9 @@ def scan_project(proj_dir, transcript, alias_dirs, today, epoch):
                 "access_count": str(access_count),
             }))
 
-        if status != "active":
+        # Exempt pages leave here, before the candidate list, so an evergreen
+        # page can never consume a slot of `--cap`.
+        if status != "active" or is_exempt(pinned, typ, scope):
             continue
 
         # untouched *since tracking began* (cold-start guard) — see resolve_epoch
@@ -598,8 +610,7 @@ def scan_project(proj_dir, transcript, alias_dirs, today, epoch):
         t_days = (today - effective_seen).days
         age = (today - created).days
         r = retention(t_days, access_count)
-        eligible = (not pinned and typ not in DECAY_EXEMPT_TYPES
-                    and t_days > ARCHIVE_T_DAYS and r < ARCHIVE_R_MAX
+        eligible = (t_days > ARCHIVE_T_DAYS and r < ARCHIVE_R_MAX
                     and age > ARCHIVE_AGE_DAYS)
         if eligible:
             candidates.append({
@@ -623,21 +634,38 @@ def apply_bumps(bumps, dry_run):
             f.write(update_fields(text, fm, updates))
 
 
-def archive_page(cand, today, dry_run):
-    """Move a page into archive/, stamp status: archived. Returns dest path."""
+def archive_dest(store, slug, year):
+    """`pages/archive/<year>/<slug>.md`, numerically suffixed on a clash."""
+    dest_dir = os.path.join(store, "pages", "archive", str(year))
+    dest = os.path.join(dest_dir, f"{slug}.md")
+    n = 2
+    while os.path.lexists(dest):
+        dest = os.path.join(dest_dir, f"{slug}-{n}.md")
+        n += 1
+    return dest
+
+
+def archive_page(cand, today, dry_run, store):
+    """Move a page into the year archive, stamp status: archived. Returns dest.
+
+    The year is `archived_on`'s, i.e. today's; every other frontmatter byte
+    (labels included) is carried over unchanged."""
     src = cand["path"]
-    proj_dir = _project_dir_of(src)
-    dest_dir = os.path.join(proj_dir, "archive")
-    dest = os.path.join(dest_dir, os.path.basename(src))
+    dest = archive_dest(store, os.path.basename(src)[:-3], today.year)
     if dry_run:
         return dest
-    os.makedirs(dest_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
     text = cand["text"]
     fm = find_frontmatter(text)
     text = update_fields(text, fm, {"status": "archived",
                                     "archived_on": today.isoformat()})
-    with open(dest, "w", encoding="utf-8", newline="") as f:
-        f.write(text)
+    while True:
+        try:
+            with open(dest, "x", encoding="utf-8", newline="") as f:
+                f.write(text)
+            break
+        except FileExistsError:
+            dest = archive_dest(store, os.path.basename(src)[:-3], today.year)
     os.remove(src)  # archive/ + git history are the backstop; never lost
     return dest
 
@@ -651,6 +679,16 @@ def _project_dir_of(path):
             break
         d = parent
     return d
+
+
+def store_layout_migrated(store):
+    """True if the store carries the `layout: labels` marker.
+
+    One marker check for the whole engine: init/views (#105) and consolidate
+    must agree on which stores are migrated, so this defers to memory_init.
+    """
+    from memory_init import has_layout_marker
+    return has_layout_marker(store)
 
 
 def git_clean(store):
@@ -697,10 +735,18 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     store = os.path.abspath(os.path.expanduser(args.store))
-    proj_root = os.path.join(store, "projects")
-    if not os.path.isdir(proj_root) and not os.path.isdir(os.path.join(store, "pages")):
-        print(f"error: no projects/ under {store}", file=sys.stderr)
-        sys.exit(2)
+    # Both refusals run before the badge/breadcrumb write: a refused store is
+    # left exactly as it was. Exit 1, not 2: a Stop hook exiting 2 blocks the stop.
+    if (os.path.isdir(os.path.join(store, "projects"))
+            and not store_layout_migrated(store)):
+        print(f"error: {store} still uses the per-project projects/ layout; "
+              f"run `{MIGRATE_CMD}` to move it to the flat pages/ pool "
+              "before consolidating.", file=sys.stderr)
+        sys.exit(1)
+    pages_dir = os.path.join(store, "pages")
+    if not os.path.isdir(pages_dir):
+        print(f"error: no pages/ under {store}", file=sys.stderr)
+        sys.exit(1)
 
     today = (parse_date(args.today, None) if args.today
              else datetime.now(timezone.utc).date())
@@ -711,11 +757,6 @@ def main(argv=None):
     # Statusline badge + breadcrumb first: reads stdin (once), and must run even
     # on a dirty tree where consolidation below defers, so the badge stays fresh.
     transcript = update_statusline(args, store, today)
-
-    if not os.path.isdir(proj_root):
-        if not args.dry_run:
-            _refresh_view(store, _LAST_HOOK_PAYLOAD)
-        return
 
     if not args.dry_run and not args.no_commit and not args.force:
         if not git_clean(store):
@@ -739,15 +780,8 @@ def main(argv=None):
     epoch = resolve_epoch(store, today, args.dry_run)
     alias_index = build_alias_index(store)
 
-    projects = sorted(d for d in os.listdir(proj_root)
-                      if os.path.isdir(os.path.join(proj_root, d)))
-    all_bumps, all_cands = [], []
-    for proj in projects:
-        proj_dir = os.path.join(proj_root, proj)
-        aliases = alias_index.get(os.path.realpath(proj_dir), [])
-        bumps, cands = scan_project(proj_dir, transcript, aliases, today, epoch)
-        all_bumps.extend(bumps)
-        all_cands.extend(cands)
+    aliases = alias_index.get(os.path.realpath(pages_dir), [])
+    all_bumps, all_cands = scan_pages(pages_dir, transcript, aliases, today, epoch)
 
     # apply global archive cap: lowest retention first
     all_cands.sort(key=lambda c: (c["r"], -c["t_days"]))
@@ -769,26 +803,10 @@ def main(argv=None):
     # apply
     apply_bumps(all_bumps, args.dry_run)
 
-    per_proj_slugs = {}
+    # No index edit here: the per-repo MEMORY views are regenerated from the
+    # pool (#99), so an archived page simply drops out of the next projection.
     for c in to_archive:
-        pdir = _project_dir_of(c["path"])
-        archive_page(c, today, args.dry_run)
-        per_proj_slugs.setdefault(pdir, []).append(c["slug"])
-
-    # Drop the archived page's pointer from EVERY index that carries it, not
-    # just the root `MEMORY.md`. With #53's lane routing a new page's pointer
-    # is written straight into a lane index, so a root-only drop leaves a
-    # dangling pointer behind -- and this pass runs unattended from the Stop
-    # hook, so the damage accumulates silently until `--verify` starts failing
-    # with no user action. `drop_memory_lines`'s two patterns already handle
-    # both pointer syntaxes; only the file set was wrong.
-    dropped_total = 0
-    for pdir, slugs in per_proj_slugs.items():
-        for idx in index_files(pdir):
-            dropped_total += drop_memory_lines(
-                os.path.join(pdir, idx), slugs, args.dry_run)
-    if to_archive:
-        print(f"index lines dropped: {dropped_total}")
+        archive_page(c, today, args.dry_run, store)
 
     print(f"mode: {'DRY-RUN' if args.dry_run else 'APPLY'}")
 

@@ -84,7 +84,7 @@ ROOT_INDEX = "MEMORY.md"
 NON_PAGE_NAMES = {"STATE.md", "CONTEXT.md"}
 
 # Retired `ck_*.md` session snapshots. Every sibling pass already skips them by
-# this exact prefix test (`memory_consolidate.scan_project`,
+# this exact prefix test (`memory_consolidate.scan_pages`,
 # `memory_backfill`), and curate flags them `ck_snapshot` cruft rather than
 # durable pages -- so they are not orphan candidates here either. Counting them
 # would make `--verify` fail on most real stores for a known-benign reason,
@@ -533,7 +533,8 @@ def report_data(scan, budget=None, lane_budget=None):
     largest_lane_bytes = max((i["bytes"] for i in indexes
                               if not i["auto_loaded"]), default=0)
     largest_page_bytes = max(page_sizes, default=0)
-    archived = len(glob.glob(os.path.join(glob.escape(d), "archive", "*.md")))
+    archived = len(glob.glob(os.path.join(glob.escape(d), "archive", "**", "*.md"),
+                             recursive=True))
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from memory_frontmatter import summarize_pages
     label_summary = summarize_pages([os.path.join(d, p) for p in scan.pages])

@@ -405,6 +405,16 @@ def test_report_page_median_and_max_bytes(mem, sizes, median, largest):
     assert isinstance(data["on_disk"]["median_page_bytes"], int)
 
 
+def test_report_archived_count_includes_year_subdirectories(mem):
+    write(mem, "MEMORY.md", "# Index\n")
+    (mem / "archive" / "2026").mkdir(parents=True)
+    write(mem / "archive", "flat.md", "old\n")
+    write(mem / "archive" / "2026", "yearly.md", "old\n")
+    write(mem / "archive" / "2026", "yearly-2.md", "old\n")
+
+    assert mr.report_data(scan(mem))["on_disk"]["archived"] == 3
+
+
 def test_report_never_claims_the_auto_loaded_files_are_the_entire_cost(mem):
     write(mem, "MEMORY.md", "# Index\n")
     write(mem, "MEMORY-lane.md", "x" * 10)
@@ -561,7 +571,7 @@ def test_curate_inventory_uses_the_shared_multi_index_parser(mem):
 # retired ck_*.md snapshots are not orphan candidates
 #
 # Every sibling pass already skips them by this exact prefix test
-# (`memory_consolidate.scan_project`, `memory_backfill`), and curate flags them
+# (`memory_consolidate.scan_pages`, `memory_backfill`), and curate flags them
 # `ck_snapshot` cruft. Counting them here made `--verify` fail on most real
 # projects for a known-benign reason — and a gate nobody can turn on is not a
 # gate, so the mode could not serve as the consolidation-hook gate #54

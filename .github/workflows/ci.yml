@@ -15,7 +15,8 @@ permissions:
   contents: read
 
 jobs:
-  # Matrixed over ubuntu-latest + windows-latest (issue #11 — Windows support).
+  # Matrixed over ubuntu, windows (issue #11) and macos (#101: macOS tmp-path
+  # realpath and case-insensitive APFS behaviour must be exercised too).
   # A matrix reports per-OS check names ("build (ubuntu-latest)",
   # "build (windows-latest)"), which are unstable required-check targets — the
   # names change whenever the OS list does. So this job is named `build`, and a
@@ -26,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
 

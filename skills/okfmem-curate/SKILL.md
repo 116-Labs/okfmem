@@ -23,7 +23,7 @@ a home-directory checkout. SKILL_DIR is the real directory containing this skill
 > **Fallback tool (as of 2026-07-16).** Routine memory hygiene is now automatic:
 > the okfmem P3 consolidation job (`~/okfmem/memory_consolidate.py`, wired to the
 > Claude Code session-end Stop hook) decay-scores every page and gracefully
-> archives stale ones (`projects/<proj>/archive/`, never deleted), regenerating
+> archives stale ones (`pages/archive/<year>/`, never deleted), regenerating
 > `MEMORY.md`, every session — no hand-running required. See issue #1.
 > Reach for `/okfmem-curate` only for **judgment-driven** curation the automated
 > decay pass does not do: merging duplicate-with-CLAUDE.md entries, semantic
@@ -270,9 +270,10 @@ for slug in $GRADUATED_SLUGS; do
   echo "=== $slug: rule landed in CLAUDE.md ==="
   git -C "$REPO_ROOT" diff -- CLAUDE.md AGENTS.md | grep -q '^+' && echo "OK: CLAUDE.md/AGENTS.md gained the rule" || echo "MISSING: no CLAUDE.md diff for $slug"
   echo "=== $slug: source archived, not left live ==="
-  [ ! -f "$MEM_DIR/$slug.md" ] && [ -f "$MEM_DIR/archive/$slug.md" ] \
-    && grep -q 'graduated_to:' "$MEM_DIR/archive/$slug.md" \
-    && echo "OK: moved to archive/ with graduated_to stamp" \
+  ARCH="$STORE_PATH/pages/archive/$(date -u +%Y)/$slug.md"  # graduate prints the exact path
+  [ ! -f "$MEM_DIR/$slug.md" ] && [ -f "$ARCH" ] \
+    && grep -q 'graduated_to:' "$ARCH" \
+    && echo "OK: moved to pages/archive/ with graduated_to stamp" \
     || echo "BROKEN: $slug not cleanly archived (still live, missing, or unstamped)"
 done
 ```

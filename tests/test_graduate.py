@@ -6,7 +6,7 @@ Load-bearing invariants under test:
   (a) symlink-aware AGENTS.md — detect with os.path.islink + readlink, never a
       content compare: symlink-to-CLAUDE.md -> do nothing, real file -> mirror,
       absent -> stays absent.
-  (b) archive, never delete — source moves to projects/<proj>/archive/<slug>.md,
+  (b) archive, never delete — source moves to pages/archive/<year>/<slug>.md,
       its MEMORY.md pointer is dropped, and its frontmatter is stamped with
       graduated_to so a later curate pass never re-flags/hard-deletes it.
   (c) --dry-run writes nothing (byte-identical tree before/after).
@@ -43,6 +43,10 @@ def _store(tmp_path, project="demoproj"):
     (pdir / "egress-claim.md").write_text(PAGE, encoding="utf-8")
     (pdir / "MEMORY.md").write_text(MEMORY_MD, encoding="utf-8")
     return store
+
+
+def _archived(store, year=2026):
+    return store / "pages" / "archive" / str(year) / "egress-claim.md"
 
 
 def _repo(tmp_path, with_claude_md=True):
@@ -143,7 +147,7 @@ def test_archive_not_delete_with_provenance_and_pointer_drop(tmp_path, monkeypat
     dest, dropped = mg.apply_plan(plan, str(store), datetime.date(2026, 7, 23))
 
     src = store / "projects" / "demoproj" / "egress-claim.md"
-    archived = store / "projects" / "demoproj" / "archive" / "egress-claim.md"
+    archived = _archived(store)
     assert not src.exists()          # never left behind (moved, not copied)
     assert archived.exists()          # archived, never rm'd
     assert dest == str(archived)
@@ -219,7 +223,9 @@ def test_assume_yes_applies_without_prompting(tmp_path, monkeypatch):
     assert rc == 0
     assert "does NOT egress" in (repo / "CLAUDE.md").read_text(encoding="utf-8")
     assert not (store / "projects" / "demoproj" / "egress-claim.md").exists()
-    assert (store / "projects" / "demoproj" / "archive" / "egress-claim.md").exists()
+    import datetime
+    year = datetime.datetime.now(datetime.timezone.utc).year
+    assert _archived(store, year).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +307,7 @@ def test_claude_write_failure_rolls_back_no_split_brain(tmp_path, monkeypatch):
                          str(target), None, None)
 
     src = store / "projects" / "demoproj" / "egress-claim.md"
-    archived = store / "projects" / "demoproj" / "archive" / "egress-claim.md"
+    archived = _archived(store)
     memory_md = store / "projects" / "demoproj" / "MEMORY.md"
     src_before = src.read_bytes()
     memory_before = memory_md.read_bytes()
@@ -372,7 +378,7 @@ def test_frontmatterless_source_refused_before_any_write(tmp_path, monkeypatch):
                  project="demoproj", store=str(store), yes=True)
     rc = mg.cmd_graduate(args)
     assert rc == 2
-    assert not (pdir / "archive" / "egress-claim.md").exists()
+    assert not (store / "pages").exists()
     assert _snapshot(str(store)) == before_store
 
 
@@ -394,7 +400,7 @@ def test_archive_remove_failure_leaves_no_split_brain(tmp_path, monkeypatch):
                          str(repo / "CLAUDE.md"), None, None)
 
     src = store / "projects" / "demoproj" / "egress-claim.md"
-    archived = store / "projects" / "demoproj" / "archive" / "egress-claim.md"
+    archived = _archived(store)
     memory_md = store / "projects" / "demoproj" / "MEMORY.md"
     src_before = src.read_bytes()
     memory_before = memory_md.read_bytes()
@@ -508,4 +514,4 @@ def test_rollback_restores_every_index_it_touched(tmp_path, monkeypatch):
     assert root_md.read_bytes() == root_before
     assert lane_md.read_bytes() == lane_before
     assert src.exists() and src.read_bytes() == src_before
-    assert not (pdir / "archive" / "egress-claim.md").exists()
+    assert not _archived(store).exists()

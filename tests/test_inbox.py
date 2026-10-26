@@ -323,6 +323,14 @@ def test_importable_name_refuses_case_variants_of_index_and_state():
     assert mx.importable_name("stateful-lesson.md")
 
 
+def test_project_pages_skips_archive_year_subdirectories(tmp_path):
+    proj = tmp_path / "projects" / "demo"
+    _write(str(proj / "live.md"), _page("live", "a live page"))
+    _write(str(proj / "archive" / "2026" / "gone.md"), _page("gone", "archived"))
+    _write(str(proj / "archive" / "flat.md"), _page("flat", "archived"))
+    assert set(mx.project_pages(str(tmp_path), "demo")) == {"live"}
+
+
 def test_review_flags_near_duplicate_description(env, tmp_path):
     other = str(tmp_path / "desc-pages")
     _write(os.path.join(other, "gate-order.md"),

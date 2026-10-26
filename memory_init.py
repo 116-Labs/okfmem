@@ -367,7 +367,7 @@ def has_layout_marker(store):
                     return True
         except (OSError, ValueError):
             pass
-    for fname in (".layout", ".okfmem-layout", "layout", ".okfmem", "okfmem.yaml"):
+    for fname in ("layout.yml", ".layout", ".okfmem-layout", "layout", ".okfmem", "okfmem.yaml"):
         fpath = os.path.join(store, fname)
         if os.path.isfile(fpath):
             try:
@@ -375,7 +375,7 @@ def has_layout_marker(store):
                     content = f.read()
                     if re.search(r"layout:\s*labels", content):
                         return True
-            except OSError:
+            except (OSError, UnicodeDecodeError):
                 pass
     return False
 
@@ -3273,7 +3273,8 @@ def project_inventory(store):
         ``CONTEXT.md`` and the retired ``ck_*.md`` snapshots are excluded.
         Lane indexes are index files, not pages -- counting them inflates the
         page total on exactly the stores #53's lane routing produces.
-      * ``archived`` counts ``archive/*.md``; a MISSING ``archive/`` reports 0
+      * ``archived`` counts ``archive/**/*.md`` (year subdirectories included,
+        #101); a MISSING ``archive/`` reports 0
         but stays distinguishable via ``has_archive_dir`` (the shell version
         conflated the two and errored on the unquoted glob).
       * ``memory_bytes`` is the ``MEMORY.md`` size on disk (0 when absent) --
@@ -3299,7 +3300,8 @@ def project_inventory(store):
         # ck_ snapshots) that every sibling pass already uses.
         pages = page_files(d)
         adir = os.path.join(d, "archive")
-        archived = glob.glob(os.path.join(glob.escape(adir), "*.md"))
+        archived = glob.glob(os.path.join(glob.escape(adir), "**", "*.md"),
+                             recursive=True)
         mem = os.path.join(d, "MEMORY.md")
         mem_bytes = os.path.getsize(mem) if os.path.exists(mem) else 0
         out.append(
