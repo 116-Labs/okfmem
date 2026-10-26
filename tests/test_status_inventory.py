@@ -103,6 +103,16 @@ def test_archive_counted(store):
     assert has_arch is True
 
 
+def test_archive_count_includes_year_subdirectories(store):
+    d = make_project(store, "proj", pages=1, archived=1)
+    year = d / "archive" / "2026"
+    year.mkdir()
+    (year / "old.md").write_text("archived\n", encoding="utf-8")
+    (year / "old-2.md").write_text("archived\n", encoding="utf-8")
+    _, _, archived, _, _, _ = row_for(mi.project_inventory(str(store)), "proj")
+    assert archived == 3
+
+
 def test_missing_archive_dir_reports_zero_not_crash(store):
     make_project(store, "proj", pages=2, archived=None)
     _, _, archived, _, _, has_arch = row_for(

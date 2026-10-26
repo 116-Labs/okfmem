@@ -45,6 +45,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from memory_consolidate import (  # noqa: E402
     _project_dir_of,
+    archive_dest,
     archive_page,
     drop_memory_lines,
     find_frontmatter,
@@ -222,6 +223,7 @@ def build_plan(store, slug, project, to, heading, pr_ref):
     return {
         "slug": slug,
         "project": project,
+        "store": store,
         "src": src,
         "src_text": src_text,
         "heading": section_heading,
@@ -259,8 +261,8 @@ def render_plan(plan):
     elif plan["agents_action"] == "absent":
         lines.append("")
         lines.append("AGENTS.md: absent — leaving absent")
-    dest = os.path.join(_project_dir_of(plan["src"]), "archive",
-                        os.path.basename(plan["src"]))
+    dest = archive_dest(plan["store"], plan["slug"],
+                        datetime.now(timezone.utc).year)
     lines.append("")
     lines.append(f"archive:  {plan['src']}")
     lines.append(f"      ->  {dest}  (index pointer dropped)")
@@ -301,13 +303,13 @@ def apply_plan(plan, store, today):
     # return), computed up front so the internal-phase rollback can clean up a
     # copy even when archive_page throws AFTER writing dest but during/after the
     # os.remove(src) that would normally hand dest back.
-    dest = os.path.join(proj_dir, "archive", os.path.basename(plan["src"]))
+    dest = archive_dest(store, plan["slug"], today.year)
 
     # --- reversible, store-internal side (rolled back on failure) ---
     try:
         # Archive, never delete — reuses P3 consolidation's own move+stamp path.
         cand = {"path": plan["src"], "text": plan["src_text"]}
-        dest = archive_page(cand, today, dry_run=False)
+        dest = archive_page(cand, today, dry_run=False, store=store)
 
         repo_root = _current_git_root() or os.path.dirname(plan["target_path"])
         rel_target = os.path.relpath(plan["target_path"], repo_root)

@@ -11,7 +11,7 @@ CLI coding agents — contributions that keep it that way are especially welcome
 - **Markdown is the source of truth.** No database or server in the core path.
   Any index (FTS5, vectors) is a derived, gitignored, rebuildable local cache —
   never committed.
-- **Never delete durable data.** Decay archives pages (`projects/<proj>/archive/`);
+- **Never delete durable data.** Decay archives pages (`pages/archive/<year>/`);
   it must never hard-delete. Keep the supersede-don't-delete invariant.
 - **Harness-neutral.** Don't couple the core to any one agent. Harness specifics
   live behind adapters (`plugins/adapters/`).
