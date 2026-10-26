@@ -35,6 +35,7 @@ Store location: --store, else $OKFMEM_STORE, else ~/okfmem-store.
 
 import argparse
 import filecmp
+from datetime import datetime, timezone
 import glob
 import json
 import os
@@ -133,7 +134,7 @@ POINTER_BLOCK = f"{MARKER_OPEN}\n{POINTER_BODY}\n{MARKER_CLOSE}"
 GITIGNORE_MARKER_OPEN = "# BEGIN okfmem-managed v1 (do not edit between markers)"
 GITIGNORE_MARKER_CLOSE = "# END okfmem-managed"
 
-GITIGNORE_LINES = (".okfmem-sync.lock", ".session-trail.md", "*.db",
+GITIGNORE_LINES = (".okfmem-sync.lock", ".session-trail.md", "*.db", "views/",
                    "__pycache__/", "*.pyc", ".DS_Store")
 
 GITIGNORE_BODY = (
@@ -228,6 +229,445 @@ def _repo_name_from_remote(url):
     return name
 
 
+def _owner_from_remote(url):
+    """Owner / organization slug from a git remote URL, or None."""
+    if not url:
+        return None
+    url_str = url.strip()
+    if url_str.startswith("/") or (len(url_str) >= 2 and url_str[1] == ":"):
+        return None
+    parts = [p for p in re.split(r"[/:\\]", url_str) if p]
+    if len(parts) < 2:
+        return None
+    owner = parts[-2]
+    if not owner or owner in (".", "..") or "@" in owner or owner.isdigit():
+        return None
+    if owner in ("http", "https", "ssh", "git"):
+        return None
+    if "." in owner and not owner.startswith("."):
+        return None
+    return owner.lower()
+
+
+def _remote_repo_owner(root):
+    """Owner / org from `remote.origin.url` of the repo at `root`, or None."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", root, "config", "--get", "remote.origin.url"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if out.returncode != 0:
+        return None
+    return _owner_from_remote(out.stdout)
+
+
+def _detect_stack(root):
+    """Detect tech stack markers in `root`. Returns a sorted list of stack names."""
+    if not root or not os.path.isdir(root):
+        return []
+    stacks = set()
+    if os.path.isfile(os.path.join(root, "pyproject.toml")) or os.path.isfile(
+        os.path.join(root, "requirements.txt")
+    ):
+        stacks.add("python")
+    if os.path.isfile(os.path.join(root, "package.json")) or os.path.isfile(
+        os.path.join(root, "tsconfig.json")
+    ):
+        stacks.add("typescript")
+    if os.path.isfile(os.path.join(root, "go.mod")):
+        stacks.add("go")
+    if os.path.isfile(os.path.join(root, "Cargo.toml")):
+        stacks.add("rust")
+    return sorted(stacks)
+
+
+def _resolve_overrides(reg, root, repo, detected_org, detected_stack):
+    """Resolve org and stack honoring overrides in registry.json."""
+    org = detected_org
+    stack = list(detected_stack)
+    if not isinstance(reg, dict):
+        return org, stack
+    overrides = reg.get("overrides", {})
+    if not isinstance(overrides, dict):
+        return org, stack
+
+    cand = _lookup_reg(overrides, root)
+    if not isinstance(cand, dict):
+        cand = overrides.get(repo)
+
+    if isinstance(cand, dict):
+        if "org" in cand:
+            org = str(cand["org"]).lower() if cand["org"] else None
+        if "stack" in cand:
+            s_val = cand["stack"]
+            if isinstance(s_val, str):
+                stack = [s_val.lower()]
+            elif isinstance(s_val, (list, tuple, set)):
+                stack = sorted(str(s).lower() for s in s_val)
+
+    org_ov = overrides.get("org")
+    if isinstance(org_ov, dict):
+        val = _lookup_reg(org_ov, root) or org_ov.get(repo)
+        if val is not None:
+            org = str(val).lower() if val else None
+    elif isinstance(org_ov, str):
+        org = org_ov.lower()
+
+    stack_ov = overrides.get("stack")
+    if isinstance(stack_ov, dict):
+        val = _lookup_reg(stack_ov, root) or stack_ov.get(repo)
+        if val is not None:
+            if isinstance(val, str):
+                stack = [val.lower()]
+            elif isinstance(val, (list, tuple, set)):
+                stack = sorted(str(s).lower() for s in val)
+    elif isinstance(stack_ov, str):
+        stack = [stack_ov.lower()]
+    elif isinstance(stack_ov, (list, tuple, set)):
+        stack = sorted(str(s).lower() for s in stack_ov)
+
+    return org, stack
+
+
+def _resolve_aliases(reg, repo):
+    """Resolve one-way, non-transitive repo aliases from registry.json."""
+    if not isinstance(reg, dict):
+        return []
+    aliases_map = reg.get("aliases", {})
+    if not isinstance(aliases_map, dict):
+        return []
+    raw = aliases_map.get(f"repo:{repo}") or aliases_map.get(repo) or []
+    if isinstance(raw, str):
+        raw = [raw]
+    res = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        item_s = item.strip().lower()
+        if not item_s:
+            continue
+        label = item_s if ":" in item_s else f"repo:{item_s}"
+        if label not in res:
+            res.append(label)
+    return res
+
+
+def has_layout_marker(store):
+    """True if the store contains the 'layout: labels' marker."""
+    reg_path = os.path.join(store, "registry.json")
+    if os.path.isfile(reg_path):
+        try:
+            with open(reg_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and data.get("layout") == "labels":
+                    return True
+        except (OSError, ValueError):
+            pass
+    for fname in (".layout", ".okfmem-layout", "layout", ".okfmem", "okfmem.yaml"):
+        fpath = os.path.join(store, fname)
+        if os.path.isfile(fpath):
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    content = f.read()
+                    if re.search(r"layout:\s*labels", content):
+                        return True
+            except OSError:
+                pass
+    return False
+
+
+def check_store_layout(store):
+    """Check that the store layout is valid.
+
+    If 'projects/' is present and the 'layout: labels' marker is absent,
+    raise ValueError pointing to 'okfmem migrate-to-labels'.
+    """
+    projects_dir = os.path.join(store, "projects")
+    if os.path.isdir(projects_dir) and not has_layout_marker(store):
+        raise ValueError(
+            f"store at '{store}' uses legacy projects/ layout without 'layout: labels' marker; "
+            "run 'okfmem migrate-to-labels'"
+        )
+
+
+def _page_title_fallback(text, slug):
+    m = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
+    if m:
+        return m.group(1).strip()
+    return slug.replace("-", " ").replace("_", " ").title()
+
+
+def _format_view_pointer(page):
+    target = f"pages/{page['slug']}.md"
+    if page.get("hook"):
+        return f"- [{page['title']}]({target}) — {page['hook']}"
+    return f"- [{page['title']}]({target})"
+
+
+def _check_view_budget(lines):
+    text = "\n".join(lines) + "\n"
+    return len(lines) <= 200 and len(text.encode("utf-8")) <= 8192
+
+
+def _make_view_pages_link(store, view_dir):
+    pages_target = os.path.join(store, "pages")
+    link_path = os.path.join(view_dir, "pages")
+    rel_target = os.path.relpath(pages_target, view_dir)
+    if os.path.islink(link_path) or _is_junction(link_path):
+        if os.path.normcase(os.path.realpath(link_path)) == os.path.normcase(os.path.realpath(pages_target)):
+            return
+        try:
+            if _is_junction(link_path):
+                os.rmdir(link_path)
+            else:
+                os.unlink(link_path)
+        except OSError:
+            pass
+    elif os.path.isdir(link_path):
+        return
+
+    try:
+        os.symlink(rel_target, link_path, target_is_directory=True)
+        return
+    except OSError:
+        if os.name != "nt":
+            try:
+                os.symlink(pages_target, link_path, target_is_directory=True)
+                return
+            except OSError:
+                pass
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J", link_path, pages_target],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return
+        except (OSError, subprocess.CalledProcessError):
+            pass
+    if os.path.isdir(pages_target):
+        shutil.copytree(pages_target, link_path)
+
+
+def _make_view_state_link(store, view_dir, repo):
+    state_dir = os.path.join(store, "state")
+    os.makedirs(state_dir, exist_ok=True)
+    state_target = os.path.join(state_dir, f"{repo}.md")
+    if not os.path.isfile(state_target):
+        proj_state = os.path.join(store, "projects", repo, "STATE.md")
+        if os.path.isfile(proj_state):
+            shutil.copy2(proj_state, state_target)
+        else:
+            today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            with open(state_target, "w", encoding="utf-8") as f:
+                f.write(
+                    "---\n"
+                    f"name: {repo}-state\n"
+                    f"description: Active-state snapshot for {repo}\n"
+                    "type: state\n"
+                    f"modified: {today_iso}\n"
+                    "---\n\n"
+                    f"# STATE — {repo}\n\n"
+                )
+    link_path = os.path.join(view_dir, "STATE.md")
+    rel_state = os.path.relpath(state_target, view_dir)
+    if os.path.islink(link_path):
+        if os.path.normcase(os.path.realpath(link_path)) == os.path.normcase(os.path.realpath(state_target)):
+            return
+        try:
+            os.unlink(link_path)
+        except OSError:
+            pass
+    elif os.path.isfile(link_path):
+        return
+
+    try:
+        os.symlink(rel_state, link_path)
+        return
+    except OSError:
+        if os.name != "nt":
+            try:
+                os.symlink(state_target, link_path)
+                return
+            except OSError:
+                pass
+    shutil.copy2(state_target, link_path)
+
+
+def compile_view(store, repo, org=None, stack=None, aliases=None, reg=None):
+    """Compile dynamic MEMORY.md projection and lane indexes into views/<repo>/."""
+    view_dir = os.path.join(store, "views", repo)
+    os.makedirs(view_dir, exist_ok=True)
+
+    for fname in os.listdir(view_dir):
+        if fname.startswith("MEMORY-") and fname.endswith(".md"):
+            try:
+                os.remove(os.path.join(view_dir, fname))
+            except OSError:
+                pass
+
+    pages_dir = os.path.join(store, "pages")
+    repo_pages = []
+    org_pages = []
+    stack_pages = []
+
+    all_repo_labels = {f"repo:{repo}"}
+    for a in (aliases or []):
+        all_repo_labels.add(a)
+
+    org_label = f"org:{org}" if org else None
+    stack_labels = {f"stack:{s}" for s in (stack or [])}
+
+    if os.path.isdir(pages_dir):
+        for fname in sorted(os.listdir(pages_dir)):
+            if not fname.endswith(".md") or fname in ("MEMORY.md", "STATE.md", "CONTEXT.md"):
+                continue
+            fpath = os.path.join(pages_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    text = f.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+
+            from memory_frontmatter import find_frontmatter, parse_fields, parse_labels
+            fm = find_frontmatter(text)
+            fields = parse_fields(text, fm) if fm else {}
+            labels = parse_labels(text, fm, warn=None) if fm else []
+
+            slug = fname[:-3]
+            try:
+                importance = int(fields.get("importance", 1))
+            except (ValueError, TypeError):
+                importance = 1
+            recency = fields.get("last_accessed") or fields.get("created") or ""
+            title = fields.get("name") or fields.get("title") or _page_title_fallback(text, slug)
+            hook = fields.get("description") or ""
+            if hook == title:
+                hook = ""
+
+            page_info = {
+                "slug": slug,
+                "title": title,
+                "hook": hook,
+                "importance": importance,
+                "recency": recency,
+                "labels": labels,
+            }
+
+            labels_set = set(labels)
+            if labels_set & all_repo_labels:
+                repo_pages.append(page_info)
+            elif org_label and org_label in labels_set:
+                org_pages.append(page_info)
+            elif labels_set & stack_labels:
+                stack_pages.append(page_info)
+
+    def sort_key(p):
+        rec_clean = p["recency"].replace("-", "")
+        rec_val = int(rec_clean) if rec_clean.isdigit() else 0
+        return (-p["importance"], -rec_val, p["slug"])
+
+    repo_pages.sort(key=sort_key)
+    org_pages.sort(key=sort_key)
+    stack_pages.sort(key=sort_key)
+
+    header = [f"# MEMORY — {repo}", ""]
+
+    def assemble(r_pages, o_pages, s_pages, lanes):
+        lines = list(header)
+        if r_pages:
+            lines.extend([f"## {repo}", ""])
+            lines.extend([_format_view_pointer(p) for p in r_pages])
+            lines.append("")
+        if "repo" in lanes and lanes["repo"]:
+            lines.extend([
+                f"- [Additional Project Memory](MEMORY-lane-overflow.md) — covers additional project memory for {repo}",
+                ""
+            ])
+        if o_pages:
+            lines.extend([f"## {org}", ""])
+            lines.extend([_format_view_pointer(p) for p in o_pages])
+            lines.append("")
+        elif "org" in lanes and lanes["org"]:
+            lines.extend([
+                f"## {org}", "",
+                f"- [Organization Memory](MEMORY-lane-org.md) — covers shared organization memory for {org}",
+                ""
+            ])
+        if s_pages:
+            lines.extend(["## Stack", ""])
+            lines.extend([_format_view_pointer(p) for p in s_pages])
+            lines.append("")
+        elif "stack" in lanes and lanes["stack"]:
+            s_desc = ", ".join(stack or [])
+            lines.extend([
+                "## Stack", "",
+                f"- [Stack Memory](MEMORY-lane-stack.md) — covers stack standards and conventions for {s_desc}",
+                ""
+            ])
+        return lines
+
+    lanes = {}
+    active_repo = list(repo_pages)
+    active_org = list(org_pages)
+    active_stack = list(stack_pages)
+
+    lines = assemble(active_repo, active_org, active_stack, lanes)
+    if not _check_view_budget(lines) and active_stack:
+        lanes["stack"] = active_stack
+        active_stack = []
+        lines = assemble(active_repo, active_org, active_stack, lanes)
+
+    if not _check_view_budget(lines) and active_org:
+        lanes["org"] = active_org
+        active_org = []
+        lines = assemble(active_repo, active_org, active_stack, lanes)
+
+    if not _check_view_budget(lines):
+        spilled_repo = []
+        lanes["repo"] = spilled_repo
+        while active_repo and not _check_view_budget(assemble(active_repo, active_org, active_stack, lanes)):
+            spilled_repo.insert(0, active_repo.pop())
+        lines = assemble(active_repo, active_org, active_stack, lanes)
+
+    memory_path = os.path.join(view_dir, "MEMORY.md")
+    with open(memory_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines).rstrip() + "\n")
+
+    if "stack" in lanes:
+        stack_path = os.path.join(view_dir, "MEMORY-lane-stack.md")
+        s_desc = ", ".join(stack or [])
+        s_lines = [f"# MEMORY — Stack ({s_desc})", ""]
+        s_lines.extend([_format_view_pointer(p) for p in lanes["stack"]])
+        with open(stack_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(s_lines) + "\n")
+
+    if "org" in lanes:
+        org_path = os.path.join(view_dir, "MEMORY-lane-org.md")
+        o_lines = [f"# MEMORY — {org}", ""]
+        o_lines.extend([_format_view_pointer(p) for p in lanes["org"]])
+        with open(org_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(o_lines) + "\n")
+
+    if "repo" in lanes and lanes["repo"]:
+        repo_path = os.path.join(view_dir, "MEMORY-lane-overflow.md")
+        r_lines = [f"# MEMORY — {repo} (Overflow)", ""]
+        r_lines.extend([_format_view_pointer(p) for p in lanes["repo"]])
+        with open(repo_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(r_lines) + "\n")
+
+    _make_view_pages_link(store, view_dir)
+    _make_view_state_link(store, view_dir, repo)
+
+
 def _remote_repo_name(root):
     """Repo name from `remote.origin.url` of the repo at `root`, or None."""
     try:
@@ -251,7 +691,10 @@ def canonical_project_name(root, reg, store=None):
     existing pre-remote project, so a pending move keeps resolving the pages."""
     override = _lookup_reg(reg.get("overrides", {}), root)
     if override:
-        return override
+        if isinstance(override, str):
+            return override
+        if isinstance(override, dict) and "repo" in override and override["repo"]:
+            return str(override["repo"])
     pre_remote = _lookup_reg(reg.get("map", {}), root) or os.path.basename(root)
     remote = _remote_repo_name(root)
     if remote and store:
@@ -263,24 +706,105 @@ def canonical_project_name(root, reg, store=None):
     return remote or pre_remote
 
 
-def resolve_project(store, cwd=None):
+def resolve_project(store, cwd=None, compile=False, check_layout=False):
     """Read-only harness-neutral identity; retain the main-checkout worktree rule."""
+    if compile or check_layout:
+        check_store_layout(store)
+
     if cwd:
         try:
-            out = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=False)
+            out = subprocess.run(
+                ["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
         except OSError:
-            return {"state": "not-a-repo", "project": None, "memory_dir": None, "store": store}
-        root = _shared_repo_root(os.path.normpath(out.stdout.strip())) if out.returncode == 0 else None
+            return {
+                "state": "not-a-repo",
+                "project": None,
+                "repo": None,
+                "org": None,
+                "stack": [],
+                "matched_labels": [],
+                "labels": [],
+                "memory_dir": None,
+                "view_path": None,
+                "view": None,
+                "store": store,
+            }
+        root = (
+            _shared_repo_root(os.path.normpath(out.stdout.strip()))
+            if out.returncode == 0
+            else None
+        )
     else:
         root = _current_project_root()
     if not root:
-        return {"state": "not-a-repo", "project": None, "memory_dir": None, "store": store}
+        return {
+            "state": "not-a-repo",
+            "project": None,
+            "repo": None,
+            "org": None,
+            "stack": [],
+            "matched_labels": [],
+            "labels": [],
+            "memory_dir": None,
+            "view_path": None,
+            "view": None,
+            "store": store,
+        }
     root = os.path.normpath(root)
     reg = _load_registry(os.path.join(store, "registry.json"))
-    name = canonical_project_name(root, reg, store)
-    target = os.path.join(store, "projects", name)
-    ready = all(os.path.isfile(os.path.join(target, f)) for f in ("STATE.md", "MEMORY.md"))
-    return {"state": "ready" if ready else "uninitialized", "project": name, "memory_dir": target, "root": root, "store": store}
+    repo = canonical_project_name(root, reg, store)
+    detected_org = _remote_repo_owner(root)
+    detected_stack = _detect_stack(root)
+    org, stack = _resolve_overrides(reg, root, repo, detected_org, detected_stack)
+    aliases = _resolve_aliases(reg, repo)
+
+    matched_labels = [f"repo:{repo}"]
+    for a in aliases:
+        if a not in matched_labels:
+            matched_labels.append(a)
+    if org:
+        matched_labels.append(f"org:{org}")
+    for s in stack:
+        matched_labels.append(f"stack:{s}")
+
+    view_path = os.path.join(store, "views", repo)
+    if compile:
+        compile_view(store, repo, org=org, stack=stack, aliases=aliases, reg=reg)
+
+    legacy_target = os.path.join(store, "projects", repo)
+    view_ready = os.path.isfile(os.path.join(view_path, "MEMORY.md")) and (
+        os.path.isfile(os.path.join(view_path, "STATE.md"))
+        or os.path.islink(os.path.join(view_path, "STATE.md"))
+    )
+    legacy_ready = all(
+        os.path.isfile(os.path.join(legacy_target, f))
+        for f in ("STATE.md", "MEMORY.md")
+    )
+    ready = view_ready or legacy_ready
+    memory_dir = (
+        view_path
+        if (os.path.isdir(view_path) or not os.path.isdir(legacy_target))
+        else legacy_target
+    )
+
+    return {
+        "state": "ready" if ready else "uninitialized",
+        "project": repo,
+        "repo": repo,
+        "org": org,
+        "stack": stack,
+        "matched_labels": matched_labels,
+        "labels": matched_labels,
+        "view_path": view_path,
+        "view": view_path,
+        "memory_dir": memory_dir,
+        "root": root,
+        "store": store,
+    }
 
 
 def detect_harnesses():
@@ -1296,7 +1820,8 @@ def _already_merged(src_dir, dest_dir, rel):
 def _association_rename_candidate(store, claude_projects, root, reg):
     """(old, new) when `root`'s store project still sits under a pre-remote
     name while origin now names a different repo; None otherwise."""
-    if _lookup_reg(reg.get("overrides", {}), root):
+    ov = _lookup_reg(reg.get("overrides", {}), root)
+    if isinstance(ov, str) or (isinstance(ov, dict) and ov.get("repo")):
         return None
     new = _remote_repo_name(root)
     if not new:
@@ -3134,10 +3659,17 @@ def main():
         default=os.environ.get("OKFMEM_STORE", os.path.expanduser("~/okfmem-store")),
     )
     ap.add_argument("--resolve-project", action="store_true", help="read-only JSON project and memory_dir for every harness")
+    ap.add_argument("--compile", action="store_true", help="compile dynamic MEMORY.md projection in views/<repo>/ on resolve-project")
     args = ap.parse_args()
-    if args.resolve_project:
-        print(json.dumps(resolve_project(os.path.abspath(os.path.expanduser(args.store)))))
-        return
+    if args.resolve_project or args.compile:
+        store = os.path.abspath(os.path.expanduser(args.store))
+        try:
+            check_store_layout(store)
+            print(json.dumps(resolve_project(store, compile=args.compile)))
+            return
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(2)
 
     if args.project_link_state:
         # Pure read; deliberately BEFORE the store-shape check so an
@@ -3174,7 +3706,12 @@ def main():
         return
 
     store = os.path.abspath(os.path.expanduser(args.store))
-    if not os.path.isdir(os.path.join(store, "projects")):
+    try:
+        check_store_layout(store)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
+    if not os.path.isdir(os.path.join(store, "projects")) and not os.path.isdir(os.path.join(store, "pages")):
         print(f"error: no projects/ under {store}", file=sys.stderr)
         sys.exit(2)
 
