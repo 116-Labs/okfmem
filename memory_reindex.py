@@ -532,7 +532,11 @@ def report_data(scan, budget=None, lane_budget=None):
                               if not i["auto_loaded"]), default=0)
     largest_page_bytes = max(page_sizes, default=0)
     archived = len(glob.glob(os.path.join(glob.escape(d), "archive", "*.md")))
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from memory_frontmatter import summarize_pages
+    label_summary = summarize_pages([os.path.join(d, p) for p in scan.pages])
     return {"mode": "report", "dir": d, "auto_loaded": auto,
+            "labels": label_summary,
             "sections": sections, "indexes": indexes,
             "on_disk": {"pages": len(scan.pages), "bytes": page_bytes,
                         "median_page_bytes": median_page_bytes,
@@ -627,6 +631,8 @@ def render_report(data):
     out.append(f"- **Pages**: {od['pages']} ({od['bytes']} bytes; median "
                f"{od['median_page_bytes']}; max {od['max_page_bytes']})")
     out.append(f"- **Archived**: {od['archived']}")
+    from memory_frontmatter import format_summary
+    out.append("- **" + format_summary(data["labels"]).replace(": ", "**: ", 1))
     out.append(f"- These are {od['note']}. Only the auto-loaded table spends "
                "context at session start; lane indexes spend context on recall.")
     return "\n".join(out)

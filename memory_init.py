@@ -610,9 +610,12 @@ def upsert_pointer(path, dry_run, store=None):
         action = "inserted"
 
     if action != "unchanged" and not dry_run:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(new_text)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(new_text)
+        except OSError as exc:
+            return f"skipped (unwritable: {exc.strerror or 'permission denied'})"
     return action
 
 
@@ -940,7 +943,11 @@ def link_skills(dry_run):
     )
     for harness, dest in skill_dirs().items():
         if not dry_run:
-            os.makedirs(dest, exist_ok=True)
+            try:
+                os.makedirs(dest, exist_ok=True)
+            except OSError:
+                actions.append((harness, "*", "skip (unwritable directory)"))
+                continue
         for name in names:
             target = os.path.join(engine, name)
             link = os.path.join(dest, name)
@@ -959,17 +966,21 @@ def link_skills(dry_run):
                     continue
                 action = "repoint"
                 if not dry_run:
-                    if _is_junction(link):
-                        # A junction is a directory reparse point: unlink it
-                        # with rmdir (removes the link, not the target). rmtree
-                        # on a junction can traverse INTO the target on older
-                        # Python — never do that here.
-                        os.rmdir(link)
-                    elif os.path.isdir(link) and not os.path.islink(link):
-                        shutil.rmtree(link)  # tier-3 real copy dir
-                    else:
-                        os.remove(link)
-                    tier = _make_link(target, link)
+                    try:
+                        if _is_junction(link):
+                            # A junction is a directory reparse point: unlink it
+                            # with rmdir (removes the link, not the target). rmtree
+                            # on a junction can traverse INTO the target on older
+                            # Python — never do that here.
+                            os.rmdir(link)
+                        elif os.path.isdir(link) and not os.path.islink(link):
+                            shutil.rmtree(link)  # tier-3 real copy dir
+                        else:
+                            os.remove(link)
+                        tier = _make_link(target, link)
+                    except OSError:
+                        actions.append((harness, name, "skip (unwritable)"))
+                        continue
                     if tier == "copy":
                         action = (
                             "repoint (copy — will go stale; re-run "
@@ -983,7 +994,11 @@ def link_skills(dry_run):
             else:
                 action = "link"
                 if not dry_run:
-                    tier = _make_link(target, link)
+                    try:
+                        tier = _make_link(target, link)
+                    except OSError:
+                        actions.append((harness, name, "skip (unwritable)"))
+                        continue
                     if tier == "junction":
                         action = "link (junction)"
                     elif tier == "copy":
@@ -2884,6 +2899,10 @@ def cmd_status(store, show_all=False, project_filter=None):
         hidden = len(inv) - len(shown)
         if hidden > 0:
             print(f"    + {hidden} more (okfmem status --all)")
+
+    from memory_frontmatter import format_summary, page_paths, summarize_pages
+
+    print("  " + format_summary(summarize_pages(page_paths(store))))
 
     # Decay epoch -- the cold-start guard consolidation writes on first apply.
     decay_path = os.path.join(store, "decay_state.json")

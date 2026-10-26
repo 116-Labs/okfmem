@@ -41,6 +41,8 @@ from datetime import datetime, timezone
 # Shared git commit+push path (pull-rebase + lock) lives beside this script.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from memory_sync import sync_store  # noqa: E402
+# Re-exported: memory_graduate and memory_inbox import these names from here.
+from memory_frontmatter import find_frontmatter, parse_fields  # noqa: E402,F401
 # Index enumeration: since #53's write-time lane routing, a page's pointer may
 # live in any `MEMORY*.md`, not just the root one. One shared enumerator so
 # this pass and `okfmem reindex --verify` can never disagree about the file set.
@@ -49,9 +51,6 @@ from memory_reindex import index_files  # noqa: E402
 SKIP_NAMES = {"MEMORY.md", "STATE.md", "CONTEXT.md"}
 DECAY_EXEMPT_TYPES = {"user", "feedback"}
 
-OPEN_RE = re.compile(r"^---(\r\n|\n)")
-TOP_TYPE_RE = re.compile(r"^type:\s*(.*?)\s*$")
-
 ARCHIVE_R_MAX = 0.40      # R below this is a decay candidate
 ARCHIVE_T_DAYS = 30       # untouched-for-a-month plain-language gate
 ARCHIVE_AGE_DAYS = 14     # never archive a page younger than this
@@ -59,34 +58,8 @@ ARCHIVE_CAP = 20          # max archives per run (mass-sweep backstop)
 
 
 # ---------------------------------------------------------------------------
-# frontmatter parsing (byte-preserving; no PyYAML — matches sibling okf-*.py)
+# frontmatter writing (parsing is the shared memory_frontmatter module)
 # ---------------------------------------------------------------------------
-def find_frontmatter(text):
-    """Return (eol, body_start, body_end) for the leading YAML block, or None."""
-    m = OPEN_RE.match(text)
-    if not m:
-        return None
-    eol = m.group(1)
-    body_start = m.end()
-    close_re = re.compile(r"(\r\n|\n)---[ \t]*(\r\n|\n|$)")
-    cm = close_re.search(text, body_start - len(eol))
-    if not cm:
-        return None
-    body_end = cm.start() + len(cm.group(1))
-    return eol, body_start, body_end
-
-
-def parse_fields(text, fm):
-    """Top-level scalar key -> raw string value, over the frontmatter body."""
-    eol, body_start, body_end = fm
-    fields = {}
-    for ln in text[body_start:body_end].split(eol):
-        m = re.match(r"^([A-Za-z_][\w-]*):\s?(.*)$", ln)
-        if m:
-            fields[m.group(1)] = m.group(2).strip()
-    return fields
-
-
 def update_fields(text, fm, updates):
     """Return text with each key in `updates` replaced in place (or appended
     just before the closing `---`), preserving EOL style and all other bytes."""
