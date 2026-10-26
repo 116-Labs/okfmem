@@ -461,7 +461,9 @@ def resolve_target(args):
         reg = _load_registry(os.path.join(store, "registry.json"))
         project = canonical_project_name(root, reg, store)
 
-    d = os.path.join(store, "projects", project)
+    d = os.path.join(store, "views", project)
+    if not os.path.isdir(d):
+        d = os.path.join(store, "projects", project)
     if not os.path.isdir(d):
         raise ReindexError(f"no store project dir for '{project}': {d}")
     return d

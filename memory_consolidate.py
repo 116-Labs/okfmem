@@ -102,18 +102,36 @@ def build_alias_index(store):
     return aliases
 
 
+_LAST_HOOK_PAYLOAD = {}
+
+
 def read_hook_payload(args):
     """Read the Stop-hook JSON from stdin ONCE (stdin can't be re-read).
 
     Returns {} when not in --stdin-hook mode (a manual/--transcript run) or on
     any parse error. Callers pull `transcript_path` / `cwd` out of the result.
     """
+    global _LAST_HOOK_PAYLOAD
     if args.transcript or not args.stdin_hook:
+        _LAST_HOOK_PAYLOAD = {}
         return {}
     try:
-        return json.loads(sys.stdin.read() or "{}")
+        data = json.loads(sys.stdin.read() or "{}")
+        _LAST_HOOK_PAYLOAD = data if isinstance(data, dict) else {}
+        return _LAST_HOOK_PAYLOAD
     except (ValueError, OSError):
+        _LAST_HOOK_PAYLOAD = {}
         return {}
+
+
+def _refresh_view(store, payload=None):
+    try:
+        from memory_init import resolve_project
+        hook_cwd = payload.get("cwd") if isinstance(payload, dict) else None
+        cwd = hook_cwd or os.getcwd()
+        resolve_project(store, cwd=cwd, compile=True)
+    except Exception:
+        pass
 
 
 def load_transcript(args, payload):
@@ -658,7 +676,7 @@ def git_commit_push(store, n_archived, n_bumped, do_push):
         print(f"  push failed: {res['push_error']}")
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true",
                     help="print the plan, write nothing")
@@ -676,11 +694,11 @@ def main():
                     help="commit but do not push")
     ap.add_argument("--force", action="store_true",
                     help="run apply even if the store working tree is dirty")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     store = os.path.abspath(os.path.expanduser(args.store))
     proj_root = os.path.join(store, "projects")
-    if not os.path.isdir(proj_root):
+    if not os.path.isdir(proj_root) and not os.path.isdir(os.path.join(store, "pages")):
         print(f"error: no projects/ under {store}", file=sys.stderr)
         sys.exit(2)
 
@@ -694,6 +712,11 @@ def main():
     # on a dirty tree where consolidation below defers, so the badge stays fresh.
     transcript = update_statusline(args, store, today)
 
+    if not os.path.isdir(proj_root):
+        if not args.dry_run:
+            _refresh_view(store, _LAST_HOOK_PAYLOAD)
+        return
+
     if not args.dry_run and not args.no_commit and not args.force:
         if not git_clean(store):
             # Consolidation is idempotent background maintenance; a dirty tree
@@ -706,6 +729,8 @@ def main():
                 print("okfmem consolidate: store working tree dirty — "
                       "skipping this run (uncommitted memory writes or an "
                       "in-flight `okfmem sync`); will retry next session.")
+                if not args.dry_run:
+                    _refresh_view(store, _LAST_HOOK_PAYLOAD)
                 sys.exit(0)
             print("error: store working tree is dirty — commit/stash first, "
                   "or pass --force / --no-commit.", file=sys.stderr)
@@ -766,6 +791,9 @@ def main():
         print(f"index lines dropped: {dropped_total}")
 
     print(f"mode: {'DRY-RUN' if args.dry_run else 'APPLY'}")
+
+    if not args.dry_run:
+        _refresh_view(store, _LAST_HOOK_PAYLOAD)
 
     if args.dry_run:
         return
