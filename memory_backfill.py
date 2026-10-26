@@ -33,35 +33,16 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from memory_frontmatter import TOP_TYPE_RE, find_frontmatter  # noqa: E402
+
 SKIP_NAMES = {"MEMORY.md", "STATE.md", "CONTEXT.md"}
 
-OPEN_RE = re.compile(r"^---(\r\n|\n)")
-TOP_TYPE_RE = re.compile(r"^type:\s*(.*?)\s*$")
 TOP_ACCESS_RE = re.compile(r"^access_count:\s*", re.MULTILINE)
 
 # importance by type; user/feedback are pinned (decay-exempt) at max importance.
 IMPORTANCE = {"user": 10, "feedback": 10, "project": 6, "reference": 3}
 PINNED_TYPES = {"user", "feedback"}
-
-
-def find_frontmatter(text):
-    """Return (eol, body_start, body_end) for the leading YAML block, or None.
-
-    body is between the opening delimiter line and the closing `---` line;
-    body_end is the index where the closing-delimiter EOL begins (i.e. new keys
-    inserted at body_end land as the last frontmatter lines).
-    """
-    m = OPEN_RE.match(text)
-    if not m:
-        return None
-    eol = m.group(1)
-    body_start = m.end()
-    close_re = re.compile(r"(\r\n|\n)---[ \t]*(\r\n|\n|$)")
-    cm = close_re.search(text, body_start - len(eol))
-    if not cm:
-        return None
-    body_end = cm.start() + len(cm.group(1))
-    return eol, body_start, body_end
 
 
 def top_type(text, eol, body_start, body_end):

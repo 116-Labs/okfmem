@@ -99,13 +99,16 @@ def wire_hooks(store, dry_run=False, remove=False):
     if json.dumps(data, sort_keys=True) == before:
         return "unchanged"
     if not dry_run:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        if os.path.isfile(path):
-            mi.shutil.copy2(path, path + ".okfmem-backup")
-        with open(path + ".okfmem-tmp", "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-            f.write("\n")
-        os.replace(path + ".okfmem-tmp", path)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            if os.path.isfile(path):
+                mi.shutil.copy2(path, path + ".okfmem-backup")
+            with open(path + ".okfmem-tmp", "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+                f.write("\n")
+            os.replace(path + ".okfmem-tmp", path)
+        except OSError as exc:
+            return f"skipped (unwritable: {exc.strerror or 'permission denied'})"
     return (
         "would remove"
         if remove and dry_run
