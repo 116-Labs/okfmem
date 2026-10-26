@@ -20,6 +20,7 @@ commits:
 branches:
   prefix: gaal/
 merge:
+  auto: true
   queue: false
   method: squash
   message_source: commits
@@ -32,7 +33,7 @@ review:
     reviewer: separate
     login: 116-labs-gaal-review[bot]
   dismiss_stale_approvals: true
-  require_last_push_approval: false
+  require_last_push_approval: true
   code_owner_reviews: true
   required_checks:
     - verify
