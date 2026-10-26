@@ -84,6 +84,7 @@ def assoc(tmp_path, monkeypatch):
     claude = tmp_path / "claude_projects"
     claude.mkdir()
     root = _git_repo(tmp_path / "my-tool")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
     monkeypatch.setattr(mi, "_current_git_root", lambda: root)
     return {"store": str(store), "claude": str(claude), "root": root}
 

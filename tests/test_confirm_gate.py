@@ -72,6 +72,7 @@ def _isolated_env(tmp_path, monkeypatch):
     store = tmp_path / "store"
     (store / "projects" / "okfmem").mkdir(parents=True)
     real = os.path.expanduser
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.setattr(
         mi.os.path, "expanduser",
         lambda p: (str(home) + p[1:]) if p == "~" or p[:2] in ("~/", "~\\")
