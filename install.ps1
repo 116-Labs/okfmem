@@ -39,6 +39,43 @@ if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyCo
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
+# PS 5.1: native stderr redirection (2>&1 or 2>$null) with EAP=Stop turns stderr
+# into a terminating NativeCommandError. Invoke-Git relaxes EAP for the call.
+function Invoke-Git {
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [string[]]$GitArgs,
+        [switch]$Quiet
+    )
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        if ($Quiet) {
+            & git @GitArgs 2>$null
+        } else {
+            & git @GitArgs 2>&1
+        }
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+}
+
+function Invoke-GitQuiet {
+    param([string[]]$GitArgs)
+    Invoke-Git -GitArgs $GitArgs -Quiet
+}
+
+function Invoke-Gh {
+    param([Parameter(Mandatory = $true, Position = 0)][string[]]$GhArgs)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & gh @GhArgs 2>$null
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+}
+
 Write-Host "=> Installing okfmem..."
 
 # 0. Check dependencies -------------------------------------------------
@@ -142,7 +179,7 @@ function Write-ManualRemoteHint {
 function Link-ExistingStoreRemote {
     param([string]$StoreDir, [string]$Url)
 
-    if ((git -C "$StoreDir" remote 2>$null) -contains "origin") {
+    if ((Invoke-GitQuiet @('-C', $StoreDir, 'remote')) -contains "origin") {
         git -C "$StoreDir" remote set-url origin "$Url"
     } else {
         git -C "$StoreDir" remote add origin "$Url"
@@ -156,26 +193,19 @@ function Link-ExistingStoreRemote {
     }
 
     # Remote's default branch (main/master) -- don't assume.
-    $def = (git -C "$StoreDir" remote show origin 2>$null |
+    $def = (Invoke-GitQuiet @('-C', $StoreDir, 'remote', 'show', 'origin') |
             Select-String 'HEAD branch:' |
             ForEach-Object { ($_ -replace '.*HEAD branch:\s*', '').Trim() } |
             Select-Object -First 1)
     if (-not $def) { $def = "main" }
 
-    git -C "$StoreDir" rev-parse --verify --quiet HEAD 2>$null | Out-Null
+    Invoke-GitQuiet @('-C', $StoreDir, 'rev-parse', '--verify', '--quiet', 'HEAD') | Out-Null
     if ($LASTEXITCODE -eq 0) {
-        # Local store already has its own commits -- never clobber them. Do set
-        # the upstream so `okfmem sync`/status and the uninstaller's
-        # unpushed-work checks track origin again (fetch above guarantees
-        # origin/$def exists locally). EAP is relaxed for the call: under 5.1,
-        # stderr redirection + ErrorActionPreference=Stop turns git's stderr
-        # into a terminating NativeCommandError.
-        $cur = (git -C "$StoreDir" branch --show-current)
+        # Local store already has its own commits -- never clobber them. Set
+        # upstream tracking branch so okfmem sync/status track origin.
+        $cur = (Invoke-GitQuiet @('-C', $StoreDir, 'branch', '--show-current'))
         if ($cur) {
-            $prevEap = $ErrorActionPreference
-            $ErrorActionPreference = 'Continue'
-            git -C "$StoreDir" branch --set-upstream-to="origin/$def" $cur 2>$null | Out-Null
-            $ErrorActionPreference = $prevEap
+            Invoke-GitQuiet @('-C', $StoreDir, 'branch', "--set-upstream-to=origin/$def", $cur) | Out-Null
         }
         Write-Host "=> Remote linked as origin. Your local store already has commits;"
         Write-Host "   reconcile when ready:  git -C $StoreDir pull --rebase origin $def"
@@ -184,10 +214,10 @@ function Link-ExistingStoreRemote {
     # Empty local store: adopt the remote wholesale. -f overwrites the fresh
     # stubs the installer just wrote (registry.json, projects/) -- the remote is
     # authoritative for a store the user is choosing to pull down.
-    # Merge stderr into stdout with 2>&1 and capture it: git writes "Switched to
-    # a new branch" to stderr even on SUCCESS, and a bare 2>$null still surfaces
-    # it as a red NativeCommandError under ErrorActionPreference=Stop.
-    $checkout = (git -C "$StoreDir" checkout -f -B $def "origin/$def" 2>&1)
+    # Git writes branch status to stderr on success; under PS 5.1 with EAP=Stop,
+    # any native stderr redirection triggers a terminating NativeCommandError.
+    # Invoke-Git relaxes EAP to Continue so stderr is captured and $LASTEXITCODE is checked.
+    $checkout = (Invoke-Git @('-C', $StoreDir, 'checkout', '-f', '-B', $def, "origin/$def"))
     if ($LASTEXITCODE -eq 0) {
         Write-Host "=> Pulled your memory store from $Url (branch $def)."
     } else {
@@ -213,8 +243,8 @@ function Set-StoreRemote {
 
     # `git remote` exits 0 and prints nothing when there's no remote -- unlike
     # `git remote get-url origin`, which exits non-zero and writes to stderr.
-    if ((git -C "$StoreDir" remote 2>$null) -contains "origin") {
-        $existing = (git -C "$StoreDir" remote get-url origin 2>$null)
+    if ((Invoke-GitQuiet @('-C', $StoreDir, 'remote')) -contains "origin") {
+        $existing = (Invoke-GitQuiet @('-C', $StoreDir, 'remote', 'get-url', 'origin'))
         Write-Host "=> Store already has a remote: $existing"
         return
     }
@@ -230,7 +260,7 @@ function Set-StoreRemote {
         return
     }
 
-    gh auth status 2>$null | Out-Null
+    Invoke-Gh @('auth', 'status') | Out-Null
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Error: 'gh' is installed but not authenticated."
         Write-Host "  Run:  gh auth login  then re-run the installer, or add a remote by hand:"
@@ -240,7 +270,7 @@ function Set-StoreRemote {
 
     # gh is present and authed: does an okfmem-store repo already exist? If so,
     # offer to link + pull it rather than trying (and failing) to create a dup.
-    $existing = (gh repo view okfmem-store --json url --jq .url 2>$null)
+    $existing = (Invoke-Gh @('repo', 'view', 'okfmem-store', '--json', 'url', '--jq', '.url'))
     if ($LASTEXITCODE -eq 0 -and $existing) {
         Write-Host "Found an existing private GitHub store:"
         Write-Host "    $existing"
@@ -267,13 +297,12 @@ function Set-StoreRemote {
         return
     }
 
-    # Push only if the store already has a commit to push. Capture stderr (git
-    # prints progress + "branch set up to track" there on success) so it doesn't
-    # surface as a red NativeCommandError under ErrorActionPreference=Stop.
-    git -C "$StoreDir" rev-parse --verify --quiet HEAD 2>$null | Out-Null
+    # Push writes progress to stderr on success; Invoke-Git relaxes EAP so
+    # PS 5.1 does not terminate with NativeCommandError (#96).
+    Invoke-GitQuiet @('-C', $StoreDir, 'rev-parse', '--verify', '--quiet', 'HEAD') | Out-Null
     if ($LASTEXITCODE -eq 0) {
-        $branch = (git -C "$StoreDir" branch --show-current)
-        $push = (git -C "$StoreDir" push -u origin $branch 2>&1)
+        $branch = (Invoke-GitQuiet @('-C', $StoreDir, 'branch', '--show-current'))
+        $push = (Invoke-Git @('-C', $StoreDir, 'push', '-u', 'origin', $branch))
         if ($LASTEXITCODE -ne 0) { Write-Host "  Push failed: $push" }
     }
     Write-Host "=> Store remote ready."

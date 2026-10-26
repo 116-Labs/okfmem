@@ -54,18 +54,32 @@ if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyCo
 # (2>$null or 2>&1) routes each stderr line through PowerShell's error stream,
 # and the FIRST line becomes a terminating NativeCommandError. So a probe that
 # legitimately fails ("no upstream configured for branch 'main'") killed the
-# script mid-check instead of returning non-zero. Run all git probes through
-# this helper, which relaxes EAP for the duration; callers still read
-# $LASTEXITCODE as usual (it is a global automatic variable and survives).
-function Invoke-GitQuiet {
-    param([string[]]$GitArgs)
+# script mid-check instead of returning non-zero. Run all git calls that
+# redirect stderr through Invoke-Git (which relaxes EAP for the duration);
+# callers still read $LASTEXITCODE as usual (it is a global automatic variable
+# and survives).
+function Invoke-Git {
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [string[]]$GitArgs,
+        [switch]$Quiet
+    )
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & git @GitArgs 2>$null
+        if ($Quiet) {
+            & git @GitArgs 2>$null
+        } else {
+            & git @GitArgs 2>&1
+        }
     } finally {
         $ErrorActionPreference = $prev
     }
+}
+
+function Invoke-GitQuiet {
+    param([string[]]$GitArgs)
+    Invoke-Git -GitArgs $GitArgs -Quiet
 }
 
 # Confirmation helper. Deliberately does NOT pre-detect interactivity:
