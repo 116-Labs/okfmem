@@ -24,13 +24,13 @@ a home-directory checkout. SKILL_DIR is the real directory containing this skill
 
 **Everything is plain markdown under `~/okfmem-store` — no MCP, no daemon.** Active state and durable insights are files the native memory system auto-loads next session (`STATE.md`, `MEMORY.md`, and the `<topic>.md` pages). This skill writes them directly, in-session, on whatever model the session is on, then runs the final `git` commit/push via the shared `okfmem sync` helper.
 
-## Two-layer architecture (for context)
+## Store layout (for context)
 
-Everything lives under the resolved store project memory directory:
+The store is a flat, label-indexed pool (#97). Write to the store, never to the view:
 
-- **Active state** lives in `STATE.md` — a bounded, single-session snapshot with a fixed 6-section shape (Summary / Left off / Next steps / Decisions / Blockers / Goal) plus OKF `type: state` frontmatter. It is **overwritten every session**, never appended. The native memory system auto-loads it next session.
-- **Durable knowledge** lives in per-topic `<topic>.md` pages (OKF v0.1: markdown + YAML frontmatter with a top-level `type:` field ∈ `user` | `feedback` | `project` | `reference`), indexed by one-line pointers in a `MEMORY*.md` index — the matching lane index by default, the root `MEMORY.md` only for cross-lane or `type: feedback` pages (#53; see Step 3). This is the durable write path: create or update the page, then add/refresh its pointer in that index.
-- `STATE.md` uses a separate `type: state` (see Step 5) — a different file with a different consumer (active-state snapshot, not the durable-page index), not a fifth value in the `type:` enum above.
+- **Durable knowledge** lives in `$STORE_PATH/pages/<slug>.md`: one pool for every repo. Each page is OKF v0.1 (markdown + YAML frontmatter with a top-level `type:` field ∈ `user` | `feedback` | `project` | `reference`) and carries `labels: [repo:<project>]` (plus `org:`/`stack:` labels when it applies more widely).
+- **Active state** lives in `$STORE_PATH/state/<project>.md`: a bounded, single-session snapshot with a fixed 6-section shape (Summary / Left off / Next steps / Decisions / Blockers / Goal) plus OKF `type: state` frontmatter. It is **overwritten every session**, never appended. `type: state` is a separate kind, not a fifth value in the page `type:` enum.
+- **The view** `$MEMORY_DIR` = `$STORE_PATH/views/<project>/` is what harnesses auto-load. It is **compiled and gitignored**: its `MEMORY.md` and `MEMORY-lane-*.md` indexes are generated from page labels (one line per page from its `name` + `description`), its `pages` links to the pool, and its `STATE.md` links to (or, on Windows without symlink rights, copies) the state file. **Never write into `$MEMORY_DIR`**: a page there is never synced, an index edit is overwritten on the next compile, and on Windows a `STATE.md` written there is a local copy, not the synced state.
 
 ## When to use
 
@@ -45,9 +45,10 @@ Draft memory directly in the current session. Optional issue comments can also b
 Run `okfmem init --resolve-project` (read-only JSON). Honor an explicit store
 with `--store PATH`, otherwise `$OKFMEM_STORE` or the default store.
 Use `project`, `root`, `memory_dir`, and `store` as PROJECT_NAME, PROJECT_ROOT, MEMORY_DIR, and STORE_PATH.
-Proceed only when `state` is `ready` and memory_dir is nonempty. For
-`uninitialized`, run `okfmem init --store STORE_PATH` from the repository and resolve again.
-For `not-a-repo` or an unreachable engine, stop; never write into projects/.
+Set PAGES_DIR=`$STORE_PATH/pages` and STATE_FILE=`$STORE_PATH/state/$PROJECT_NAME.md`; those are the only
+write targets. Proceed only when `state` is `ready` and memory_dir is nonempty. For
+`uninitialized`, run `okfmem init --yes --store STORE_PATH` from the repository and resolve again.
+For `not-a-repo` or an unreachable engine, stop. Never write into `projects/` (retired) or into `$MEMORY_DIR` (compiled, gitignored).
 Run `okfmem pull --quiet --store "$STORE_PATH"` before reading existing memory.
 Claude native links remain supported; Codex and AGY use this store path directly.
 No cleanup script or harness-specific agent API is required to save memory.
@@ -71,14 +72,14 @@ For each durable item worth preserving across sessions, pick the right home:
 | A `distill` candidate that clears the Step 3 capture bar and adds a fact no existing page holds | **Memory page** (Step 3). If an existing page covers the topic under a different slug, reuse that exact filename (`Edit`, not a duplicate `Write`) per Step 3's reuse rule |
 | A `distill` candidate that is status/derivable, or whose fact an existing page already holds (under any slug) | **Skip** — name it in Step 8 |
 | What's in progress, next step, active blocker | **`STATE.md`** (see Step 5) — bounded active state |
-| Decision, engineering insight, reusable pattern, "lesson learned" | **Memory page** — a `<topic>.md` page + `MEMORY.md` pointer (see Step 3) |
+| Decision, engineering insight, reusable pattern, "lesson learned" | **Memory page** — `$PAGES_DIR/<slug>.md` labelled `repo:<PROJECT_NAME>` (see Step 3) |
 | Bug discovered, follow-up work not yet started | **GitHub issue** — file it |
 | What shipped in this session | **`STATE.md`** (`Summary` + `Decisions` if significant) |
 | What shipped in prior sessions | **Skip** — `git log` + the issue tracker are authoritative |
 
 ### Step 3: Capture durable insights as memory pages
 
-For each durable insight from this session, write (or update) one markdown page under `$MEMORY_DIR` and add/refresh its pointer in that project's `MEMORY.md` index. Emit these `Write`/`Edit` calls directly on the session model — **do not spawn a Haiku Agent per file.** This mirrors the persistent file-based memory convention in `~/.claude/CLAUDE.md`.
+For each durable insight from this session, write (or update) one markdown page in `$PAGES_DIR`. There is no index to edit: the view's `MEMORY.md` is compiled from the pages' labels. Emit these `Write`/`Edit` calls directly on the session model — **do not spawn a Haiku Agent per file.**
 
 The capture bar: decisions, engineering insights, reusable patterns, and lessons learned that will matter across sessions. Skip routine/derivable activity (what shipped, one-off chores) — `git log` and the issue tracker are authoritative for those.
 
@@ -90,16 +91,22 @@ The capture bar: decisions, engineering insights, reusable patterns, and lessons
 
 The test is *durability under `git log`*, not importance-at-the-time. Capture the fact **stripped of its status wrapper** — the gotcha, not the changelog. Evidence: one curation pass on a real project deleted 73 of 445 memory entries (16% of the store), almost all status wrappers; age was a dead signal (nothing over 90 days).
 
-Each page is OKF v0.1: markdown with YAML frontmatter carrying a **top-level `type:`** field (`user` | `feedback` | `project` | `reference`).
+Each page is OKF v0.1: markdown with YAML frontmatter.
 
-- **Filename** — a short kebab-case slug, e.g. `gh-api-save-partial-failure.md`. Reuse the *exact* existing filename when extending a topic already captured — `Edit` (or re-`Write`) that page so it merges instead of duplicating.
-- **`type`** — the frontmatter kind above.
+- **Filename** — a short kebab-case slug, e.g. `gh-api-save-partial-failure.md`. The pool is shared by every repo, so **search all of `$PAGES_DIR` first** (`grep -ril '<topic words>' "$PAGES_DIR"`, not just this repo's pages) and reuse the *exact* existing filename when a page already covers the topic — `Edit` it so it merges instead of duplicating. If that page belongs to another repo and also applies here, add `repo:<PROJECT_NAME>` to its `labels:` rather than copying it.
+- **`name`** — the human title. The compiled index shows it as the link text.
+- **`description`** — the one-line recall hook. The compiled index shows it after the link.
+- **`type`** — `user` | `feedback` | `project` | `reference`.
+- **`labels`** — at least `repo:<PROJECT_NAME>`; add `org:<owner>` or `stack:<lang>` only when the fact genuinely holds org-wide or stack-wide (those pages surface in every matching repo's view).
 
-**New topic** → `Write` the page:
+**New topic** → `Write` `$PAGES_DIR/<slug>.md`:
 
 ```markdown
 ---
+name: <Title>
+description: <one-line hook>
 type: <user|feedback|project|reference>
+labels: [repo:<PROJECT_NAME>]
 ---
 
 # <Title>
@@ -107,25 +114,15 @@ type: <user|feedback|project|reference>
 <the insight, one paragraph per point; for feedback/project, include the why and how>
 ```
 
-**Existing topic** (slug already a page in `$MEMORY_DIR`) → `Edit` that page to add the new fact, or supersede stale content in place (no manual `SUPERSEDED` markers needed — just rewrite the page to current truth).
+**Existing topic** → `Edit` that page to add the new fact, or supersede stale content in place (no manual `SUPERSEDED` markers needed — just rewrite the page to current truth). Refresh `description` if the hook changed.
 
-**Index pointer** — for every new page, add a one-line pointer to the matching index (its target — a lane index by default, `MEMORY.md` only when the page qualifies as cross-lane — is decided by the lane-routing rule below, before the budget check); for an updated page, refresh the existing pointer in that same index if its hook changed:
+**Budget: the compiled index line is ≤150 chars, enforced here at write time (#52).** The line is `- [<name>](pages/<slug>.md) — <description>`; count it before writing. Over 150, tighten `description`: move detail into the page body, where it costs nothing. Advisory, not a hard gate: if it can't be tightened without losing recall value, write it anyway and **report it** in Step 8.
 
+**Recompile the view** after the page writes so this session's pages show up in `$MEMORY_DIR/MEMORY.md` (the compiler routes overflow into lane indexes itself):
+
+```bash
+okfmem init --resolve-project --compile --store "$STORE_PATH"
 ```
-- [<Title>](<slug>.md) — <one-line hook>
-```
-
-**Budget: the full pointer line is ≤150 chars, enforced here at write time (#52).** Capture runs every session; curate runs rarely — a budget only checked at curate time is a budget that is out of compliance almost always. Count the whole line (`- [<Title>](<slug>.md) — <hook>`) before writing it. Over 150, tighten the hook: move detail into the page body, where it costs nothing, and leave the index line as a bare recall hook. Apply the same check on a *refresh* — updating an existing topic's pointer must not silently re-inflate a line that was already in budget.
-
-This is advisory, not a hard gate: if a hook genuinely can't be tightened under 150 without losing the recall value, write it anyway and **report it** — see Step 8 — rather than let it pass silently.
-
-**Lane routing (#53) — decide this before writing the pointer above and before running the budget check.** The pointer's default target is the matching **lane index** (`MEMORY-<lane>.md`), not the root `MEMORY.md`: `MEMORY.md` is a map of content, not a page list, so a captured page routes to `MEMORY.md` only when it is genuinely cross-lane (project identity, deploy topology, a product invariant that cuts across every lane) or its frontmatter `type` is `feedback`. Everything else — most `user`/`project`/`reference` pages — belongs in a lane index.
-
-If no existing lane index covers this page's topic, **create one** rather than appending to `MEMORY.md`: `Write` `MEMORY-<lane>.md` using the same pointer-line format as the root index, then give the root `MEMORY.md` a one-line routing-table row for it — a short "covers" clause (e.g. `- MEMORY-<lane>.md — covers <what a session model can route on without opening it>`) so recall can route without opening the lane index. A lane is cheap to create; a flat root is not.
-
-With the target decided, apply the ≤150-char budget check above to the pointer as it will actually appear — in the lane index if it lands there, in `MEMORY.md` if it's cross-lane or `type: feedback`.
-
-**Once a pointer lives in a lane index, never move it back to the root.** Refreshing an existing page's pointer means editing it in the lane index it already lives in, not re-adding it to `MEMORY.md` — split pointers are never re-flattened (#53).
 
 Do this step before Step 5 so the `STATE.md` summary can mention what was captured.
 
@@ -135,7 +132,7 @@ Follow-ups, deferred scope, discovered bugs → GitHub issue. Do not list them i
 
 ### Step 5: Write active state to `STATE.md`
 
-Overwrite `$MEMORY_DIR/STATE.md` with the current session's active state. **`STATE.md` is bounded and OVERWRITTEN each session — never appended.** It always uses this exact 6-section shape:
+Overwrite `$STATE_FILE` (`$STORE_PATH/state/<PROJECT_NAME>.md`) with the current session's active state — never `$MEMORY_DIR/STATE.md`, which is a link or (on Windows) a local copy of it. **`STATE.md` is bounded and OVERWRITTEN each session — never appended.** It always uses this exact 6-section shape:
 
 ```markdown
 ---
@@ -167,9 +164,10 @@ modified: <ISO-8601 UTC timestamp — e.g. 2026-07-23T18:04:00Z>
 
 Fill each section from the session. **Stamp `modified:` with the current wall-clock time in ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`), fresh on every save** — `okfmem sync`/`okfmem pull` read this field to auto-resolve cross-machine `STATE.md` conflicts (newer `modified:` wins, last-write-wins), so a stale or missing value silently defers reconciliation to a hand-merge. Show a draft summary first: `"Session: '<summary>' — save this? (yes / edit)"`. After confirmation, `Write` the file (full overwrite — do not `Edit`/append; the whole file is replaced each session).
 
-**`STATE.md` has a ceiling: 8192 bytes** (~2.2k tokens) — the same auto-load budget `okfmem reindex` checks `MEMORY.md` against (`memory_reindex.STATE_BUDGET_BYTES`; #52). Generous headroom for a bounded, six-section, single-session snapshot, so this is a signal something drifted (a section grew a changelog instead of staying a pointer), not a routine concern. After writing, spot-check it:
+**`STATE.md` has a ceiling: 8192 bytes** (~2.2k tokens) — the same auto-load budget `okfmem reindex` checks `MEMORY.md` against (`memory_reindex.STATE_BUDGET_BYTES`; #52). Generous headroom for a bounded, six-section, single-session snapshot, so this is a signal something drifted (a section grew a changelog instead of staying a pointer), not a routine concern. After writing, recompile (refreshes the view's copy on Windows) and spot-check it:
 
 ```bash
+okfmem init --resolve-project --compile --store "$STORE_PATH"
 okfmem reindex --report "${MEMORY_DIR:?Step 1 did not resolve a memory dir — do not fall back to a default}"
 # Off PATH: "$SKILL_DIR/../../okfmem" reindex --report "$MEMORY_DIR"
 ```
@@ -238,7 +236,7 @@ Show the user:
 - The session summary written to `STATE.md` (one line)
 - Any insights captured as memory pages (slugs + one-line hooks; note new vs. updated-existing)
 - The `okfmem distill` feed: `N` candidates surfaced, `k` captured, and the skipped ones named in one line (or `"distill unavailable"` if the plugin is absent); add "feed may be truncated at the limit" when `N` equals the `--limit`. Never truncate silently — that reads as "nothing recurred"
-- Any `MEMORY.md` pointer over the 150-char budget after this session's writes (slug + length), or `"none"`; likewise if the `okfmem reindex --report` spot-check flagged `STATE.md` as `OVER`
+- Any compiled index line for this session's pages over the 150-char budget (slug + length), or `"none"`; likewise if the `okfmem reindex --report` spot-check flagged `STATE.md` as `OVER`
 - Any issues filed or commented on
 - The memory push result — the commit SHA that was pushed (from `okfmem sync`'s status line), or `"no memory changes to push"` if the working tree was clean.
 
@@ -246,11 +244,11 @@ Show the user:
 
 - **Active state goes in `STATE.md`**, not in `MEMORY.md` or the memory pages
 - **`STATE.md` is bounded and overwritten every session** — full replace, never append; keep it to the 6-section template
-- **Durable knowledge is captured as `<topic>.md` memory pages + an index pointer**, not stored in `STATE.md`
-- **A new page's pointer routes to its lane index by default; `MEMORY.md` gets a pointer only for cross-lane or `type: feedback` pages (#53)** — create a lane index (with a routing "covers" row in `MEMORY.md`) when no lane matches; never re-flatten a lane pointer back to the root
-- **An index pointer is ≤150 chars, checked at write time (#52)** — new or refreshed, tighten before writing; if it can't be tightened without losing recall value, write it and report it in Step 8 rather than pass silently
+- **Durable knowledge is captured as labelled pages in `$STORE_PATH/pages/`**, not stored in `STATE.md`; active state goes to `$STORE_PATH/state/<project>.md`
+- **Never write into `$MEMORY_DIR`** (the compiled, gitignored view) or `projects/` (retired); recompile the view after writing
+- **A page's compiled index line is ≤150 chars, checked at write time (#52)** — tighten `description`; if it can't be tightened without losing recall value, write it and report it in Step 8 rather than pass silently
 - **`STATE.md` has an 8192-byte ceiling** (`memory_reindex.STATE_BUDGET_BYTES`), spot-checked via `okfmem reindex --report` after Step 5's write; report `OVER`, don't gate on it
-- **Reuse an existing page slug to update a topic** (dedup) — rewrite the page to current truth instead of leaving stale duplicates
+- **Reuse an existing page slug to update a topic** (dedup, across the whole pool) — rewrite the page to current truth, or add this repo's label, instead of leaving stale duplicates
 - **Pending work goes in the issue tracker** (GitHub Issues), not in `STATE.md` `## Blockers` (reserve blockers for "can't progress" not "haven't started")
 - **Capture memory pages BEFORE writing `STATE.md`** so the session summary can reference what was captured
 - **Skip reconstructable content** — `git log` + the issue tracker are authoritative for history; don't capture "what shipped"
@@ -268,4 +266,4 @@ okfmem init   # symlinks skills into each harness + wires memory pointers/regist
 # Then run okfmem init from each project repository.
 ```
 
-The native memory system auto-loads `STATE.md` / `MEMORY.md` on session start, so no load hook is required. If sessions may run on multiple workstations, add a `git -C ~/okfmem-store pull --rebase` SessionStart hook so each session starts from the latest memory.
+The native memory system auto-loads the view's `STATE.md` / `MEMORY.md` on session start, so no load hook is required. If sessions may run on multiple workstations, add a `git -C ~/okfmem-store pull --rebase` SessionStart hook so each session starts from the latest memory.

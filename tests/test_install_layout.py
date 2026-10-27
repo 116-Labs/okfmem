@@ -163,3 +163,30 @@ def test_install_sh_layout_contract():
 
     # Does not state that engine requires projects/
     assert "require a projects/ dir" not in sh_content
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinked memory dirs need a POSIX environment")
+def test_init_on_flat_store_links_real_state_into_the_view(tmp_path):
+    # #121: init seeded a stub STATE.md into the not-yet-compiled view, and the
+    # view kept it instead of linking state/<repo>.md.
+    home = tmp_path / "home"
+    (home / ".claude" / "projects").mkdir(parents=True)
+    store = tmp_path / "store"
+    (store / "pages").mkdir(parents=True)
+    (store / "state").mkdir()
+    (store / "layout.yml").write_text("layout: labels\n")
+    (store / "state" / "myrepo.md").write_text(
+        "---\ntype: state\nmodified: 2026-10-27T02:00:00Z\n---\n\nreal state\n")
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    env = os.environ.copy()
+    env.update(HOME=str(home), USERPROFILE=str(home), OKFMEM_STORE=str(store))
+
+    subprocess.run(
+        [sys.executable, str(REPO_ROOT / "memory_init.py"), "--yes", "--store", str(store)],
+        env=env, cwd=str(repo), capture_output=True, text=True,
+    )
+    state = store / "views" / "myrepo" / "STATE.md"
+    assert state.is_symlink()
+    assert "real state" in state.read_text()

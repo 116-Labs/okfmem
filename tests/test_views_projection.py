@@ -443,3 +443,47 @@ def test_resolve_on_legacy_store_keeps_projects_fallback(tmp_path):
     res = mi.resolve_project(store, cwd=repo, compile=False)
     assert res["memory_dir"] == legacy
     assert res["state"] == "ready"
+
+
+# #121: a plain STATE.md in a view (an older init's seed stub, or a Windows
+# copy fallback) must not shadow state/<repo>.md.
+
+def _state(modified=None, body="real state"):
+    head = "---\ntype: state\n" + (f"modified: {modified}\n" if modified else "") + "---\n\n"
+    return head + body + "\n"
+
+
+def test_compile_replaces_a_stub_state_with_the_real_one(tmp_path):
+    store = _make_store(tmp_path / "store")
+    os.makedirs(os.path.join(store, "state"))
+    real = os.path.join(store, "state", "toran.md")
+    with open(real, "w", encoding="utf-8") as f:
+        f.write(_state("2026-10-27T02:00:00Z"))
+    view = os.path.join(store, "views", "toran")
+    os.makedirs(view)
+    with open(os.path.join(view, "STATE.md"), "w", encoding="utf-8") as f:
+        f.write("---\nname: toran-state\ntype: state\n---\n\n# STATE — toran\n")
+
+    mi.compile_view(store, "toran")
+    with open(os.path.join(view, "STATE.md"), encoding="utf-8") as f:
+        assert "real state" in f.read()
+    with open(real, encoding="utf-8") as f:
+        assert "real state" in f.read()
+
+
+def test_compile_rescues_a_newer_state_saved_into_the_view(tmp_path):
+    store = _make_store(tmp_path / "store")
+    os.makedirs(os.path.join(store, "state"))
+    real = os.path.join(store, "state", "toran.md")
+    with open(real, "w", encoding="utf-8") as f:
+        f.write(_state("2026-10-27T02:00:00Z", "old state"))
+    view = os.path.join(store, "views", "toran")
+    os.makedirs(view)
+    with open(os.path.join(view, "STATE.md"), "w", encoding="utf-8") as f:
+        f.write(_state("2026-10-27T09:00:00Z", "newer state saved in the view"))
+
+    mi.compile_view(store, "toran")
+    with open(real, encoding="utf-8") as f:
+        assert "newer state saved in the view" in f.read()
+    with open(os.path.join(view, "STATE.md"), encoding="utf-8") as f:
+        assert "newer state saved in the view" in f.read()

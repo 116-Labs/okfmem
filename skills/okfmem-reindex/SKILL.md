@@ -4,6 +4,13 @@ description: "Topology restructuring for a bloated MEMORY.md — cluster flat po
 origin: user
 ---
 
+> **Flat-pool store (#97, live 2026-10-27): this skill does not apply to a store with
+> the `layout: labels` marker (#122).** There, `MEMORY.md` and its lane indexes are compiled
+> from page labels by `okfmem init --resolve-project --compile`, which already enforces the
+> auto-load budget and routes overflow into lanes. Hand restructuring would be overwritten.
+> Run only `okfmem reindex --report` (read-only), report the numbers, and stop; to shrink a
+> view, tighten page `description`s or relabel pages instead.
+
 Resolve STORE_PATH from the `store` field of `okfmem init --resolve-project`
 with the user's explicit `--store PATH` when supplied. Pass that exact store
 with `--store "$STORE_PATH"` to every init, pull, sync, graduate, status, and
