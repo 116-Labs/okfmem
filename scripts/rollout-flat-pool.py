@@ -34,7 +34,11 @@ import subprocess
 import sys
 
 HOME = os.path.expanduser("~")
-ENGINE = os.path.join(HOME, "okfmem")
+ENGINE = os.environ.get("OKFMEM_ENGINE") or (
+    os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    if os.path.isfile(os.path.join(os.path.dirname(__file__), "..", "okfmem"))
+    else os.path.join(HOME, "okfmem")
+)
 STORE = os.path.abspath(
     os.path.expanduser(
         os.environ.get("OKFMEM_STORE") or os.path.join(HOME, "okfmem-store")
@@ -182,6 +186,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     dry = ap.parse_args().dry_run
     sys.path.insert(0, ENGINE)
+    import memory_init as mi
 
     say(
         "env",
@@ -223,11 +228,13 @@ def main():
             say("abort", "pull did not integrate the store; resolve it, then re-run")
             return 2
 
-        import memory_init as mi
-
         if not mi.has_layout_marker(STORE):
             say("abort", "store has no `layout: labels` marker after pull")
             return 2
+
+    registry = mi._load_registry(os.path.join(STORE, "registry.json"))
+    for names in mi._case_only_registry_name_groups(registry):
+        say("WARN", "registry project names differ only by case: " + ", ".join(names))
 
     # 4. stub STATE.md files seeded into projects/ by a pre-0.2.1 init
     _, out = git("status", "--porcelain", "--untracked-files=all", "--", "projects")
@@ -268,8 +275,6 @@ def main():
         if kind == "views":
             continue
         try:
-            import memory_init as mi
-
             root = mi.decode_root(entry)
         except (ImportError, AttributeError):
             root = None

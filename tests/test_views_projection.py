@@ -63,6 +63,18 @@ def _write_page(store, slug, labels, title=None, desc=None, importance=1, recenc
     return fpath
 
 
+def test_compile_matches_repo_and_alias_labels_case_insensitively(tmp_path):
+    store = _make_store(tmp_path / "store")
+    _write_page(store, "repo-page", ["repo:offlinecv"])
+    _write_page(store, "alias-page", ["repo:other"])
+
+    mi.compile_view(store, "OfflineCV", aliases=["REPO:OTHER"])
+
+    memory = Path(store, "views", "OfflineCV", "MEMORY.md").read_text(encoding="utf-8")
+    assert "pages/repo-page.md" in memory
+    assert "pages/alias-page.md" in memory
+
+
 def test_owner_from_remote_url_formats():
     assert mi._owner_from_remote("https://github.com/116-ideas/toran.git") == "116-ideas"
     assert mi._owner_from_remote("https://github.com/116-ideas/toran") == "116-ideas"

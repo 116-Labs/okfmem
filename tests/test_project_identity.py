@@ -1,7 +1,9 @@
 import argparse
+import json
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -298,6 +300,46 @@ def test_flat_store_state_file_keeps_the_existing_project(tmp_path):
     (store / "state").mkdir(parents=True)
     (store / "state" / "offlinecv.md").write_text("# STATE\n")
     assert mi.canonical_project_name(root, {}, str(store)) == "offlinecv"
+
+
+def test_stale_case_variant_registry_name_uses_store_spelling(tmp_path):
+    root = _git_repo(tmp_path / "offlinecv", remote="https://github.com/me/OfflineCV.git")
+    store = tmp_path / "store"
+    (store / "state").mkdir(parents=True)
+    (store / "state" / "offlinecv.md").write_text("# STATE\n")
+    reg = {"map": {root: "OfflineCV"}, "overrides": {}}
+    (store / "registry.json").write_text(json.dumps(reg), encoding="utf-8")
+
+    assert mi.resolve_project(str(store), cwd=root)["project"] == "offlinecv"
+
+
+def test_case_only_registry_project_names_are_grouped():
+    reg = {"map": {"/mac/offlinecv": "offlinecv", "C:/desk/offlinecv": "OfflineCV"}}
+
+    assert mi._case_only_registry_name_groups(reg) == [["OfflineCV", "offlinecv"]]
+
+
+def test_rollout_warns_on_case_only_registry_project_names(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    subprocess.run(["git", "init", "-q", str(store)], check=True)
+    reg = {"map": {"/mac/offlinecv": "offlinecv", "C:/desk/offlinecv": "OfflineCV"}}
+    (store / "registry.json").write_text(json.dumps(reg), encoding="utf-8")
+
+    script = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "scripts", "rollout-flat-pool.py"
+    )
+    env = os.environ.copy()
+    env["OKFMEM_STORE"] = str(store)
+
+    res = subprocess.run(
+        [sys.executable, script, "--dry-run"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, f"stdout: {res.stdout}\nstderr: {res.stderr}"
+    assert "[WARN] registry project names differ only by case: OfflineCV, offlinecv" in res.stdout
 
 
 def test_remote_name_wins_once_its_project_exists(tmp_path):
