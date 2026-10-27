@@ -36,9 +36,14 @@ store serialize instead of racing.
 Store location: --store, else $OKFMEM_STORE, else ~/okfmem-store.
 """
 import argparse
+import hashlib
+import json
 import os
+import re
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 
 import memory_sync as ms  # reuse _git / lock helpers — one lock, one lock file
 
@@ -262,6 +267,145 @@ def unlinked_repo_notice(store):
         return None
 
 
+def prune_sessions(store, max_age_days=7, now=None):
+    """Prune session records in <store>/.okfmem/sessions older than max_age_days."""
+    sess_dir = os.path.join(store, ".okfmem", "sessions")
+    if not os.path.isdir(sess_dir):
+        return 0
+    now_ts = time.time() if now is None else now
+    cutoff = now_ts - (max_age_days * 86400)
+    pruned = 0
+    try:
+        for entry in os.listdir(sess_dir):
+            if not entry.endswith(".json"):
+                continue
+            path = os.path.join(sess_dir, entry)
+            try:
+                mtime = os.path.getmtime(path)
+                if mtime < cutoff:
+                    os.remove(path)
+                    pruned += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return pruned
+
+
+def record_session_start(store, session_id, cwd=None):
+    """Record session start baseline in <store>/.okfmem/sessions/<session_id>.json.
+    Records per-repo modified timestamp and content hash of state file; a repo
+    already in the record keeps its first baseline. Prunes records older than 7 days."""
+    if not session_id:
+        return None
+    store = os.path.abspath(os.path.expanduser(store))
+    sess_dir = os.path.join(store, ".okfmem", "sessions")
+    os.makedirs(sess_dir, exist_ok=True)
+
+    prune_sessions(store, max_age_days=7)
+
+    try:
+        import memory_init as mi
+        mi.ensure_store_gitignore(os.path.join(store, ".gitignore"), dry_run=False)
+    except Exception:
+        pass
+
+    repo = None
+    try:
+        import memory_init as mi
+        resolved = mi.resolve_project(store, cwd=cwd or os.getcwd())
+        repo = resolved.get("repo") or resolved.get("project")
+    except Exception:
+        repo = None
+
+    if not repo:
+        return None
+
+    state_file = None
+    candidates = [
+        os.path.join(store, "state", f"{repo}.md"),
+        os.path.join(store, "projects", repo, "STATE.md"),
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            state_file = c
+            break
+    if state_file is None:
+        try:
+            import memory_init as mi
+            if mi.has_layout_marker(store):
+                state_file = candidates[0]
+            else:
+                state_file = candidates[1]
+        except Exception:
+            state_file = candidates[0]
+
+    modified_ts = None
+    content_hash = None
+    if os.path.isfile(state_file):
+        try:
+            with open(state_file, "r", encoding="utf-8") as f:
+                content = f.read()
+            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            m = re.search(r"^\s*modified:\s*[\"']?([^\r\n\"']+)", content, re.MULTILINE)
+            if m:
+                modified_ts = m.group(1).strip()
+        except OSError:
+            pass
+
+    safe_id = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", session_id)
+    session_path = os.path.join(sess_dir, f"{safe_id}.json")
+
+    data = {}
+    if os.path.isfile(session_path):
+        try:
+            with open(session_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    data = loaded
+        except (OSError, ValueError):
+            pass
+
+    repos = data.setdefault("repos", {})
+    # A resumed session re-fires SessionStart with the same id; keeping the first
+    # baseline is what lets `state check` see a save made while it was paused.
+    record = repos.get(repo)
+    if not isinstance(record, dict):
+        record = {"modified": modified_ts, "hash": content_hash}
+    repos[repo] = record
+    data[repo] = record
+    if "created_at" not in data:
+        data["created_at"] = datetime.now(timezone.utc).isoformat()
+
+    tmp_path = session_path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        os.replace(tmp_path, session_path)
+    except OSError:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        return None
+    return session_path
+
+
+def _read_stdin_session_payload():
+    if sys.stdin is None or sys.stdin.isatty():
+        return {}
+    try:
+        raw = sys.stdin.read()
+        if not raw:
+            return {}
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Fetch + integrate remote changes into the okfmem store "
@@ -272,6 +416,8 @@ def main():
                     help="suppress output (for hook/automation use) -- the "
                          "unlinked-repo reminder still prints, since a silent "
                          "unlinked repo is the failure it exists to catch")
+    ap.add_argument("--session", default=None,
+                    help="session ID for writing baseline record in .okfmem/sessions/<session_id>.json")
     args = ap.parse_args()
 
     res = pull_store(args.store)
@@ -281,6 +427,20 @@ def main():
     notice = unlinked_repo_notice(args.store)
     if notice:
         print(notice)
+
+    try:
+        prune_sessions(args.store, max_age_days=7)
+    except Exception:
+        pass
+
+    payload = _read_stdin_session_payload()
+    session_id = args.session or payload.get("session_id")
+    hook_cwd = payload.get("cwd")
+    if session_id:
+        try:
+            record_session_start(args.store, session_id, cwd=hook_cwd)
+        except Exception:
+            pass  # fail-open
 
     # Fail-open: non-zero ONLY on a rebase conflict a human must resolve.
     # Offline / no-upstream / already-up-to-date all exit 0 so an automated

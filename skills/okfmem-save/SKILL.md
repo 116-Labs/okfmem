@@ -50,6 +50,11 @@ write targets. Proceed only when `state` is `ready` and memory_dir is nonempty. 
 `uninitialized`, run `okfmem init --yes --store STORE_PATH` from the repository and resolve again.
 For `not-a-repo` or an unreachable engine, stop. Never write into `projects/` (retired) or into `$MEMORY_DIR` (compiled, gitignored).
 Run `okfmem pull --quiet --store "$STORE_PATH"` before reading existing memory.
+After pulling, establish the active-state baseline by checking state:
+```bash
+okfmem state check --store "$STORE_PATH" --project "$PROJECT_NAME" --session "$SESSION_ID"
+```
+If the harness has no session ID (e.g. Codex/AGY), record the initial state file's `modified:` timestamp and content hash to use as the fallback baseline (`--since <modified> --hash <hash>`).
 Claude native links remain supported; Codex and AGY use this store path directly.
 No cleanup script or harness-specific agent API is required to save memory.
 
@@ -132,6 +137,13 @@ Follow-ups, deferred scope, discovered bugs → GitHub issue. Do not list them i
 
 ### Step 5: Write active state to `STATE.md`
 
+Before writing, run `okfmem state check` to ensure no concurrent session has updated state in the meantime:
+```bash
+okfmem state check --store "$STORE_PATH" --project "$PROJECT_NAME" --session "$SESSION_ID"
+# or fallback: okfmem state check --store "$STORE_PATH" --project "$PROJECT_NAME" --since "<baseline_modified>" --hash "<baseline_hash>"
+```
+On a mismatch (exit non-zero), another session or machine saved state while this session was active. Do not silently overwrite it! Instead, read the existing state file on disk and **fold its still-live items** into this session's `Left off` and `Next steps` sections, each item tagged with its origin: `(from <machine>, <modified>)`. Keep the fixed 6-section shape and the 8192-byte ceiling. Only prompt the user if items directly contradict. A save whose baseline is older than the current file never silently discards the other snapshot's live items.
+
 Overwrite `$STATE_FILE` (`$STORE_PATH/state/<PROJECT_NAME>.md`) with the current session's active state — never `$MEMORY_DIR/STATE.md`, which is a link or (on Windows) a local copy of it. **`STATE.md` is bounded and OVERWRITTEN each session — never appended.** It always uses this exact 6-section shape:
 
 ```markdown
@@ -139,6 +151,7 @@ Overwrite `$STATE_FILE` (`$STORE_PATH/state/<PROJECT_NAME>.md`) with the current
 type: state
 project: <PROJECT_NAME>
 modified: <ISO-8601 UTC timestamp — e.g. 2026-07-23T18:04:00Z>
+machine: <short hostname — e.g. from socket.gethostname().split('.')[0]>
 ---
 
 # STATE — <PROJECT_NAME>
@@ -162,7 +175,7 @@ modified: <ISO-8601 UTC timestamp — e.g. 2026-07-23T18:04:00Z>
 <the standing goal>
 ```
 
-Fill each section from the session. **Stamp `modified:` with the current wall-clock time in ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`), fresh on every save** — `okfmem sync`/`okfmem pull` read this field to auto-resolve cross-machine `STATE.md` conflicts (newer `modified:` wins, last-write-wins), so a stale or missing value silently defers reconciliation to a hand-merge. Show a draft summary first: `"Session: '<summary>' — save this? (yes / edit)"`. After confirmation, `Write` the file (full overwrite — do not `Edit`/append; the whole file is replaced each session).
+Fill each section from the session. **Stamp `modified:` with the current wall-clock time in ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`), fresh on every save** — `okfmem sync`/`okfmem pull` read this field to auto-resolve cross-machine `STATE.md` conflicts (newer `modified:` wins, last-write-wins), so a stale or missing value silently defers reconciliation to a hand-merge. Stamp `machine:` with the machine's short hostname (`socket.gethostname().split('.')[0]`). Show a draft summary first: `"Session: '<summary>' — save this? (yes / edit)"`. After confirmation, `Write` the file (full overwrite — do not `Edit`/append; the whole file is replaced each session). After a successful write, when `SESSION_ID` is available, run `okfmem state refresh --store "$STORE_PATH" --project "$PROJECT_NAME" --session "$SESSION_ID"` to advance this session's baseline to the saved file before its next save.
 
 **`STATE.md` has a ceiling: 8192 bytes** (~2.2k tokens) — the same auto-load budget `okfmem reindex` checks `MEMORY.md` against (`memory_reindex.STATE_BUDGET_BYTES`; #52). Generous headroom for a bounded, six-section, single-session snapshot, so this is a signal something drifted (a section grew a changelog instead of staying a pointer), not a routine concern. After writing, recompile (refreshes the view's copy on Windows) and spot-check it:
 
