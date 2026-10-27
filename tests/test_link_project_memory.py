@@ -526,7 +526,26 @@ def test_build_registry_skips_root_missing_on_disk(env):
                os.path.join(proj_dir, "memory"), target_is_directory=True)
     reg, drift = mi.build_registry(env["store"], env["claude_projects"])
     assert reg["map"] == {}
-    assert len(drift) == 1 and "does not exist" in drift[0]
+    assert len(drift) == 1
+    assert "does not exist" in drift[0]
+    assert "merge a retired repo" in drift[0]
+
+
+def test_build_registry_ignores_symlinked_alias_when_root_exists(env):
+    valid_entry = mi.encode_root(str(env["root"]))
+    valid_dir = os.path.join(env["claude_projects"], valid_entry)
+    os.makedirs(valid_dir)
+    os.symlink(os.path.join(env["store"], "projects", "myproj"),
+               os.path.join(valid_dir, "memory"), target_is_directory=True)
+
+    old_root = env["root"].parent / "old-name"
+    alias_dir = os.path.join(env["claude_projects"], mi.encode_root(str(old_root)))
+    os.symlink(valid_dir, alias_dir, target_is_directory=True)
+
+    reg, drift = mi.build_registry(env["store"], env["claude_projects"])
+
+    assert reg["map"] == {os.path.normpath(str(env["root"])): "myproj"}
+    assert drift == []
 
 
 # ---------------------------------------------------------------------------

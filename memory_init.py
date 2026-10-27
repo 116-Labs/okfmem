@@ -1030,23 +1030,41 @@ def build_registry(store, claude_projects):
     # skipping it dropped every flat-pool mapping from the registry (#118).
     store_bases = [os.path.realpath(os.path.join(store, sub))
                    for sub in ("projects", "views")]
+    groups = {}
     for entry in sorted(os.listdir(claude_projects)):
-        link = os.path.join(claude_projects, entry, "memory")
+        entry_dir = os.path.join(claude_projects, entry)
+        link = os.path.join(entry_dir, "memory")
         if not os.path.islink(link):
             continue
-        target = os.path.realpath(link)
-        if not any(target.startswith(base + os.sep) for base in store_bases):
-            continue  # symlink points outside this store — not ours
+        groups.setdefault(os.path.realpath(entry_dir), []).append(entry)
+
+    for entries in groups.values():
+        candidates = []
+        for entry in entries:
+            link = os.path.join(claude_projects, entry, "memory")
+            target = os.path.realpath(link)
+            if not any(target.startswith(base + os.sep) for base in store_bases):
+                continue  # symlink points outside this store — not ours
+            root, problem = _resolve_encoded(entry)
+            candidates.append((entry, target, root, problem))
+
+        valid = next((candidate for candidate in candidates
+                      if candidate[3] is None and os.path.isdir(candidate[2])), None)
+        if valid is None:
+            for entry, _, root, problem in candidates:
+                if problem:
+                    drift.append(f"{entry}: {problem} — not recorded")
+                else:
+                    # A guessed root that isn't on disk is how
+                    # `…/checkouts/116-Labs-gaal` reached a registry (#81).
+                    drift.append(
+                        f'{entry}: decodes to {root}, which does not exist — '
+                        'not recorded; consider /okfmem-curate\'s "merge a retired repo" mode'
+                    )
+            continue
+
+        entry, target, root, _ = valid
         project = os.path.basename(target)
-        root, problem = _resolve_encoded(entry)
-        if problem:
-            drift.append(f"{entry}: {problem} — not recorded")
-            continue
-        if not os.path.isdir(root):
-            # A guessed root that isn't on disk is how `…/checkouts/116-Labs-gaal`
-            # reached a registry (#81); report it rather than record it.
-            drift.append(f"{entry}: decodes to {root}, which does not exist — not recorded")
-            continue
         mapping[root] = project
         # A link still on the pre-remote basename is a pending rename, not a
         # pin: an override would hide it from `_association_rename_candidate`.
