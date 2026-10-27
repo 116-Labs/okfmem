@@ -58,6 +58,45 @@ Applies the "deterministic collection + LLM judgment" principle: a script collec
 |------|---------|--------------|
 | Default | "clean up memory" / "prune memory" / no arg | All five phases; halts at approval gate; executes on approval |
 | Audit | `audit` arg, or "memory audit" / "what's stale" | Phases 1–3 only; produces the report; no approval gate, no execution |
+| Merge a retired repo | `merge <OLD> into <NEW>`, "fold the old repo's memory into…", or init's "decodes to …, which does not exist" warning | The section below instead of the five phases; halts at its own approval gate |
+
+## Merge a retired repo
+
+Use this when a repo was renamed, absorbed, or abandoned and its memory should live
+under another repo. On the flat pool the mechanical part is small: relabel pages,
+fold state, pin the registry. The real work is judgment: what is still true, what
+duplicates an existing page, and which repo it belongs to now. A domain split can
+send part of an old repo's memory to a third repo. **Ask the user about anything
+that isn't clear-cut; never guess a page's relevance.**
+
+1. **Inventory, read-only.** Collect every trace of `<OLD>`:
+   - pages labeled `repo:<OLD>` (in `pages/` and `pages/archive/`), and `state/<OLD>.md`;
+   - `projects/<OLD>/`, `legacy/`, and `~/.claude/projects/*<OLD>*/memory.bak`;
+   - the registry `map` and `overrides` entries that resolve to `<OLD>`;
+   - store git history for pages deleted on purpose (`git log --diff-filter=D`). A
+     page retired by an earlier curate pass stays retired.
+
+   Match slugs with `_` and `-` treated as the same; older pages were renamed that way.
+   Read any page recording an earlier rename or split (search the pool for `<OLD>`)
+   before deciding where things belong.
+2. **Classify each page**, as one table: *already in `<NEW>`* (skip), *duplicate*
+   (merge into the newer page), *relevant* (relabel to `repo:<NEW>`, or add the label
+   next to the old one), *belongs elsewhere* (relabel to the repo that owns that domain
+   now), *stale* (leave archived, or archive it), or *unsure* (ask). A page that decay
+   archived but which is still load-bearing (a standing election, a carryover, an open
+   obligation) can be restored: move it back to `pages/`, set `status: active`, drop
+   `archived_on`, and set `pinned: true` if it must not decay again.
+3. **Approval gate.** Show the table and the planned state and registry edits. Write
+   nothing until the user approves.
+4. **Execute.** Edit the page frontmatter, and fold any live items from
+   `state/<OLD>.md` into `state/<NEW>.md`. Add a registry override for any old path
+   that is still on disk. Recompile with `okfmem init --resolve-project --compile`
+   from `<NEW>`'s checkout, then run `okfmem sync`.
+5. **Local leftovers.** Never delete a `~/.claude/projects/<folder>` without checking it
+   first. Check it for transcripts (`*.jsonl`), and check whether another folder is a
+   symlink to it; after a rename, the old folder is often the new repo's live history.
+   Back up before removing a folder that holds only a `memory` link or a `memory.bak`
+   whose pages are all in the store, and also remove the stale `views/<OLD>`.
 
 ## How it works
 
