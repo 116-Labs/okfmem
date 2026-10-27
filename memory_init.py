@@ -549,9 +549,9 @@ def compile_view(store, repo, org=None, stack=None, aliases=None, reg=None):
     org_pages = []
     stack_pages = []
 
-    all_repo_labels = {f"repo:{repo}"}
+    all_repo_labels = {f"repo:{repo}".lower()}
     for a in (aliases or []):
-        all_repo_labels.add(a)
+        all_repo_labels.add(a.lower())
 
     org_label = f"org:{org}" if org else None
     stack_labels = {f"stack:{s}" for s in (stack or [])}
@@ -729,10 +729,16 @@ def canonical_project_name(root, reg, store=None):
             return str(override["repo"])
     pre_remote = _lookup_reg(reg.get("map", {}), root) or os.path.basename(root)
     remote = _remote_repo_name(root)
-    if remote and store and remote != pre_remote:
+    if store:
         known = _store_project_names(store)
-        if remote not in known and pre_remote in known:
-            return pre_remote
+        candidate = remote or pre_remote
+        if candidate not in known:
+            matches = [name for name in known if name.casefold() == candidate.casefold()]
+            if len(matches) == 1:
+                return matches[0]
+        if remote and remote != pre_remote:
+            if remote not in known and pre_remote in known:
+                return pre_remote
     return remote or pre_remote
 
 
@@ -757,6 +763,15 @@ def _store_project_names(store):
             elif os.path.isdir(os.path.join(store, sub, entry)):
                 names.add(entry)
     return names
+
+
+def _case_only_registry_name_groups(reg):
+    """Distinct project-name spellings in registry map values, grouped by case."""
+    groups = {}
+    for name in reg.get("map", {}).values():
+        if isinstance(name, str):
+            groups.setdefault(name.casefold(), set()).add(name)
+    return [sorted(names) for names in groups.values() if len(names) > 1]
 
 
 def resolve_project(store, cwd=None, compile=False, check_layout=False):
