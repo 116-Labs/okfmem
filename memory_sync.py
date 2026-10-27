@@ -441,11 +441,20 @@ def _merge_bookkeeping_conflict(base_text, incoming_text, local_text):
     return chosen[:start] + "".join(lines) + chosen[end:]
 
 
+def _is_state_path(path):
+    """True if path is a state file: basename == 'STATE.md' or 'state/*.md'."""
+    p = path.replace("\\", "/")
+    name = p.rsplit("/", 1)[-1]
+    if name == "STATE.md":
+        return True
+    return name.endswith(".md") and (p.startswith("state/") or "/state/" in p)
+
+
 def _is_bookkeeping_page(path):
     """A durable page that carries access bookkeeping: any `.md` but the
-    MEMORY*.md indexes and the STATE.md snapshot."""
+    MEMORY*.md indexes and state files."""
     name = path.rsplit("/", 1)[-1]
-    return name.endswith(".md") and not name.startswith("MEMORY") and name != "STATE.md"
+    return name.endswith(".md") and not name.startswith("MEMORY") and not _is_state_path(path)
 
 
 def _auto_resolve_conflicts(store, prefer_local):
@@ -486,7 +495,7 @@ def _auto_resolve_conflicts(store, prefer_local):
     if not paths:
         return False
     for p in paths:
-        if (p != "registry.json" and p.rsplit("/", 1)[-1] != "STATE.md"
+        if (p != "registry.json" and not _is_state_path(p)
                 and not _is_bookkeeping_page(p)):
             return False  # an index or unknown file is in dispute — a human's job
 
@@ -510,7 +519,7 @@ def _auto_resolve_conflicts(store, prefer_local):
             if merged_page is None:
                 return False  # durable memory content is in dispute — a human's job
             written_resolutions.append((p, merged_page))
-        else:
+        elif _is_state_path(p):
             t_inc = _state_modified_ts(incoming)
             if t_inc is None:
                 t_inc = _side_commit_ts(store, p, "HEAD")
@@ -523,13 +532,32 @@ def _auto_resolve_conflicts(store, prefer_local):
                 local_wins = t_loc > t_inc
             else:
                 local_wins = prefer_local
-            state_picks.append((p, "--theirs" if local_wins else "--ours"))
+            side = "--theirs" if local_wins else "--ours"
+            discarded_ref = "HEAD" if local_wins else local_ref
+            discarded_stage = 2 if local_wins else 3
+            discarded_sha = None
+            r_log = _git(store, "log", "-1", "--format=%h", discarded_ref, "--", p)
+            if r_log.returncode == 0 and r_log.stdout.strip():
+                discarded_sha = r_log.stdout.strip()
+            if not discarded_sha:
+                r_rev = _git(store, "rev-parse", "--short", f":{discarded_stage}:{p}")
+                if r_rev.returncode == 0 and r_rev.stdout.strip():
+                    discarded_sha = r_rev.stdout.strip()
+            state_picks.append((p, side, discarded_sha or "unknown", "local" if local_wins else "incoming"))
+        else:
+            return False
 
-    for p, side in state_picks:
+    for p, side, discarded_sha, winner in state_picks:
         if _git(store, "checkout", side, "--", p).returncode != 0:
             return False
         if _git(store, "add", "--", p).returncode != 0:
             return False
+        discarded_label = "incoming" if winner == "local" else "local"
+        print(
+            f"okfmem: auto-resolved conflict on '{p}' ({winner} wins; "
+            f"discarded {discarded_label} side {discarded_sha}, recover with 'git show {discarded_sha}:{p}')",
+            file=sys.stderr,
+        )
 
     for p, content in written_resolutions:
         full_path = os.path.join(store, *p.split("/"))

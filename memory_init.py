@@ -137,7 +137,7 @@ GITIGNORE_MARKER_OPEN = "# BEGIN okfmem-managed v1 (do not edit between markers)
 GITIGNORE_MARKER_CLOSE = "# END okfmem-managed"
 
 GITIGNORE_LINES = (".okfmem-sync.lock", ".session-trail.md", "*.db", "views/",
-                   "__pycache__/", "*.pyc", ".DS_Store")
+                   ".okfmem/", "__pycache__/", "*.pyc", ".DS_Store")
 
 GITIGNORE_BODY = (
     "# okfmem per-machine runtime / rebuildable -- never synced\n"
