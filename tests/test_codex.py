@@ -49,11 +49,11 @@ def test_codex_only_init_idempotent(tmp_path, monkeypatch):
 
 
 def test_codex_init_drops_registered_local_root_that_is_gone(tmp_path, monkeypatch):
-    _, _, store = isolated(tmp_path, monkeypatch)
+    home, _, store = isolated(tmp_path, monkeypatch)
     Path(mi.codex_home()).mkdir(parents=True, exist_ok=True)
-    kept = tmp_path / "kept"
+    kept = home / "kept"
     kept.mkdir()
-    gone = str(tmp_path / "gone")
+    gone = str(home / "gone")
     (store / "registry.json").write_text(
         json.dumps({"map": {gone: "gone", str(kept): "kept"}, "overrides": {}})
     )

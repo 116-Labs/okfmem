@@ -38,7 +38,9 @@ import filecmp
 from datetime import datetime, timezone
 import glob
 import json
+import ntpath
 import os
+import posixpath
 import re
 import shutil
 import stat
@@ -1081,78 +1083,105 @@ def _load_registry(path):
         return {"map": {}, "overrides": {}}
 
 
-def _is_foreign_root(root):
-    """True if `root` is an absolute path in ANOTHER OS's native form -- i.e. it
-    belongs to a different machine sharing this store.
-
-    Decided by path SHAPE, never by os.path.isdir: on Windows a bare POSIX path
-    like `/Users/you/proj` is drive-*relative* and isdir() happily resolves it
-    to `C:\\Users\\you\\proj`, so a dir check would misjudge another machine's
-    mac paths as local and drop them. A native Windows root instead carries a
-    drive (`C:\\`) or UNC (`\\\\host`); a native POSIX root starts with `/` and
-    has no backslashes."""
-    drive, _ = os.path.splitdrive(root)
-    if os.name == "nt":
-        # Native here == a drive (C:\) or a UNC share (\\host\...). splitdrive
-        # catches the drive form; check the UNC prefix explicitly since it isn't
-        # always split out. Anything else (a bare /Users/... POSIX path) is a
-        # different machine's.
-        return not (drive or root[:2] in ("\\\\", "//"))
-    # POSIX: native == starts with '/' and no Windows drive/backslashes.
-    return bool(drive) or "\\" in root or not root.startswith("/")
+def _is_windows_path(p):
+    if not p:
+        return False
+    drive, _ = ntpath.splitdrive(p)
+    return bool(drive) or p.startswith(("\\\\", "//")) or "\\" in p
 
 
-def _merge_registry(existing, derived):
-    """Merge the locally-derived registry onto an existing one WITHOUT clobbering
-    entries that belong to other machines.
+def _is_under_home(root, home):
+    if not root or not home:
+        return False
+    if _is_windows_path(home):
+        if not _is_windows_path(root):
+            return False
+        norm_home = ntpath.normcase(ntpath.normpath(home)).rstrip("\\/")
+        norm_root = ntpath.normcase(ntpath.normpath(root))
+        if not norm_home:
+            return False
+        if (
+            norm_root == norm_home
+            or norm_root.startswith(norm_home + "\\")
+            or norm_root.startswith(norm_home + "/")
+        ):
+            return True
+        if os.name == "nt":
+            try:
+                real_home = ntpath.normcase(os.path.realpath(norm_home)).rstrip("\\/")
+                real_root = ntpath.normcase(os.path.realpath(norm_root))
+                if real_home and (
+                    real_root == real_home
+                    or real_root.startswith(real_home + "\\")
+                    or real_root.startswith(real_home + "/")
+                ):
+                    return True
+            except (OSError, ValueError):
+                pass
+        return False
 
-    The store is shared across machines via git, but registry keys are ABSOLUTE
-    git-root paths -- inherently machine-specific. This machine is authoritative
-    only for roots in THIS OS's native path form; foreign roots (e.g. a mac's
-    `/Users/you/...` seen from Windows) are carried through untouched so running
-    init on one machine no longer wipes another machine's mappings to empty.
+    if _is_windows_path(root) or not root.startswith("/"):
+        return False
+    norm_home = posixpath.normpath(home).rstrip("/")
+    norm_root = posixpath.normpath(root)
+    if not norm_home:
+        return norm_root.startswith("/")
+    if norm_root == norm_home or norm_root.startswith(norm_home + "/"):
+        return True
+    if os.name != "nt":
+        try:
+            real_home = os.path.realpath(norm_home).rstrip("/")
+            real_root = os.path.realpath(norm_root)
+            if real_home and (real_root == real_home or real_root.startswith(real_home + "/")):
+                return True
+        except (OSError, ValueError):
+            pass
+    return False
 
-    Within local scope this run stays authoritative: a native root that is no
-    longer symlinked gets dropped, exactly as the old rebuild-from-scratch did."""
+
+def _is_foreign_root(root, home=None):
+    """True if root belongs to another machine sharing this store (#11, #113)."""
+    if not root:
+        return True
+    if home is None:
+        home = os.path.expanduser("~")
+    return not _is_under_home(root, home)
+
+
+def _merge_registry(existing, derived, home=None):
+    """Merge locally-derived registry onto existing without clobbering foreign roots (#113)."""
 
     def merge_section(key):
         out = {}
-        # Preserve foreign entries -- another machine's native paths.
         for root, proj in existing.get(key, {}).items():
-            if _is_foreign_root(root):
+            if _is_foreign_root(root, home=home):
                 out[root] = proj
-        # Local entries: this run's derived set is the source of truth.
         for root, proj in derived.get(key, {}).items():
             out[root] = proj
         return dict(sorted(out.items()))
 
-    return {
-        "version": 1,
-        "default_rule": "basename(git-root)",
-        "map": merge_section("map"),
-        "overrides": merge_section("overrides"),
-    }
+    merged = dict(existing)
+    merged.update(derived)
+    merged["version"] = 1
+    merged["default_rule"] = "basename(git-root)"
+    merged["map"] = merge_section("map")
+    merged["overrides"] = merge_section("overrides")
+    return merged
 
 
-def write_registry(store, reg, dry_run):
-    """Merge the locally-derived registry `reg` onto the existing registry.json
-    (preserving other machines' entries) and write only when the MAPPING itself
-    changes. Returns (path, changed, merged) so the caller reports the merged
-    counts and avoids needless writes.
-
-    The change check is SEMANTIC (compare the map/overrides dicts), not a byte
-    compare of the serialized JSON. Dict equality ignores key order, so a store
-    file written by an older or differently-formatted engine -- insertion order
-    instead of sorted, or missing the trailing newline -- does NOT count as a
-    change. Without this, every init on a second machine would rewrite the file
-    purely to reformat it and produce a spurious, perpetual cross-platform diff.
-    A real mapping change still rewrites, and rewrites in the normalized form."""
+def write_registry(store, reg, dry_run, home=None):
+    """Merge registry onto registry.json, preserving foreign roots and top-level keys."""
     path = os.path.join(store, "registry.json")
     existing = _load_registry(path)
-    merged = _merge_registry(existing, reg)
+    merged = _merge_registry(existing, reg, home=home)
     same = (
         existing.get("map", {}) == merged["map"]
         and existing.get("overrides", {}) == merged["overrides"]
+        and all(
+            existing.get(k) == merged.get(k)
+            for k in merged
+            if k not in ("version", "default_rule", "map", "overrides")
+        )
     )
     # A missing file must be created even when the mapping is empty (bootstrap);
     # otherwise only a genuine mapping change triggers a (normalized) write.
