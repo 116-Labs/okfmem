@@ -6,8 +6,9 @@ Steps (each prints what it did):
      backfill/bookkeeping fields (regenerable; they block the pull because
      migrate-to-labels moved those paths); abort on any other local edit
   1. okfmem update   (fast-forward the engine clone at ~/okfmem)
-  2. okfmem pull     (integrate the migrated store)
-  3. refuse unless engine >= 0.2.1 and the store carries `layout: labels`
+  2. okfmem pull     (integrate the migrated store; only after step 3's gate)
+  3. refuse (before pulling) unless engine >= 0.2.1; after pulling, unless
+     the store carries `layout: labels`
   4. delete untracked projects/<repo>/STATE.md stubs a pre-0.2.1 init seeded
   5. `init --yes` from the engine dir (global pointers, hooks, skills, link);
      this also rewrites pointer blocks a leaking test aimed at a temp store
@@ -63,11 +64,33 @@ STAMP_KEYS = {
 STAMP_LINE = re.compile(r"^[+-](%s):" % "|".join(sorted(STAMP_KEYS)))
 
 
-def run(args, cwd=None):
-    r = subprocess.run(
-        args, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, text=True
-    )
+def run(args, cwd=None, timeout=600):
+    """(exit code, combined output); a hung network child fails, never blocks."""
+    try:
+        r = subprocess.run(
+            args,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, f"timed out after {timeout}s: {' '.join(args)}"
     return r.returncode, (r.stdout + r.stderr).strip()
+
+
+def changed_lines(diff):
+    """+/- lines inside the hunks of a `git diff -U0`. The file header is
+    skipped by position (before the first @@), never by prefix: a removed
+    line reading `--x` shows as `---x` and must still count."""
+    lines, in_hunk = [], False
+    for line in diff.splitlines():
+        if line.startswith("@@"):
+            in_hunk = True
+        elif in_hunk and line[:1] in ("+", "-"):
+            lines.append(line)
+    return lines
 
 
 def git(*args):
@@ -139,11 +162,7 @@ def preflight(dry):
     ok = True
     for path in [p for p in out.splitlines() if p.strip()]:
         _, diff = git("diff", "-U0", "--", path)
-        changed = [
-            line
-            for line in diff.splitlines()
-            if line[:1] in "+-" and not line.startswith(("+++", "---"))
-        ]
+        changed = changed_lines(diff)
         if changed and all(STAMP_LINE.match(line) for line in changed):
             say(
                 "preflight",
@@ -190,22 +209,22 @@ def main():
                 if line.startswith(("=>", "Updating", "Already", "error", "fatal"))
             ),
         )
+        # 3. an old engine must never pull the migrated store: gate before pull
+        if version() < (0, 2, 1):
+            say(
+                "abort",
+                f"engine is {'.'.join(map(str, version()))}; need >= 0.2.1 "
+                "(update failed or the v0.2.1 PR is not merged); store not pulled",
+            )
+            return 2
         code, out = okfmem("pull")
         say("pull", out.splitlines()[0] if out else f"exit {code}")
         if code != 0:
             say("abort", "pull did not integrate the store; resolve it, then re-run")
             return 2
 
-        # 3. preconditions
         import memory_init as mi
 
-        if version() < (0, 2, 1):
-            say(
-                "abort",
-                f"engine is {'.'.join(map(str, version()))}; need >= 0.2.1 "
-                "(is the v0.2.1 PR merged?)",
-            )
-            return 2
         if not mi.has_layout_marker(STORE):
             say("abort", "store has no `layout: labels` marker after pull")
             return 2
