@@ -697,13 +697,34 @@ def canonical_project_name(root, reg, store=None):
             return str(override["repo"])
     pre_remote = _lookup_reg(reg.get("map", {}), root) or os.path.basename(root)
     remote = _remote_repo_name(root)
-    if remote and store:
-        projects = os.path.join(store, "projects")
-        if not os.path.isdir(os.path.join(projects, remote)) and os.path.isdir(
-            os.path.join(projects, pre_remote)
-        ):
+    if remote and store and remote != pre_remote:
+        known = _store_project_names(store)
+        if remote not in known and pre_remote in known:
             return pre_remote
     return remote or pre_remote
+
+
+def _store_project_names(store):
+    """Exact-case names of the store's existing projects: `projects/<name>/`
+    dirs plus flat-pool `state/<name>.md` files.
+
+    Listed, never probed with isdir/isfile: on a case-insensitive filesystem
+    (macOS, Windows) `projects/OfflineCV` "exists" whenever `projects/offlinecv`
+    does, which let a case-only remote rename win over the existing project
+    and compile an empty view (#115)."""
+    names = set()
+    for sub, suffix in (("projects", ""), ("state", ".md")):
+        try:
+            entries = os.listdir(os.path.join(store, sub))
+        except OSError:
+            continue
+        for entry in entries:
+            if suffix:
+                if entry.endswith(suffix):
+                    names.add(entry[: -len(suffix)])
+            elif os.path.isdir(os.path.join(store, sub, entry)):
+                names.add(entry)
+    return names
 
 
 def resolve_project(store, cwd=None, compile=False, check_layout=False):
