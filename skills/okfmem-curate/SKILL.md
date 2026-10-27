@@ -4,6 +4,14 @@ description: "Judgment-driven memory curation (rare; routine hygiene is automati
 origin: user
 ---
 
+> **Flat-pool store (#97, live 2026-10-27): parts of this skill still describe the
+> retired `projects/<project>/` layout (#122).** Pages now live in `<store>/pages/` with
+> `labels: [repo:<name>]`, and `MEMORY.md` is compiled from them. Act on pages (delete,
+> merge, relabel, tighten `description`) and then run
+> `okfmem init --resolve-project --compile`; **never rewrite a `MEMORY*.md` index by
+> hand** and never write into `views/`. Where a phase below says to rewrite the index,
+> skip it and report instead.
+
 Resolve STORE_PATH from the `store` field of `okfmem init --resolve-project`
 with the user's explicit `--store PATH` when supplied. Pass that exact store
 with `--store "$STORE_PATH"` to every init, pull, sync, graduate, status, and

@@ -37,8 +37,9 @@ Two git-backed repos + native memory auto-load:
 
 Two memory layers, both plain markdown the native memory system auto-loads:
 
-- **Active state** — `projects/<name>/STATE.md`, bounded 6-section snapshot, **overwritten** each session by `/okfmem-save`.
-- **Durable knowledge** — `projects/<name>/<slug>.md` pages indexed by one-line pointers in a `MEMORY*.md` index: the matching lane index by default, the root `MEMORY.md` only for cross-lane or `type: feedback` pages (#53); pages read on demand.
+- **Active state** — `state/<name>.md`, bounded 6-section snapshot, **overwritten** each session by `/okfmem-save`.
+- **Durable knowledge** — one flat pool, `pages/<slug>.md`, each page labelled `repo:<name>` (plus `org:`/`stack:` when it applies more widely); pages read on demand.
+- **The view** — `views/<name>/`, compiled per machine and gitignored, is what harnesses auto-load: a `MEMORY.md` (+ overflow lane indexes) generated from page labels, a `pages` link to the pool and a `STATE.md` link to the state file. Never edit it by hand; `okfmem init` / the Stop hook recompile it.
 
 Four moving parts:
 

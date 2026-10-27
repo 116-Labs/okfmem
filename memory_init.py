@@ -462,6 +462,23 @@ def _make_view_pages_link(store, view_dir):
         shutil.copytree(pages_target, link_path)
 
 
+def _newer_state(candidate, current):
+    """True if STATE file `candidate` carries a later `modified:` than
+    `current`. A file with no parseable `modified:` (e.g. a seed stub) is
+    never newer."""
+    import memory_sync as ms
+
+    def ts(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return ms._state_modified_ts(f.read())
+        except OSError:
+            return None
+
+    new, old = ts(candidate), ts(current)
+    return new is not None and (old is None or new > old)
+
+
 def _make_view_state_link(store, view_dir, repo):
     state_dir = os.path.join(store, "state")
     os.makedirs(state_dir, exist_ok=True)
@@ -492,7 +509,13 @@ def _make_view_state_link(store, view_dir, repo):
         except OSError:
             pass
     elif os.path.isfile(link_path):
-        return
+        # #121: a plain STATE.md in a view is a stale copy (Windows fallback)
+        # or a stub an older init seeded; either one shadows state/<repo>.md,
+        # the synced source of truth. Keep its content only if it is newer,
+        # then replace it with a fresh link (or copy).
+        if _newer_state(link_path, state_target):
+            shutil.copy2(link_path, state_target)
+        os.remove(link_path)
 
     try:
         os.symlink(rel_state, link_path)
@@ -2960,7 +2983,11 @@ def cmd_run(
     resolved = resolve_project(store)
     if association_pending:
         print(f"{glyph('warn')} project memory unchanged until the move is approved")
-    elif resolved["project"] and resolved["state"] != "ready":
+    elif (resolved["project"] and resolved["state"] != "ready"
+          and not has_layout_marker(store)):
+        # Flat pool: the link step below compiles views/<repo> and seeds
+        # state/<repo>.md. Seeding the view here left a plain stub STATE.md
+        # there that shadowed the real state (#121).
         if not dry_run:
             _seed_store_project(resolved["memory_dir"], resolved["project"])
         print(f"{glyph('chg')} project memory {'would seed' if dry_run else 'seeded'} {resolved['project']}")
