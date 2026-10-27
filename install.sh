@@ -73,19 +73,23 @@ echo "=> Symlinked okfmem to ~/.local/bin/okfmem"
 
 # 2. Setup Data Store
 STORE_DIR="${OKFMEM_STORE:-$HOME/okfmem-store}"
+is_fresh=0
 if [ ! -d "$STORE_DIR" ]; then
+    is_fresh=1
+elif [ -z "$(ls -A "$STORE_DIR" 2>/dev/null)" ] || [ "$(ls -A "$STORE_DIR" 2>/dev/null)" = ".git" ]; then
+    is_fresh=1
+fi
+
+if [ "$is_fresh" -eq 1 ]; then
     echo "=> Creating local data store at $STORE_DIR"
     mkdir -p "$STORE_DIR"
-    git -C "$STORE_DIR" init -q
+    [ -d "$STORE_DIR/.git" ] || git -C "$STORE_DIR" init -q
+    # Flat label-indexed layout (#108): fresh store gets pages/ and layout marker.
+    mkdir -p "$STORE_DIR/pages"
+    echo "layout: labels" > "$STORE_DIR/layout.yml"
 else
     echo "=> Found existing store at $STORE_DIR"
 fi
-
-# The engine's backfill/init/status commands all require a projects/ dir under
-# the store (they exit non-zero with "no projects/ under ..." otherwise). A
-# fresh `git init` store has none, so create it here -- idempotent for an
-# existing store.
-mkdir -p "$STORE_DIR/projects"
 
 # NOTE (#27): a fresh `git init` store also has no `.gitignore` -- that is
 # NOT fixed up here. `memory_init.py --yes` below creates/maintains the
@@ -95,14 +99,25 @@ mkdir -p "$STORE_DIR/projects"
 
 # 3. Wire it up
 echo "=> Running backfill and initialization..."
-python3 "$ENGINE_DIR/memory_backfill.py"
+python3 "$ENGINE_DIR/memory_backfill.py" --store "$STORE_DIR"
 # init resolves the CURRENT repo for its memory link from the process cwd
 # (git rev-parse), so run it FROM the engine clone -- a piped `curl | bash`
 # install launched from ~ would otherwise see no git repo and skip the link.
 # --yes: running this installer is the user's consent to wire hooks + create
 # the skill/memory links, so init applies them without prompting (the outward
 # GitHub-remote step below stays gated separately).
-( cd "$ENGINE_DIR" && python3 "$ENGINE_DIR/memory_init.py" --yes )
+if ( cd "$ENGINE_DIR" && python3 "$ENGINE_DIR/memory_init.py" --yes --store "$STORE_DIR" ); then
+    :
+else
+    rc=$?
+    # Unmigrated stores exit 2 from check_store_layout; carry on so user
+    # can run okfmem migrate-to-labels (#108). Real failures halt the install.
+    if [ "$rc" -eq 2 ] && [ -d "$STORE_DIR/projects" ]; then
+        :
+    else
+        exit "$rc"
+    fi
+fi
 
 # 4. Optional: private GitHub remote for the store
 # Both linking an existing repo and creating a new one are outward-facing, so we
@@ -146,7 +161,7 @@ link_existing_store_remote() {
         return 0
     fi
     # Empty local store: adopt the remote wholesale. -f overwrites the fresh
-    # stubs the installer just wrote (registry.json, projects/) -- the remote is
+    # stubs the installer just wrote (registry.json, layout.yml, pages/) -- the remote is
     # authoritative for a store the user is choosing to pull down.
     if git -C "$store" checkout -f -B "$def" "origin/$def" 2>/dev/null; then
         echo "=> Pulled your memory store from $url (branch $def)."
