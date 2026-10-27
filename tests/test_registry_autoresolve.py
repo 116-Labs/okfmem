@@ -385,3 +385,155 @@ def test_worker_init_yes_then_remote_registry_change_pull_succeeds(tmp_path):
     assert str(tmp_path / "checkouts" / "worker-repo") in final_reg["map"]
     assert "/mac/Users/you/other-repo" in final_reg["map"]
     assert not mp._rebase_in_progress(store)
+
+
+def test_is_foreign_root_linux_and_mac_homes():
+    linux_home = "/home/tester"
+    assert mi._is_foreign_root("/Users/you/code/repo", home=linux_home)
+    assert not mi._is_foreign_root("/home/tester/code/repo", home=linux_home)
+    assert mi._is_foreign_root("/home/bob/code/repo", home=linux_home)
+    assert mi._is_foreign_root("/opt/code/repo", home=linux_home)
+    assert mi._is_foreign_root("C:\\Users\\you\\repo", home=linux_home)
+
+    mac_home = "/Users/you"
+    assert mi._is_foreign_root("/home/tester/code/repo", home=mac_home)
+    assert not mi._is_foreign_root("/Users/you/code/repo", home=mac_home)
+    assert mi._is_foreign_root("/Users/bob/code/repo", home=mac_home)
+    assert mi._is_foreign_root("/var/code/repo", home=mac_home)
+    assert mi._is_foreign_root("C:\\Users\\you\\repo", home=mac_home)
+
+    win_home = "C:\\Users\\tester"
+    assert not mi._is_foreign_root("C:\\Users\\tester\\code\\repo", home=win_home)
+    assert not mi._is_foreign_root("c:/Users/tester/code/repo", home=win_home)
+    assert mi._is_foreign_root("C:\\Users\\bob\\code\\repo", home=win_home)
+    assert mi._is_foreign_root("D:\\code\\repo", home=win_home)
+    assert mi._is_foreign_root("/home/tester/code/repo", home=win_home)
+    assert mi._is_foreign_root("/Users/you/code/repo", home=win_home)
+
+
+def test_merge_registry_carries_foreign_mac_and_linux_roots():
+    existing = {
+        "version": 1,
+        "default_rule": "basename(git-root)",
+        "map": {
+            "/Users/you/mac-repo": "mac-repo",
+            "/home/tester/linux-repo": "linux-repo",
+            "/home/tester/vanished-repo": "vanished-repo",
+            "/opt/shared/repo": "shared-repo",
+        },
+        "overrides": {},
+    }
+
+    # On Linux: Mac root and /opt root are foreign and carried through;
+    # vanished-repo is under this home and not in derived, so it is pruned (#81, #113).
+    linux_derived = {
+        "map": {
+            "/home/tester/linux-repo": "linux-repo",
+            "/home/tester/new-repo": "new-repo",
+        },
+        "overrides": {},
+    }
+    merged_linux = mi._merge_registry(existing, linux_derived, home="/home/tester")
+    assert merged_linux["map"]["/Users/you/mac-repo"] == "mac-repo"
+    assert merged_linux["map"]["/opt/shared/repo"] == "shared-repo"
+    assert merged_linux["map"]["/home/tester/linux-repo"] == "linux-repo"
+    assert merged_linux["map"]["/home/tester/new-repo"] == "new-repo"
+    assert "/home/tester/vanished-repo" not in merged_linux["map"]
+
+    # On Mac: Linux roots are foreign and carried through (#113).
+    mac_derived = {
+        "map": {
+            "/Users/you/mac-repo": "mac-repo",
+        },
+        "overrides": {},
+    }
+    merged_mac = mi._merge_registry(existing, mac_derived, home="/Users/you")
+    assert merged_mac["map"]["/home/tester/linux-repo"] == "linux-repo"
+    assert merged_mac["map"]["/home/tester/vanished-repo"] == "vanished-repo"
+    assert merged_mac["map"]["/opt/shared/repo"] == "shared-repo"
+    assert merged_mac["map"]["/Users/you/mac-repo"] == "mac-repo"
+
+    # On Windows: POSIX roots and other-drive roots are foreign and carried through (#113).
+    win_existing = {
+        "version": 1,
+        "default_rule": "basename(git-root)",
+        "map": {
+            "/Users/you/mac-repo": "mac-repo",
+            "/home/tester/linux-repo": "linux-repo",
+            "C:\\Users\\tester\\win-repo": "win-repo",
+            "C:\\Users\\tester\\vanished-repo": "vanished-repo",
+            "D:\\other\\repo": "other-repo",
+        },
+        "overrides": {},
+    }
+    win_derived = {
+        "map": {
+            "C:\\Users\\tester\\win-repo": "win-repo",
+            "C:\\Users\\tester\\new-repo": "new-repo",
+        },
+        "overrides": {},
+    }
+    merged_win = mi._merge_registry(win_existing, win_derived, home="C:\\Users\\tester")
+    assert merged_win["map"]["/Users/you/mac-repo"] == "mac-repo"
+    assert merged_win["map"]["/home/tester/linux-repo"] == "linux-repo"
+    assert merged_win["map"]["D:\\other\\repo"] == "other-repo"
+    assert merged_win["map"]["C:\\Users\\tester\\win-repo"] == "win-repo"
+    assert merged_win["map"]["C:\\Users\\tester\\new-repo"] == "new-repo"
+    assert "C:\\Users\\tester\\vanished-repo" not in merged_win["map"]
+
+
+def test_merge_registry_preserves_layout_and_unknown_keys():
+    existing = {
+        "version": 1,
+        "default_rule": "basename(git-root)",
+        "layout": "labels",
+        "custom_marker": {"enabled": True},
+        "map": {"/Users/you/mac-repo": "mac-repo"},
+        "overrides": {},
+    }
+    derived = {
+        "map": {"/home/tester/linux-repo": "linux-repo"},
+        "overrides": {},
+    }
+    merged = mi._merge_registry(existing, derived, home="/home/tester")
+    assert merged["layout"] == "labels"
+    assert merged["custom_marker"] == {"enabled": True}
+    assert merged["version"] == 1
+    assert merged["default_rule"] == "basename(git-root)"
+    assert merged["map"]["/Users/you/mac-repo"] == "mac-repo"
+    assert merged["map"]["/home/tester/linux-repo"] == "linux-repo"
+
+
+def test_write_registry_preserves_layout_key_on_disk(tmp_path):
+    store = str(tmp_path)
+    reg_path = os.path.join(store, "registry.json")
+    seed = {
+        "version": 1,
+        "default_rule": "basename(git-root)",
+        "layout": "labels",
+        "custom_key": "custom_val",
+        "map": {"/Users/you/mac-repo": "mac-repo"},
+        "overrides": {},
+    }
+    with open(reg_path, "w", encoding="utf-8") as f:
+        json.dump(seed, f, indent=2)
+
+    derived = {
+        "map": {"/home/tester/linux-repo": "linux-repo"},
+        "overrides": {},
+    }
+    path, changed, merged = mi.write_registry(store, derived, dry_run=False, home="/home/tester")
+    assert changed is True
+    assert merged["layout"] == "labels"
+    assert merged["custom_key"] == "custom_val"
+
+    with open(reg_path, "r", encoding="utf-8") as f:
+        on_disk = json.load(f)
+    assert on_disk["layout"] == "labels"
+    assert on_disk["custom_key"] == "custom_val"
+    assert on_disk["map"]["/Users/you/mac-repo"] == "mac-repo"
+    assert on_disk["map"]["/home/tester/linux-repo"] == "linux-repo"
+
+    # Second write with same derived data is a no-op
+    _, changed_again, _ = mi.write_registry(store, derived, dry_run=False, home="/home/tester")
+    assert changed_again is False
