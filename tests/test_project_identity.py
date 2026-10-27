@@ -280,3 +280,30 @@ def test_harness_link_is_repointed_after_rename(assoc):
     assert status == "changed", msg
     assert os.path.realpath(link) == os.path.realpath(
         os.path.join(projects, "canonical-tool"))
+
+
+# #115: the pre-remote-project guard must compare names exactly, not probe
+# the filesystem -- macOS and Windows match `OfflineCV` to `offlinecv`.
+
+def test_case_only_remote_rename_keeps_the_existing_project(tmp_path):
+    root = _git_repo(tmp_path / "offlinecv", remote="https://github.com/me/OfflineCV.git")
+    store = tmp_path / "store"
+    (store / "projects" / "offlinecv").mkdir(parents=True)
+    assert mi.canonical_project_name(root, {}, str(store)) == "offlinecv"
+
+
+def test_flat_store_state_file_keeps_the_existing_project(tmp_path):
+    root = _git_repo(tmp_path / "offlinecv", remote="https://github.com/me/OfflineCV.git")
+    store = tmp_path / "store"
+    (store / "state").mkdir(parents=True)
+    (store / "state" / "offlinecv.md").write_text("# STATE\n")
+    assert mi.canonical_project_name(root, {}, str(store)) == "offlinecv"
+
+
+def test_remote_name_wins_once_its_project_exists(tmp_path):
+    root = _git_repo(tmp_path / "old", remote="https://github.com/me/new-name.git")
+    store = tmp_path / "store"
+    (store / "projects" / "old").mkdir(parents=True)
+    (store / "state").mkdir()
+    (store / "state" / "new-name.md").write_text("# STATE\n")
+    assert mi.canonical_project_name(root, {}, str(store)) == "new-name"
