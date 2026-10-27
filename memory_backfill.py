@@ -64,7 +64,7 @@ def build_created_map(store):
     try:
         out = subprocess.run(
             ["git", "-C", store, "log", "--diff-filter=A", "--name-only",
-             "--format=%x00%as", "--", "projects"],
+             "--format=%x00%as", "--", "projects", "pages"],
             capture_output=True, text=True, timeout=120,
         )
     except Exception:
@@ -140,26 +140,37 @@ def main():
 
     store = os.path.abspath(os.path.expanduser(args.store))
     proj_root = os.path.join(store, "projects")
-    if not os.path.isdir(proj_root):
-        print(f"error: no projects/ under {store}", file=sys.stderr)
+    pages_root = os.path.join(store, "pages")
+    if not os.path.isdir(proj_root) and not os.path.isdir(pages_root):
+        print(f"error: no projects/ or pages/ under {store}", file=sys.stderr)
         sys.exit(2)
 
     created_map = build_created_map(store)
-    projects = sorted(d for d in os.listdir(proj_root)
-                      if os.path.isdir(os.path.join(proj_root, d)))
+    targets = []
+    if os.path.isdir(proj_root):
+        for d in sorted(os.listdir(proj_root)):
+            p = os.path.join(proj_root, d)
+            if os.path.isdir(p):
+                targets.append((d, p))
+    if os.path.isdir(pages_root):
+        targets.append(("pages", pages_root))
+
     keys = ["scanned", "stamped", "stamped-unknown", "already", "no-type",
             "no-frontmatter", "skip-ck"]
     totals = {k: 0 for k in keys}
     print(f"{'project':22} scan stamp unkwn alrdy notyp nofm  ck")
-    for proj in projects:
+    for name, target_dir in targets:
         c = {k: 0 for k in keys}
-        for path in sorted(glob.glob(os.path.join(proj_root, proj, "**", "*.md"),
+        for path in sorted(glob.glob(os.path.join(target_dir, "**", "*.md"),
                                      recursive=True)):
             base = os.path.basename(path)
             if base in SKIP_NAMES:
                 continue
             if base.startswith("ck_"):
                 c["skip-ck"] += 1
+                continue
+            rel = os.path.relpath(path, target_dir)
+            if "archive" in rel.split(os.sep)[:-1]:
                 continue
             c["scanned"] += 1
             try:
@@ -170,7 +181,7 @@ def main():
             c[status] += 1
         for k in keys:
             totals[k] += c[k]
-        print(f"{proj:22} {c['scanned']:4} {c['stamped']:5} "
+        print(f"{name:22} {c['scanned']:4} {c['stamped']:5} "
               f"{c['stamped-unknown']:5} {c['already']:5} "
               f"{c['no-type']:5} {c['no-frontmatter']:4} {c['skip-ck']:3}")
     print(f"{'TOTAL':22} {totals['scanned']:4} {totals['stamped']:5} "

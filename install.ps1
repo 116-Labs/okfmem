@@ -126,19 +126,28 @@ Write-Host "=> Wrote okfmem.cmd / okfmem.ps1 wrappers to $BinDir"
 $StoreDir = $env:OKFMEM_STORE
 if (-not $StoreDir) { $StoreDir = Join-Path $env:USERPROFILE "okfmem-store" }
 
+$isFresh = $false
 if (-not (Test-Path $StoreDir)) {
+    $isFresh = $true
+} else {
+    $items = Get-ChildItem -Path $StoreDir -Force
+    if (-not $items -or ($items.Count -eq 1 -and $items[0].Name -eq ".git")) {
+        $isFresh = $true
+    }
+}
+
+if ($isFresh) {
     Write-Host "=> Creating local data store at $StoreDir"
     New-Item -ItemType Directory -Force -Path $StoreDir | Out-Null
-    git -C "$StoreDir" init -q
+    if (-not (Test-Path (Join-Path $StoreDir ".git"))) {
+        git -C "$StoreDir" init -q
+    }
+    # Flat label-indexed layout (#108): fresh store gets pages/ and layout marker.
+    New-Item -ItemType Directory -Force -Path (Join-Path $StoreDir "pages") | Out-Null
+    Set-Content -Path (Join-Path $StoreDir "layout.yml") -Value "layout: labels" -Encoding UTF8
 } else {
     Write-Host "=> Found existing store at $StoreDir"
 }
-
-# The engine's backfill/init/status commands all require a projects/ dir under
-# the store (they exit non-zero with "no projects/ under ..." otherwise). A
-# fresh `git init` store has none, so create it here -- idempotent for an
-# existing store.
-New-Item -ItemType Directory -Force -Path (Join-Path $StoreDir "projects") | Out-Null
 
 # NOTE (#27): a fresh `git init` store also has no `.gitignore` -- that is
 # NOT fixed up here. `memory_init.py --yes` below creates/maintains the
@@ -148,7 +157,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $StoreDir "projects") | Out
 
 # 3. Wire it up -------------------------------------------------------------
 Write-Host "=> Running backfill and initialization..."
-& $PyCmd (Join-Path $EngineDir "memory_backfill.py")
+& $PyCmd (Join-Path $EngineDir "memory_backfill.py") --store $StoreDir
 # memory_init's per-project memory link resolves the CURRENT repo from the
 # process cwd (git rev-parse). This installer may be launched from anywhere
 # (e.g. the user's home dir), so run init FROM the engine clone -- otherwise
@@ -158,7 +167,7 @@ try {
     # --yes: running this installer IS the user's consent to wire hooks +
     # create the skill/memory links, so init applies them without re-prompting.
     # (The outward GitHub-remote step below is still gated separately.)
-    & $PyCmd (Join-Path $EngineDir "memory_init.py") --yes
+    & $PyCmd (Join-Path $EngineDir "memory_init.py") --yes --store $StoreDir
 } finally {
     Pop-Location
 }
@@ -212,7 +221,7 @@ function Link-ExistingStoreRemote {
         return
     }
     # Empty local store: adopt the remote wholesale. -f overwrites the fresh
-    # stubs the installer just wrote (registry.json, projects/) -- the remote is
+    # stubs the installer just wrote (registry.json, layout.yml, pages/) -- the remote is
     # authoritative for a store the user is choosing to pull down.
     # Git writes branch status to stderr on success; under PS 5.1 with EAP=Stop,
     # any native stderr redirection triggers a terminating NativeCommandError.
