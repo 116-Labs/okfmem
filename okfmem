@@ -21,6 +21,9 @@ Usage:
   okfmem inbox pull                              # candidate pages pushed from
   okfmem inbox review                            # other machines; nothing is
                                                  # imported without review — #84
+  okfmem migrate-to-labels [--dry-run] [--store PATH]
+                                                 # flatten projects/ into pages/
+                                                 # with injected repo labels — #100
 
 Core subcommands map to the memory_*.py modules living beside this script. Store
 is resolved by each module: --store, else $OKFMEM_STORE, else ~/okfmem-store.
@@ -43,7 +46,7 @@ MODULES = {"backfill": "memory_backfill.py", "init": "memory_init.py",
            "consolidate": "memory_consolidate.py", "sync": "memory_sync.py",
            "pull": "memory_pull.py", "update": "memory_update.py",
            "graduate": "memory_graduate.py", "reindex": "memory_reindex.py",
-           "inbox": "memory_inbox.py"}
+           "inbox": "memory_inbox.py", "migrate-to-labels": "memory_migrate.py"}
 # Opt-in plugin commands -> plugins/<file>. Loaded ONLY if the file is present,
 # so core install stays harness-agnostic. Several commands may share one plugin.
 PLUGINS = {"index": "memory_search.py", "search": "memory_search.py",
