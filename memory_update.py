@@ -76,7 +76,7 @@ def cmd_check():
         print(f"ahead of {up} by {ahead} commit(s); nothing to pull")
 
 
-def cmd_update(store_args):
+def cmd_update(store_args, yes=False):
     """Fast-forward the engine, then re-run init. Exits with init's code."""
     # Refuse on a dirty tree: a ff pull can fail partway or conflict, and we
     # must never clobber a user's local engine edits.
@@ -105,11 +105,21 @@ def cmd_update(store_args):
     else:
         print(f"=> engine updated {before} -> {after}")
 
+    if not yes and not sys.stdin.isatty():
+        print(
+            "error: non-interactive update needs consent; re-run `okfmem update --yes`",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     # Re-run init: relink new/changed skills, refresh managed pointer blocks.
     # Idempotent — the same flow install runs, safe to repeat.
     print("=> re-running init (relink skills, refresh pointers)...")
     init = os.path.join(ENGINE, "memory_init.py")
-    r = subprocess.run([sys.executable, init, *store_args])
+    init_args = [sys.executable, init, *store_args]
+    if yes:
+        init_args.append("--yes")
+    r = subprocess.run(init_args)
     sys.exit(r.returncode)
 
 
@@ -117,6 +127,8 @@ def main():
     ap = argparse.ArgumentParser(prog="okfmem update")
     ap.add_argument("--check", action="store_true",
                     help="report whether a newer version exists; change nothing")
+    ap.add_argument("--yes", action="store_true",
+                    help="pass consent to the init step for non-interactive updates")
     ap.add_argument("--store", help="store path, forwarded to the init step "
                     "(else $OKFMEM_STORE, else ~/okfmem-store)")
     args = ap.parse_args()
@@ -126,7 +138,7 @@ def main():
         cmd_check()
     else:
         store_args = ["--store", args.store] if args.store else []
-        cmd_update(store_args)
+        cmd_update(store_args, yes=args.yes)
 
 
 if __name__ == "__main__":
