@@ -758,3 +758,24 @@ def test_flat_store_repoints_a_link_left_on_projects(flat_env):
     assert status == "changed"
     assert os.path.realpath(link) == os.path.realpath(
         os.path.join(store, "views", "myproj"))
+
+
+def test_flat_store_link_state_reports_linked(flat_env, monkeypatch):
+    # #118: project_link_state compared the link against projects/<name>, so
+    # every repo on a flat-pool store read as "unlinked" (SessionStart nag;
+    # gaal's watch read it as "runs here skip memory").
+    mi.link_project_memory(flat_env["store"], flat_env["claude_projects"],
+                           flat_env["harnesses"], flat_env["reg"], dry_run=False)
+    monkeypatch.setattr(mi, "detect_harnesses",
+                        lambda: {"claude_code": "/fake/.claude/CLAUDE.md"})
+    state, name = mi.project_link_state(flat_env["store"], flat_env["claude_projects"])
+    assert (state, name) == ("linked", "myproj")
+
+
+def test_flat_store_registry_records_view_links(flat_env):
+    # #118: build_registry skipped any link outside projects/, so a flat-pool
+    # store's registry lost every link-derived mapping.
+    mi.link_project_memory(flat_env["store"], flat_env["claude_projects"],
+                           flat_env["harnesses"], flat_env["reg"], dry_run=False)
+    reg, _ = mi.build_registry(flat_env["store"], flat_env["claude_projects"])
+    assert reg["map"].get(os.path.normpath(str(flat_env["root"]))) == "myproj"
