@@ -380,6 +380,13 @@ def has_layout_marker(store):
     return False
 
 
+def _memory_target(store, name):
+    """Where a repo's memory link should point: the compiled view on a
+    flat-pool store, else the legacy project dir (#112, #118)."""
+    sub = "views" if has_layout_marker(store) else "projects"
+    return os.path.join(store, sub, name)
+
+
 def check_store_layout(store):
     """Check that the store layout is valid.
 
@@ -994,13 +1001,16 @@ def build_registry(store, claude_projects):
         drift.append(f"no Claude Code projects dir at {claude_projects}")
         return _registry_shell(mapping, overrides), drift
 
-    store_projects = os.path.realpath(os.path.join(store, "projects"))
+    # A link into views/ (flat pool) is as much ours as one into projects/;
+    # skipping it dropped every flat-pool mapping from the registry (#118).
+    store_bases = [os.path.realpath(os.path.join(store, sub))
+                   for sub in ("projects", "views")]
     for entry in sorted(os.listdir(claude_projects)):
         link = os.path.join(claude_projects, entry, "memory")
         if not os.path.islink(link):
             continue
         target = os.path.realpath(link)
-        if not target.startswith(store_projects + os.sep) and target != store_projects:
+        if not any(target.startswith(base + os.sep) for base in store_bases):
             continue  # symlink points outside this store — not ours
         project = os.path.basename(target)
         root, problem = _resolve_encoded(entry)
@@ -2103,7 +2113,7 @@ def project_link_state(store, claude_projects=None):
         reg = _load_registry(os.path.join(store, "registry.json"))
         name = canonical_project_name(root, reg, store)
         link = os.path.join(claude_projects, encode_root(root), "memory")
-        target_real = os.path.realpath(os.path.join(store, "projects", name))
+        target_real = os.path.realpath(_memory_target(store, name))
         if os.path.islink(link) or _is_junction(link):
             if os.path.normcase(os.path.realpath(link)) == os.path.normcase(
                 target_real
