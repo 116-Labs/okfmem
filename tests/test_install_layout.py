@@ -62,6 +62,7 @@ def test_fresh_install_init_and_consolidate_clean(tmp_path):
     # Right after install: memory_init --yes emits no legacy projects/ layout error
     init_res = subprocess.run(
         [sys.executable, str(REPO_ROOT / "memory_init.py"), "--yes", "--store", str(store_dir)],
+        env=env,
         capture_output=True,
         text=True,
         cwd=str(REPO_ROOT),
@@ -72,6 +73,7 @@ def test_fresh_install_init_and_consolidate_clean(tmp_path):
     # memory_consolidate --no-commit exits 0 on fresh install
     cons_res = subprocess.run(
         [sys.executable, str(REPO_ROOT / "memory_consolidate.py"), "--no-commit", "--store", str(store_dir)],
+        env=env,
         capture_output=True,
         text=True,
         cwd=str(REPO_ROOT),
