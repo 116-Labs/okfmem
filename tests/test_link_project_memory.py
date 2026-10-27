@@ -695,3 +695,66 @@ def test_reindex_resolve_target_from_worktree(worktree_env):
     args = argparse.Namespace(target=None, store=worktree_env["store"],
                               project=None)
     assert mr.resolve_target(args) == proj
+
+
+# ---------------------------------------------------------------------------
+# #112: on a store carrying the `layout: labels` marker, init links the
+# compiled view, never projects/<name>.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def flat_env(env):
+    """`env`, migrated: marker present, one page labelled for the repo, and
+    no views/ yet -- a second machine right after pulling a migrated store."""
+    store = env["store"]
+    shutil.rmtree(os.path.join(store, "projects"))
+    with open(os.path.join(store, "layout.yml"), "w", encoding="utf-8") as f:
+        f.write("layout: labels\n")
+    os.makedirs(os.path.join(store, "pages"))
+    with open(os.path.join(store, "pages", "p1.md"), "w", encoding="utf-8") as f:
+        f.write("---\nname: p1\ndescription: a page\ntype: project\n"
+                "labels: [repo:myproj]\n---\n\nbody\n")
+    return env
+
+
+def test_flat_store_compiles_view_and_links_it(flat_env):
+    status, msg = mi.link_project_memory(
+        flat_env["store"], flat_env["claude_projects"], flat_env["harnesses"],
+        flat_env["reg"], dry_run=False)
+    assert status == "changed"
+    view = os.path.join(flat_env["store"], "views", "myproj")
+    assert os.path.realpath(_link_path(flat_env)) == os.path.realpath(view)
+    assert os.path.isfile(os.path.join(view, "MEMORY.md"))
+    assert os.path.isfile(os.path.join(flat_env["store"], "state", "myproj.md"))
+    assert not os.path.exists(os.path.join(flat_env["store"], "projects"))
+
+
+def test_flat_store_dry_run_compiles_nothing(flat_env):
+    status, msg = mi.link_project_memory(
+        flat_env["store"], flat_env["claude_projects"], flat_env["harnesses"],
+        flat_env["reg"], dry_run=True)
+    assert status == "changed"
+    assert "would compile view 'myproj'" in msg
+    assert not os.path.exists(os.path.join(flat_env["store"], "views"))
+    assert not os.path.exists(_link_path(flat_env))
+
+
+def test_flat_store_repoints_a_link_left_on_projects(flat_env):
+    # The ak47 case: migrate-to-labels leaves projects/<name>/ behind with the
+    # old MEMORY.md, and the machine's link still points there.
+    store = flat_env["store"]
+    legacy = os.path.join(store, "projects", "myproj")
+    os.makedirs(legacy)
+    for f in ("MEMORY.md", "STATE.md"):
+        with open(os.path.join(legacy, f), "w", encoding="utf-8") as fh:
+            fh.write("# old\n")
+    link = _link_path(flat_env)
+    os.makedirs(os.path.dirname(link))
+    os.symlink(legacy, link)
+
+    status, msg = mi.link_project_memory(
+        store, flat_env["claude_projects"], flat_env["harnesses"],
+        flat_env["reg"], dry_run=False, assume_yes=True)
+    assert status == "changed"
+    assert os.path.realpath(link) == os.path.realpath(
+        os.path.join(store, "views", "myproj"))

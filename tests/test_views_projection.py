@@ -408,3 +408,38 @@ def test_stop_hook_consolidate_preserves_stdin_payload_with_projects(tmp_path, m
     with open(os.path.join(view_dir, "MEMORY.md"), "r", encoding="utf-8") as f:
         content = f.read()
     assert "Hook Page" in content
+
+
+def test_resolve_on_marked_store_never_falls_back_to_projects(tmp_path):
+    # #112: a machine that pulled a migrated store has no views/ yet, while
+    # projects/<repo>/ still holds the pre-migration index and a STATE.md.
+    repo = _make_repo(tmp_path / "toran")
+    store = _make_store(tmp_path / "store")
+    legacy = os.path.join(store, "projects", "toran")
+    os.makedirs(legacy)
+    for f in ("MEMORY.md", "STATE.md"):
+        with open(os.path.join(legacy, f), "w", encoding="utf-8") as fh:
+            fh.write("# old\n")
+
+    res = mi.resolve_project(store, cwd=repo, compile=False)
+    assert res["memory_dir"] == os.path.join(store, "views", "toran")
+    assert res["state"] == "uninitialized"
+    assert not os.path.exists(res["view_path"])
+
+    res = mi.resolve_project(store, cwd=repo, compile=True)
+    assert res["memory_dir"] == res["view_path"]
+    assert res["state"] == "ready"
+
+
+def test_resolve_on_legacy_store_keeps_projects_fallback(tmp_path):
+    repo = _make_repo(tmp_path / "toran")
+    store = _make_store(tmp_path / "store", marker=False)
+    legacy = os.path.join(store, "projects", "toran")
+    os.makedirs(legacy)
+    for f in ("MEMORY.md", "STATE.md"):
+        with open(os.path.join(legacy, f), "w", encoding="utf-8") as fh:
+            fh.write("# old\n")
+
+    res = mi.resolve_project(store, cwd=repo, compile=False)
+    assert res["memory_dir"] == legacy
+    assert res["state"] == "ready"

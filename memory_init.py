@@ -780,16 +780,25 @@ def resolve_project(store, cwd=None, compile=False, check_layout=False):
         os.path.isfile(os.path.join(view_path, "STATE.md"))
         or os.path.islink(os.path.join(view_path, "STATE.md"))
     )
-    legacy_ready = all(
-        os.path.isfile(os.path.join(legacy_target, f))
-        for f in ("STATE.md", "MEMORY.md")
-    )
-    ready = view_ready or legacy_ready
-    memory_dir = (
-        view_path
-        if (os.path.isdir(view_path) or not os.path.isdir(legacy_target))
-        else legacy_target
-    )
+    if has_layout_marker(store):
+        # #112: on the flat pool the view is the only memory dir. views/ is
+        # per-machine and gitignored, so a machine that pulled a migrated store
+        # has none until `init` compiles it -- report it uninitialized rather
+        # than fall back to projects/<repo>, whose leftover index points at
+        # pages migrate-to-labels moved away.
+        ready = view_ready
+        memory_dir = view_path
+    else:
+        legacy_ready = all(
+            os.path.isfile(os.path.join(legacy_target, f))
+            for f in ("STATE.md", "MEMORY.md")
+        )
+        ready = view_ready or legacy_ready
+        memory_dir = (
+            view_path
+            if (os.path.isdir(view_path) or not os.path.isdir(legacy_target))
+            else legacy_target
+        )
 
     return {
         "state": "ready" if ready else "uninitialized",
@@ -2151,19 +2160,35 @@ def link_project_memory(
     if not root:
         return ("skip", "not inside a git repo")
     name = canonical_project_name(root, reg, store)
-    target = os.path.join(store, "projects", name)
     seeded = False
-    if not os.path.isdir(target):
-        # A repo you've never saved memory for has no store project dir yet.
-        # Returning "skip" here made the documented per-repo step (`cd <repo>
-        # && okfmem init`) a silent no-op -- exactly the case the step exists
-        # for. Seed the dir instead, then link it. Rung-1: additive, inside
-        # the user's OWN store, and only for the repo they explicitly ran
-        # `init` in.
-        if dry_run:
-            return ("changed", f"would seed store project '{name}' and link it")
-        _seed_store_project(target, name)
-        seeded = True
+    if has_layout_marker(store):
+        # #112: on the flat pool the memory dir is the compiled view, never
+        # projects/<name>. Compile it here -- views/ is per-machine, so a
+        # machine that pulled a migrated store has none yet; compile_view
+        # also seeds state/<name>.md when the repo has no state.
+        target = os.path.join(store, "views", name)
+        if not os.path.isfile(os.path.join(target, "MEMORY.md")):
+            if dry_run:
+                return ("changed", f"would compile view '{name}' and link it")
+            seeded = True
+        if not dry_run:
+            org, stack = _resolve_overrides(
+                reg, root, name, _remote_repo_owner(root), _detect_stack(root))
+            compile_view(store, name, org=org, stack=stack,
+                         aliases=_resolve_aliases(reg, name), reg=reg)
+    else:
+        target = os.path.join(store, "projects", name)
+        if not os.path.isdir(target):
+            # A repo you've never saved memory for has no store project dir yet.
+            # Returning "skip" here made the documented per-repo step (`cd <repo>
+            # && okfmem init`) a silent no-op -- exactly the case the step exists
+            # for. Seed the dir instead, then link it. Rung-1: additive, inside
+            # the user's OWN store, and only for the repo they explicitly ran
+            # `init` in.
+            if dry_run:
+                return ("changed", f"would seed store project '{name}' and link it")
+            _seed_store_project(target, name)
+            seeded = True
     target_real = os.path.realpath(target)
     proj_dir = os.path.join(claude_projects, encode_root(root))
     status, msg = _link_memory_dir(
