@@ -151,3 +151,41 @@ def test_page_paths_lists_store_pages(tmp_path):
     (proj / "a.md").write_text(page("name: a"))
     assert fmod.page_paths(str(tmp_path)) == [str(proj / "a.md")]
     assert fmod.page_paths(str(tmp_path / "nope")) == []
+
+
+def test_parse_fields_strips_quotes():
+    text = page(
+        'name: "demo: title"',
+        "description: 'A: b'",
+        "colon_unquoted: A: b",
+        "plain: hello world",
+        'single_double: "plain"',
+        "single_single: 'plain'",
+        'empty_double: ""',
+        "empty_single: ''",
+        "nested_quotes: '\"quoted\"'",
+    )
+    fm = fmod.find_frontmatter(text)
+    fields = fmod.parse_fields(text, fm)
+    assert fields["name"] == "demo: title"
+    assert fields["description"] == "A: b"
+    assert fields["colon_unquoted"] == "A: b"
+    assert fields["plain"] == "hello world"
+    assert fields["single_double"] == "plain"
+    assert fields["single_single"] == "plain"
+    assert fields["empty_double"] == ""
+    assert fields["empty_single"] == ""
+    assert fields["nested_quotes"] == '"quoted"'
+
+
+def test_page_paths_flat_layout(tmp_path):
+    (tmp_path / "layout.yml").write_text("layout: labels\n", encoding="utf-8")
+    pages_dir = tmp_path / "pages"
+    pages_dir.mkdir()
+    (pages_dir / "MEMORY.md").write_text("# index\n", encoding="utf-8")
+    (pages_dir / "a.md").write_text(page("name: a"), encoding="utf-8")
+    (pages_dir / "b.md").write_text(page("name: b"), encoding="utf-8")
+    (pages_dir / "archive").mkdir()
+    (pages_dir / "archive" / "c.md").write_text(page("name: c"), encoding="utf-8")
+    assert fmod.page_paths(str(tmp_path)) == [str(pages_dir / "a.md"), str(pages_dir / "b.md")]
+

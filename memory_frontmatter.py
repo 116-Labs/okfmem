@@ -58,7 +58,7 @@ def parse_fields(text, fm):
     for ln in text[body_start:body_end].split(eol):
         m = FIELD_RE.match(ln)
         if m:
-            fields[m.group(1)] = m.group(2).strip()
+            fields[m.group(1)] = _unquote(m.group(2))
     return fields
 
 
@@ -215,9 +215,16 @@ def format_summary(summary):
 
 
 def page_paths(store):
-    """Every durable page under `<store>/projects/*`, via the engine's rule."""
+    """Every durable page under `<store>/pages/` (flat layout) or `<store>/projects/*` (legacy)."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from memory_init import has_layout_marker
     from memory_reindex import page_files
+
+    if has_layout_marker(store):
+        root = os.path.join(store, "pages")
+        if not os.path.isdir(root):
+            return []
+        return [os.path.join(root, p) for p in page_files(root)]
 
     root = os.path.join(store, "projects")
     out = []
