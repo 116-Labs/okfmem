@@ -100,7 +100,7 @@ Each page is OKF v0.1: markdown with YAML frontmatter.
 
 - **Filename** — a short kebab-case slug, e.g. `gh-api-save-partial-failure.md`. The pool is shared by every repo, so **search all of `$PAGES_DIR` first** (`grep -ril '<topic words>' "$PAGES_DIR"`, not just this repo's pages) and reuse the *exact* existing filename when a page already covers the topic — `Edit` it so it merges instead of duplicating. If that page belongs to another repo and also applies here, add `repo:<PROJECT_NAME>` to its `labels:` rather than copying it.
 - **`name`** — the human title. The compiled index shows it as the link text.
-- **`description`** — the one-line recall hook. The compiled index shows it after the link.
+- **`description`** — the one-line recall hook. The compiled index shows it after the link. Needs no quotes for a value containing `: ` (e.g. `description: A: b`).
 - **`type`** — `user` | `feedback` | `project` | `reference`.
 - **`labels`** — at least `repo:<PROJECT_NAME>`; add `org:<owner>` or `stack:<lang>` only when the fact genuinely holds org-wide or stack-wide (those pages surface in every matching repo's view).
 
@@ -121,7 +121,7 @@ labels: [repo:<PROJECT_NAME>]
 
 **Existing topic** → `Edit` that page to add the new fact, or supersede stale content in place (no manual `SUPERSEDED` markers needed — just rewrite the page to current truth). Refresh `description` if the hook changed.
 
-**Budget: the compiled index line is ≤150 chars, enforced here at write time (#52).** The line is `- [<name>](pages/<slug>.md) — <description>`; count it before writing. Over 150, tighten `description`: move detail into the page body, where it costs nothing. Advisory, not a hard gate: if it can't be tightened without losing recall value, write it anyway and **report it** in Step 8.
+**Budget: the compiled index line is ≤150 chars, enforced here at write time (#52).** The line is `- [<name>](pages/<slug>.md) — <description>`; count it before writing. `description:` needs no quotes for a value containing `: `. Over 150, tighten `description`: move detail into the page body, where it costs nothing. Advisory, not a hard gate: if it can't be tightened without losing recall value, write it anyway and **report it** in Step 8.
 
 **Recompile the view** after the page writes so this session's pages show up in `$MEMORY_DIR/MEMORY.md` (the compiler routes overflow into lane indexes itself):
 

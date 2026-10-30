@@ -256,3 +256,86 @@ def test_project_for_cwd_git_not_installed_returns_none(monkeypatch):
         raise FileNotFoundError("git")
     monkeypatch.setattr(mi.subprocess, "run", _boom)
     assert mi.project_for_cwd({"map": {}}) is None
+
+
+# ---------------------------------------------------------------------------
+# Flat layout inventory & status
+# ---------------------------------------------------------------------------
+
+def test_flat_layout_status_counts_pages_and_labels(tmp_path, capsys):
+    (tmp_path / "layout.yml").write_text("layout: labels\n", encoding="utf-8")
+    pages_dir = tmp_path / "pages"
+    pages_dir.mkdir()
+    (pages_dir / "demo.md").write_text(
+        "---\nname: demo\ndescription: \"A: b\"\ntype: reference\nlabels: [repo:demo, org:myorg]\n---\nbody\n",
+        encoding="utf-8",
+    )
+    (pages_dir / "demo2.md").write_text(
+        "---\nname: demo2\ndescription: second\ntype: reference\nlabels: [repo:demo]\n---\nbody\n",
+        encoding="utf-8",
+    )
+    (pages_dir / "other.md").write_text(
+        "---\nname: other\ndescription: other proj\ntype: reference\nlabels: [repo:other, stack:python]\n---\nbody\n",
+        encoding="utf-8",
+    )
+
+    views_dir = tmp_path / "views"
+    (views_dir / "demo").mkdir(parents=True)
+    (views_dir / "demo" / "MEMORY.md").write_bytes(b"x" * 100)
+    (views_dir / "other").mkdir(parents=True)
+    (views_dir / "other" / "MEMORY.md").write_bytes(b"y" * 50)
+
+    arch_dir = pages_dir / "archive" / "2026"
+    arch_dir.mkdir(parents=True)
+    (arch_dir / "old_demo.md").write_text(
+        "---\nname: old\ntype: reference\nlabels: [repo:demo]\n---\nold\n",
+        encoding="utf-8",
+    )
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "demo.md").write_text("state\n", encoding="utf-8")
+
+    inv = mi.project_inventory(str(tmp_path))
+    d_row = row_for(inv, "demo")
+    assert d_row == ("demo", 2, 1, 100, True, True)
+    o_row = row_for(inv, "other")
+    assert o_row == ("other", 1, 0, 50, False, True)
+
+    mi.cmd_status(str(tmp_path), show_all=True)
+    out = capsys.readouterr().out
+    assert "demo" in out and "pages:2" in out and "MEMORY.md:100" in out and "archived:1" in out
+    assert "other" in out and "pages:1" in out and "MEMORY.md:50" in out and "archived:0" in out
+    assert "labels: 3 labeled page(s) (repo 3, org 1, stack 1, topic 0, other 0)" in out
+
+
+def test_flat_layout_repro_fixture(tmp_path, capsys):
+    (tmp_path / "layout.yml").write_text("layout: labels\n", encoding="utf-8")
+    pages_dir = tmp_path / "pages"
+    pages_dir.mkdir()
+    (pages_dir / "demo.md").write_text(
+        "---\nname: demo\ndescription: \"A: b\"\ntype: reference\nlabels: [repo:demo]\n---\nbody\n",
+        encoding="utf-8",
+    )
+    mi.cmd_status(str(tmp_path), show_all=True)
+    out = capsys.readouterr().out
+    assert "demo" in out and "pages:1" in out
+    assert "labels: 1 labeled page(s) (repo 1" in out
+
+
+def test_flat_layout_compile_view_unquotes_name_and_description(tmp_path):
+    (tmp_path / "layout.yml").write_text("layout: labels\n", encoding="utf-8")
+    pages_dir = tmp_path / "pages"
+    pages_dir.mkdir()
+    (pages_dir / "demo.md").write_text(
+        "---\nname: 'demo: title'\ndescription: \"A: b\"\ntype: reference\nlabels: [repo:demo]\n---\nbody\n",
+        encoding="utf-8",
+    )
+    mi.compile_view(str(tmp_path), "demo")
+    view_mem = tmp_path / "views" / "demo" / "MEMORY.md"
+    assert view_mem.is_file()
+    content = view_mem.read_text(encoding="utf-8")
+    assert "- [demo: title](pages/demo.md) — A: b\n" in content
+    assert '"A: b"' not in content
+    assert "'demo: title'" not in content
+

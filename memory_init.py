@@ -3410,7 +3410,8 @@ def project_inventory(store):
 
     Returns a list of
     ``(name, pages, archived, memory_bytes, has_state, has_archive_dir)``
-    tuples, one per directory under ``<store>/projects/``, sorted by name.
+    tuples, one per directory under ``<store>/projects/`` (legacy) or per
+    distinct project on a flat-layout store (pages/ + layout: labels), sorted by name.
 
     Counting rules (must match the skill's intent):
       * Pages come from ``memory_reindex.page_files``: every index file
@@ -3430,6 +3431,103 @@ def project_inventory(store):
 
     Pure stdlib, read-only. A missing ``projects/`` dir returns ``[]``.
     """
+    if has_layout_marker(store):
+        from memory_frontmatter import find_frontmatter, parse_labels
+
+        canonical_map = {}
+        for sub, suffix in (("state", ".md"),):
+            try:
+                entries = os.listdir(os.path.join(store, sub))
+            except OSError:
+                continue
+            for entry in entries:
+                if entry.endswith(suffix):
+                    name = entry[: -len(suffix)]
+                    canonical_map.setdefault(name.casefold(), name)
+
+        views_dir = os.path.join(store, "views")
+        if os.path.isdir(views_dir):
+            try:
+                for d in os.listdir(views_dir):
+                    if not d.startswith(".") and os.path.isdir(os.path.join(views_dir, d)):
+                        canonical_map.setdefault(d.casefold(), d)
+            except OSError:
+                pass
+
+        reg_path = os.path.join(store, "registry.json")
+        if os.path.isfile(reg_path):
+            try:
+                with open(reg_path, "r", encoding="utf-8") as f:
+                    reg_data = json.load(f)
+                if isinstance(reg_data, dict):
+                    for r in reg_data.get("map", {}).values():
+                        if isinstance(r, str):
+                            canonical_map.setdefault(r.casefold(), r)
+                    for k, v in reg_data.get("overrides", {}).items():
+                        if isinstance(v, str):
+                            canonical_map.setdefault(v.casefold(), v)
+                        elif isinstance(v, dict) and isinstance(v.get("repo"), str):
+                            canonical_map.setdefault(v["repo"].casefold(), v["repo"])
+            except (OSError, ValueError):
+                pass
+
+        pages_dir = os.path.join(store, "pages")
+        page_counts = {}
+        if os.path.isdir(pages_dir):
+            for fname in page_files(pages_dir):
+                fpath = os.path.join(pages_dir, fname)
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        text = f.read()
+                except (OSError, UnicodeDecodeError):
+                    continue
+                fm = find_frontmatter(text)
+                labels = parse_labels(text, fm, warn=None) if fm else []
+                matched = set()
+                for l in labels:
+                    if l.startswith("repo:"):
+                        r = l[5:]
+                        matched.add(canonical_map.setdefault(r.casefold(), r))
+                for proj in matched:
+                    page_counts[proj] = page_counts.get(proj, 0) + 1
+
+        archive_dir = os.path.join(store, "pages", "archive")
+        has_archive_dir = os.path.isdir(archive_dir)
+        archived_counts = {}
+        if has_archive_dir:
+            archived_files = glob.glob(
+                os.path.join(glob.escape(archive_dir), "**", "*.md"), recursive=True
+            )
+            for fpath in archived_files:
+                if not os.path.isfile(fpath):
+                    continue
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        text = f.read()
+                except (OSError, UnicodeDecodeError):
+                    continue
+                fm = find_frontmatter(text)
+                labels = parse_labels(text, fm, warn=None) if fm else []
+                matched = set()
+                for l in labels:
+                    if l.startswith("repo:"):
+                        r = l[5:]
+                        matched.add(canonical_map.setdefault(r.casefold(), r))
+                for proj in matched:
+                    archived_counts[proj] = archived_counts.get(proj, 0) + 1
+
+        out = []
+        for name in sorted(canonical_map.values()):
+            pages = page_counts.get(name, 0)
+            archived = archived_counts.get(name, 0)
+            mem = os.path.join(store, "views", name, "MEMORY.md")
+            mem_bytes = os.path.getsize(mem) if os.path.exists(mem) else 0
+            has_state = os.path.exists(
+                os.path.join(store, "state", f"{name}.md")
+            ) or os.path.exists(os.path.join(store, "views", name, "STATE.md"))
+            out.append((name, pages, archived, mem_bytes, has_state, has_archive_dir))
+        return out
+
     root = os.path.join(store, "projects")
     out = []
     if not os.path.isdir(root):
