@@ -424,8 +424,7 @@ def test_merge_registry_carries_foreign_mac_and_linux_roots():
         "overrides": {},
     }
 
-    # On Linux: Mac root and /opt root are foreign and carried through;
-    # vanished-repo is under this home and not in derived, so it is pruned (#81, #113).
+    # On Linux, entries outside its current local view are retained.
     linux_derived = {
         "map": {
             "/home/tester/linux-repo": "linux-repo",
@@ -438,7 +437,7 @@ def test_merge_registry_carries_foreign_mac_and_linux_roots():
     assert merged_linux["map"]["/opt/shared/repo"] == "shared-repo"
     assert merged_linux["map"]["/home/tester/linux-repo"] == "linux-repo"
     assert merged_linux["map"]["/home/tester/new-repo"] == "new-repo"
-    assert "/home/tester/vanished-repo" not in merged_linux["map"]
+    assert merged_linux["map"]["/home/tester/vanished-repo"] == "vanished-repo"
 
     # On Mac: Linux roots are foreign and carried through (#113).
     mac_derived = {
@@ -479,7 +478,50 @@ def test_merge_registry_carries_foreign_mac_and_linux_roots():
     assert merged_win["map"]["D:\\other\\repo"] == "other-repo"
     assert merged_win["map"]["C:\\Users\\tester\\win-repo"] == "win-repo"
     assert merged_win["map"]["C:\\Users\\tester\\new-repo"] == "new-repo"
-    assert "C:\\Users\\tester\\vanished-repo" not in merged_win["map"]
+    assert merged_win["map"]["C:\\Users\\tester\\vanished-repo"] == "vanished-repo"
+
+
+def test_same_home_machines_init_then_pull_keeps_registry_union(tmp_path):
+    """Same-platform machines sharing a home retain each other's roots (#133)."""
+    home = "/Users/you"
+    base = {
+        "version": 1,
+        "default_rule": "basename(git-root)",
+        "map": {
+            "/Users/you/x": "x",
+            "/Users/you/y": "y",
+            "/Users/you/z": "z",
+        },
+        "overrides": {},
+    }
+    origin, machine_a = _seed_store(tmp_path)
+    _write(machine_a, "registry.json", json.dumps(base, indent=2) + "\n")
+    _commit_all(machine_a, "seed shared registry")
+    _git(machine_a, "push", "-q", "origin", "HEAD")
+    machine_b = str(tmp_path / "machine-b")
+    _git(str(tmp_path), "clone", "-q", origin, machine_b)
+    _config(machine_b)
+
+    # These writes model each machine's init --yes registry view.
+    mi.write_registry(machine_a, {
+        "map": {"/Users/you/x": "x", "/Users/you/y": "y"},
+        "overrides": {},
+    }, dry_run=False, home=home)
+    mi.write_registry(machine_b, {
+        "map": {"/Users/you/z": "z"},
+        "overrides": {},
+    }, dry_run=False, home=home)
+
+    assert mp.pull_store(machine_a)["up_to_date"] is True
+    assert mp.pull_store(machine_b)["up_to_date"] is True
+
+    with open(os.path.join(machine_a, "registry.json"), encoding="utf-8") as f:
+        registry_a = json.load(f)
+    with open(os.path.join(machine_b, "registry.json"), encoding="utf-8") as f:
+        registry_b = json.load(f)
+
+    assert registry_a["map"] == base["map"]
+    assert registry_b["map"] == base["map"]
 
 
 def test_merge_registry_preserves_layout_and_unknown_keys():
@@ -502,6 +544,34 @@ def test_merge_registry_preserves_layout_and_unknown_keys():
     assert merged["default_rule"] == "basename(git-root)"
     assert merged["map"]["/Users/you/mac-repo"] == "mac-repo"
     assert merged["map"]["/home/tester/linux-repo"] == "linux-repo"
+
+
+def test_merge_registry_never_adds_layout_marker():
+    existing = {"map": {}, "overrides": {}}
+    derived = {"layout": "labels", "map": {"/repo": "repo"}, "overrides": {}}
+
+    merged = mi._merge_registry(existing, derived, home="/home/tester")
+
+    assert "layout" not in merged
+
+
+def test_write_registry_skips_destructive_unseen_entry(tmp_path, monkeypatch, capsys):
+    store = str(tmp_path)
+    reg_path = tmp_path / "registry.json"
+    reg_path.write_text(json.dumps({
+        "map": {"/Users/you/other-machine": "other-machine"},
+        "overrides": {},
+    }), encoding="utf-8")
+    monkeypatch.setattr(mi, "_merge_registry", lambda existing, derived, home=None: derived)
+
+    path, changed, merged = mi.write_registry(
+        store, {"map": {}, "overrides": {}}, dry_run=False, home="/Users/you")
+
+    assert path == str(reg_path)
+    assert changed is False
+    assert merged["map"]["/Users/you/other-machine"] == "other-machine"
+    assert "other-machine" in capsys.readouterr().out
+    assert json.loads(reg_path.read_text(encoding="utf-8"))["map"] == merged["map"]
 
 
 def test_write_registry_preserves_layout_key_on_disk(tmp_path):
