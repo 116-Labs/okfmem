@@ -48,7 +48,7 @@ def test_codex_only_init_idempotent(tmp_path, monkeypatch):
     assert (home / ".agents/skills/okfmem-save").is_symlink()
 
 
-def test_codex_init_drops_registered_local_root_that_is_gone(tmp_path, monkeypatch):
+def test_codex_init_keeps_registered_local_root_that_is_gone(tmp_path, monkeypatch):
     home, _, store = isolated(tmp_path, monkeypatch)
     Path(mi.codex_home()).mkdir(parents=True, exist_ok=True)
     kept = home / "kept"
@@ -59,7 +59,8 @@ def test_codex_init_drops_registered_local_root_that_is_gone(tmp_path, monkeypat
     )
     mi.cmd_run(str(store), False, False, assume_yes=True)
     reg = json.loads((store / "registry.json").read_text())
-    assert gone not in reg["map"] and reg["map"][str(kept)] == "kept"
+    assert reg["map"][gone] == "gone"
+    assert reg["map"][str(kept)] == "kept"
 
 
 def test_dry_run_and_decline(tmp_path, monkeypatch, capsys):

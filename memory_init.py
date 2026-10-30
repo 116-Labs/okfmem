@@ -1181,20 +1181,42 @@ def _is_foreign_root(root, home=None):
     return not _is_under_home(root, home)
 
 
+def _has_local_registry_evidence(root, home=None):
+    """Return whether this machine can verify a registry root (#133)."""
+    if not root:
+        return False
+    if home is None:
+        home = os.path.expanduser("~")
+    link = os.path.join(home, ".claude", "projects", encode_root(root), "memory")
+    return os.path.islink(link) or _is_junction(link) or os.path.exists(root)
+
+
+def _unseen_registry_removals(existing, proposed, home=None):
+    """List existing entries absent from a proposed write without local evidence."""
+    missing = []
+    for key in ("map", "overrides"):
+        proposed_entries = proposed.get(key, {})
+        for root in existing.get(key, {}):
+            if root not in proposed_entries and not _has_local_registry_evidence(root, home):
+                missing.append(root)
+    return sorted(set(missing))
+
+
 def _merge_registry(existing, derived, home=None):
-    """Merge locally-derived registry onto existing without clobbering foreign roots (#113)."""
+    """Merge local registry evidence without dropping unseen roots (#133)."""
 
     def merge_section(key):
-        out = {}
-        for root, proj in existing.get(key, {}).items():
-            if _is_foreign_root(root, home=home):
-                out[root] = proj
-        for root, proj in derived.get(key, {}).items():
-            out[root] = proj
+        # A root absent from this machine's view might belong to another
+        # same-platform machine sharing the store, so retain it by default.
+        out = dict(existing.get(key, {}))
+        out.update(derived.get(key, {}))
         return dict(sorted(out.items()))
 
     merged = dict(existing)
-    merged.update(derived)
+    merged.update({
+        key: value for key, value in derived.items()
+        if key not in ("layout", "map", "overrides")
+    })
     merged["version"] = 1
     merged["default_rule"] = "basename(git-root)"
     merged["map"] = merge_section("map")
@@ -1203,10 +1225,17 @@ def _merge_registry(existing, derived, home=None):
 
 
 def write_registry(store, reg, dry_run, home=None):
-    """Merge registry onto registry.json, preserving foreign roots and top-level keys."""
+    """Merge registry onto registry.json without losing unseen entries."""
     path = os.path.join(store, "registry.json")
     existing = _load_registry(path)
     merged = _merge_registry(existing, reg, home=home)
+    unseen = _unseen_registry_removals(existing, merged, home=home)
+    if unseen:
+        print(
+            f"{glyph('warn')} registry write skipped; cannot verify "
+            f"existing entries: {', '.join(unseen)}"
+        )
+        return path, False, existing
     same = (
         existing.get("map", {}) == merged["map"]
         and existing.get("overrides", {}) == merged["overrides"]
