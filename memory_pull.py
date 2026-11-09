@@ -33,7 +33,9 @@ Shares its lockfile (`<store>/.git/okfmem-sync.lock`, #27) and git helpers with
 memory_sync.py so a concurrent `okfmem sync` and `okfmem pull` on the same
 store serialize instead of racing.
 
-Store location: --store, else $OKFMEM_STORE, else ~/okfmem-store.
+Store location: --store, else $OKFMEM_STORE, else ~/okfmem-store. Every store
+attached in its registry.json `stores` list (#139) is pulled the same way
+afterwards, each on its own: one failing store never stops the others.
 """
 import argparse
 import hashlib
@@ -237,6 +239,39 @@ def pull_store(store, timeout=DEFAULT_TIMEOUT):
             res["reason"] = f"{res['reason']} ({registry_note})"
 
 
+def _failed(reason):
+    return {"pulled": False, "up_to_date": False, "conflict": False,
+            "offline": False, "reason": reason}
+
+
+def pull_attached(store, timeout=DEFAULT_TIMEOUT):
+    """Pull every store attached beside `store` (#139), in registry order.
+    Returns [(attached_store, result)]; one store's failure never stops the
+    next, and like `pull_store` this never raises."""
+    try:
+        engine = os.path.dirname(os.path.realpath(__file__))
+        if engine not in sys.path:
+            sys.path.insert(0, engine)
+        import memory_init as mi
+
+        attached = mi.attached_stores(os.path.abspath(os.path.expanduser(store)))
+    except Exception as e:
+        return [({"name": "?", "path": "", "remote": None},
+                 _failed(f"could not read attached stores; skipped ({e})."))]
+    out = []
+    for a in attached:
+        if not os.path.isdir(a["path"]):
+            url = mi.store_remote_url(a["remote"])
+            hint = f" — git clone {url} {a['path']}" if url else ""
+            out.append((a, _failed(f"{a['path']} is not cloned{hint}.")))
+            continue
+        try:
+            out.append((a, pull_store(a["path"], timeout=timeout)))
+        except Exception as e:
+            out.append((a, _failed(f"unexpected error; skipped ({e}).")))
+    return out
+
+
 def unlinked_repo_notice(store):
     """Return a one-shot reminder when the session's repo has no memory link
     yet, else None.
@@ -423,6 +458,10 @@ def main():
     res = pull_store(args.store)
     if not args.quiet:
         print(f"okfmem pull: {res['reason']}")
+    attached = pull_attached(args.store)
+    if not args.quiet:
+        for a, r in attached:
+            print(f"okfmem pull [{a['name']}]: {r['reason']}")
 
     notice = unlinked_repo_notice(args.store)
     if notice:
@@ -442,10 +481,12 @@ def main():
         except Exception:
             pass  # fail-open
 
-    # Fail-open: non-zero ONLY on a rebase conflict a human must resolve.
-    # Offline / no-upstream / already-up-to-date all exit 0 so an automated
-    # caller (a SessionStart hook) never trips on this.
-    sys.exit(1 if res["conflict"] else 0)
+    # Fail-open: non-zero ONLY on a rebase conflict a human must resolve, in
+    # the home store or an attached one. Offline / no-upstream /
+    # already-up-to-date all exit 0 so an automated caller (a SessionStart
+    # hook) never trips on this.
+    conflict = res["conflict"] or any(r["conflict"] for _, r in attached)
+    sys.exit(1 if conflict else 0)
 
 
 if __name__ == "__main__":
