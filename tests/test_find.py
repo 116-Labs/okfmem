@@ -4,10 +4,16 @@ All fixtures are synthetic — no real store, no home paths (leak gate).
 """
 
 import json
+import os
+import subprocess
+import sys
 
 import pytest
 
 import memory_find as mf
+import memory_init as mi
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def page(d, slug, name=None, desc="", labels=(), body="body\n", last="2026-01-01"):
@@ -138,3 +144,35 @@ def test_limit_zero_lists_every_match(store):
     for i in range(12):
         page(store / "pages", f"p{i}", body="watch\n")
     assert len(mf.find(str(store), ["watch"], limit=0)) == 12
+
+
+def test_name_hit_outranks_description_hits_across_terms(store):
+    page(store / "pages", "log-notes", name="Watch log", body="stall\n")
+    page(store / "pages", "triage", desc="watch stall triage", body="watch stall\n")
+    assert slugs(mf.find(str(store), ["watch", "stall"])) == ["log-notes", "triage"]
+
+
+def test_hyphenated_slug_query_matches_the_slug(store):
+    page(store / "pages", "idle-pool-diagnosis", name="Idle pool diagnosis")
+    [r] = mf.find(str(store), ["idle-pool-diagnosis"])
+    assert (r["slug"], r["tier_hits"]["name"]) == ("idle-pool-diagnosis", 1)
+
+
+def test_both_pointer_blocks_tell_agents_to_run_find(tmp_path):
+    with_store, fallback = tmp_path / "a.md", tmp_path / "b.md"
+    mi.upsert_pointer(str(with_store), False, store=str(tmp_path / "store"))
+    mi.upsert_pointer(str(fallback), False)
+    assert "okfmem find" in with_store.read_text(encoding="utf-8")
+    text = fallback.read_text(encoding="utf-8")
+    assert "okfmem find" in text and "projects/" not in text
+
+
+def test_dispatcher_routes_find(store):
+    page(store / "pages", "p", body="watch\n")
+    r = subprocess.run(
+        [sys.executable, os.path.join(ROOT, "okfmem"), "find", "watch",
+         "--store", str(store)],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "pages/p.md" in r.stdout

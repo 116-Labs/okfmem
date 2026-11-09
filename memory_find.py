@@ -22,9 +22,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from memory_frontmatter import find_frontmatter, parse_fields, parse_labels  # noqa: E402
 
 DEFAULT_STORE = os.environ.get("OKFMEM_STORE", os.path.expanduser("~/okfmem-store"))
-# Each tier outweighs every tier below it combined, so a name hit always
-# outranks a description-plus-labels hit; body hits only break field ties.
-WEIGHTS = {"slug": 4, "name": 4, "description": 2, "labels": 1}
+# Ranked by per-tier hit counts compared in this order, never summed, so a name
+# hit outranks any number of lower-tier hits even across terms; body breaks ties.
+TIERS = ("name", "description", "labels")
 BODY_CAP = 5
 SKIP = ("MEMORY.md", "STATE.md", "CONTEXT.md")
 
@@ -65,23 +65,26 @@ def read_page(path):
 
 
 def score(page, terms):
-    """(field score, body hits), or None when any term is missing from the page."""
+    """({tier: terms hitting it}, body hits), or None when any term is missing."""
+    slug = page["slug"].lower()
+    # The raw slug keeps a hyphenated query like `idle-pool-diagnosis` matching.
     fields = {
-        "slug": page["slug"].lower().replace("-", " "),
-        "name": page["name"].lower(),
-        "description": page["description"].lower(),
-        "labels": " ".join(page["labels"]).lower(),
+        "name": (slug, slug.replace("-", " "), page["name"].lower()),
+        "description": (page["description"].lower(),),
+        "labels": (" ".join(page["labels"]).lower(),),
     }
     body = page["body"].lower()
-    field_score = body_hits = 0
+    tier_hits = dict.fromkeys(TIERS, 0)
+    body_hits = 0
     for term in terms:
-        f = sum(w for k, w in WEIGHTS.items() if term in fields[k])
+        hit = [t for t in TIERS if any(term in s for s in fields[t])]
         b = min(body.count(term), BODY_CAP)
-        if not (f or b):
+        if not (hit or b):
             return None
-        field_score += f
+        for t in hit:
+            tier_hits[t] += 1
         body_hits += b
-    return field_score, body_hits
+    return tier_hits, body_hits
 
 
 def snippet(body, terms, width=140):
@@ -108,12 +111,12 @@ def find(store, terms, repo=None, archive=False, limit=10):
             continue
         s = score(page, terms)
         if s:
-            field_score, body_hits = s
+            tier_hits, body_hits = s
             rel = os.path.relpath(path, store).replace(os.sep, "/")
             results.append(
                 {
                     "path": rel,
-                    "field_score": field_score,
+                    "tier_hits": tier_hits,
                     "body_hits": body_hits,
                     "slug": page["slug"],
                     "name": page["name"],
@@ -125,7 +128,7 @@ def find(store, terms, repo=None, archive=False, limit=10):
             )
     results.sort(
         key=lambda r: (
-            -r["field_score"],
+            *(-r["tier_hits"][t] for t in TIERS),
             -r["body_hits"],
             -_day(r["last_accessed"]),
             r["slug"],
