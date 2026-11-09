@@ -235,6 +235,14 @@ An idempotent tool that stamps required YAML frontmatter (like `importance`, `pi
 ### 4. Status Check (`okfmem status`)
 Run this anytime to view the wiring status, detected harnesses, and whether your store has any uncommitted changes. It also prints a per-project inventory — page and archive counts, `MEMORY.md` size in bytes, and `STATE.md` presence — marking the project your current directory maps to (`*`) and flagging any project whose `MEMORY.md` has grown past the 8KB auto-load byte ceiling (a `/okfmem-reindex` candidate, recommended remedy a lane split), plus the decay epoch. The default view collapses to the current project and any over-ceiling project; add `--all` to list every project, or `--project <name>` for one.
 
+### 4a. Page Search (`okfmem find`)
+Ranks durable pages for a query without going through `MEMORY.md`, so a page the auto-loaded index leaves out is still one command away. Every term must match; a hit in the slug or `name` outranks `description`, then `labels`, then the body. `--repo NAME` keeps pages labelled `repo:NAME`, `--archive` also searches `pages/archive/`, `--json` prints machine-readable results. Read-only and core (no index to build): it scans `pages/` directly and does not count as an access for decay.
+
+```bash
+okfmem find keychain --repo gaal
+okfmem find linkedin gateway --archive
+```
+
 ### 5. Session Search (`okfmem search`)
 An opt-in plugin that builds a local SQLite FTS5 index over your agent's past conversation transcripts (e.g., Claude Code or Antigravity logs). This allows your agent to perform deep full-text searches across historical sessions to recover details not currently in `MEMORY.md`. The `.db` is purely a derived local cache—gitignored and rebuildable anytime via `okfmem index`.
 
