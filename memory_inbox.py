@@ -39,7 +39,16 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from memory_consolidate import find_frontmatter, git_clean, parse_fields  # noqa: E402
-from memory_init import _load_registry, _seed_store_project  # noqa: E402
+from memory_frontmatter import merge_labels, parse_labels
+from memory_init import (  # noqa: E402
+    _load_registry,
+    _resolve_aliases,
+    _resolve_overrides,
+    _seed_store_project,
+    compile_view,
+    has_layout_marker,
+    resolve_project,
+)
 from memory_sync import sync_store  # noqa: E402
 
 INBOX_NS = "refs/okfmem/inbox"
@@ -377,6 +386,25 @@ def _similar(a, b):
 def project_pages(store, project):
     """{slug: (path, fields)} for a project's live pages (archive excluded)."""
     found = {}
+    if project and has_layout_marker(store):
+        pages_dir = os.path.join(store, "pages")
+        if not os.path.isdir(pages_dir):
+            return found
+        reg = _load_registry(os.path.join(store, "registry.json"))
+        labels = {f"repo:{project}".lower(), *_resolve_aliases(reg, project)}
+        with os.scandir(pages_dir) as entries:
+            for entry in entries:
+                if not importable_name(entry.name) or not entry.is_file(follow_symlinks=False):
+                    continue
+                try:
+                    with open(entry.path, encoding="utf-8") as f:
+                        text = f.read()
+                except (OSError, UnicodeDecodeError):
+                    continue
+                if labels.intersection(parse_labels(text, warn=None)):
+                    found[entry.name[:-3]] = (entry.path, page_fields(text) or {})
+        return found
+
     proj_dir = os.path.join(store, "projects", project) if project else None
     if not proj_dir or not os.path.isdir(proj_dir):
         return found
@@ -413,6 +441,18 @@ def flags_for(page, existing, others):
 
 
 def accept_page(store, project, page):
+    if has_layout_marker(store):
+        pages_dir = os.path.join(store, "pages")
+        os.makedirs(pages_dir, exist_ok=True)
+        dest = os.path.join(pages_dir, page["name"])
+        text = merge_labels(page["text"], [f"repo:{project}"])
+        try:
+            with open(dest, "x", encoding="utf-8", newline="") as f:
+                f.write(text)
+        except FileExistsError:
+            return None
+        return dest
+
     proj_dir = os.path.join(store, "projects", project)
     if not os.path.isdir(proj_dir):
         _seed_store_project(proj_dir, project)
@@ -523,8 +563,7 @@ def show_page(project, push_, page, flags, out):
 
 
 def review_page(store, project, push_, page, all_pending, decide, counts, out, today):
-    """Show one candidate and act on the decision. True when it was handled
-    (accepted, merged or dropped), False when skipped."""
+    """Show one candidate and return the action taken, or None if skipped."""
     existing = project_pages(store, project)
     others = [(f"{q['slug']} ({o['meta'].get('machine') or '?'})", q["fields"])
               for o, q in all_pending if q is not page]
@@ -554,8 +593,32 @@ def review_page(store, project, push_, page, all_pending, decide, counts, out, t
             counts["dropped"] += 1
         else:
             out("  skipped — left pending")
-            return False
-        return True
+            return None
+        return action
+
+
+def _refresh_project_views(store, projects, out):
+    reg = _load_registry(os.path.join(store, "registry.json"))
+    current = resolve_project(store, cwd=os.curdir)
+    for project in sorted(projects):
+        context = current if current["project"] == project else None
+        if context is None:
+            for root, name in reg["map"].items():
+                if name != project or not os.path.isdir(root):
+                    continue
+                resolved = resolve_project(store, cwd=root)
+                if resolved["project"] == project:
+                    context = resolved
+                    break
+        if context is None:
+            org, stack = _resolve_overrides(reg, None, project, None, [])
+        else:
+            org, stack = context["org"], context["stack"]
+        try:
+            compile_view(store, project, org=org, stack=stack,
+                         aliases=_resolve_aliases(reg, project), reg=reg)
+        except OSError as exc:
+            out(f"  could not rebuild view for {_safe(project)}: {_safe(exc)}")
 
 
 def review(store, decide, ask_project, out=print, today=None, do_sync=True):
@@ -573,26 +636,33 @@ def review(store, decide, ask_project, out=print, today=None, do_sync=True):
         out("okfmem inbox: nothing pending.")
         return counts
     all_pending = [(p, page) for p in pushes for page in p["pages"]]
-    for push_ in pushes:
-        project = push_["project"]
-        if project is None and push_["pages"]:
-            project = ask_project(push_["meta"].get("repo"))
-            if project and not PAGE_NAME_RE.match(project + ".md"):
-                out(f"  invalid project name {project!r}")
-                project = None
-            if not project:
-                out(f"  {push_['ref']}: no project — left pending")
-                continue
-        handled = set()
-        # finally: a Ctrl-C mid-push still clears the pages already written,
-        # or the next review would offer them again.
-        try:
-            for page in push_["pages"]:
-                if review_page(store, project, push_, page, all_pending, decide,
-                               counts, out, today):
-                    handled.add(page["name"])
-        finally:
-            record_handled(store, push_, handled, counts, out)
+    changed_projects = set()
+    try:
+        for push_ in pushes:
+            project = push_["project"]
+            if project is None and push_["pages"]:
+                project = ask_project(push_["meta"].get("repo"))
+                if project and not PAGE_NAME_RE.match(project + ".md"):
+                    out(f"  invalid project name {project!r}")
+                    project = None
+                if not project:
+                    out(f"  {push_['ref']}: no project — left pending")
+                    continue
+            handled = set()
+            # A Ctrl-C mid-push still clears pages already handled.
+            try:
+                for page in push_["pages"]:
+                    action = review_page(store, project, push_, page, all_pending,
+                                         decide, counts, out, today)
+                    if action:
+                        handled.add(page["name"])
+                    if action in ("accept", "merge"):
+                        changed_projects.add(project)
+            finally:
+                record_handled(store, push_, handled, counts, out)
+    finally:
+        if changed_projects and has_layout_marker(store):
+            _refresh_project_views(store, changed_projects, out)
     out("")
     out(f"okfmem inbox review: accepted {counts['accepted']}, merged "
         f"{counts['merged']}, dropped {counts['dropped']}; "
