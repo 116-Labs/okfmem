@@ -290,6 +290,8 @@ okfmem inbox review                                                     # accept
 
 **For callers (scripts, other tools).** `okfmem --version` (also `okfmem version`) prints one line, `okfmem <version> (<commit>)`, where the commit is the install's short git sha or `unknown` outside a git checkout; the version lives in the `VERSION` file. `okfmem inbox push <dir> --source NAME --json` prints exactly one JSON object on stdout, `{"ref": "refs/okfmem/inbox/…" | null, "pages": <n>, "created": true | false}`, with `created` false when the same pages were already pushed and `ref` null when the directory held no valid page; its human text and warnings go to stderr. A failed push exits non-zero and prints `{"error": "<one line>"}`, including through the Windows `.ps1` and `.cmd` wrappers. Before relying on either, a caller should run `okfmem --version`: if it is unsupported (a non-zero exit, or an unknown-command error), the install predates the inbox and `--json`, so treat the push as unavailable.
 
+In the label layout, accepting a page adds the project's repo label and writes it to the shared `pages/` directory. An existing filename in that directory prevents acceptance. Merge and duplicate checks use the project's live pages, including repo aliases, and review rebuilds the views for projects with changes.
+
 **Inbox text is untrusted until you review it.** Nothing in the inbox reaches a loaded page without `okfmem inbox review`: `okfmem pull`, `consolidate` and the Stop hook fetch only the store's branches, never the inbox refs. Read a page before you accept or merge it the way you would read any text from the internet.
 
 ```mermaid

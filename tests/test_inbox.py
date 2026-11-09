@@ -14,6 +14,7 @@ import memory_inbox as mx
 import memory_pull as mp
 import memory_sync as ms
 from conftest import ROOT
+from memory_frontmatter import merge_labels, parse_labels
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None,
                                 reason="git binary not available")
@@ -220,6 +221,68 @@ def test_review_flags_accepts_merges_drops_and_clears_ref(env):
     assert _git(store, "for-each-ref", "--format=%(refname)", "refs/okfmem") == ""
     assert _git(store, "status", "--porcelain") == ""  # ended with okfmem sync
     assert _git(store, "rev-parse", "HEAD") == _git(store, "rev-parse", "@{u}")
+
+
+def test_review_accepts_and_merges_in_label_layout(env):
+    store = env["store"]
+    pages = os.path.join(store, "pages")
+    project = os.path.join(store, "projects", "demo")
+    reg_path = os.path.join(store, "registry.json")
+    registry = json.loads(_read(reg_path))
+    registry.update(layout="labels", aliases={"repo:demo": ["repo:demo-old"]})
+    registry["overrides"]["demo"] = {"org": "acme"}
+    _write(reg_path, json.dumps(registry))
+    _write(os.path.join(store, ".gitignore"), "views/\n")
+    _write(os.path.join(pages, "existing.md"),
+           merge_labels(_read(os.path.join(project, "existing.md")), ["repo:demo-old"]))
+    _write(os.path.join(pages, "shared.md"),
+           merge_labels(_page("Shared rule", "Acme team policy"), ["org:acme"]))
+    _write(os.path.join(pages, "archive", "2026", "archived.md"),
+           merge_labels(_page("Archived", "An old lesson"), ["repo:demo"]))
+    shutil.rmtree(project)
+    _git(store, "add", "-A")
+    _git(store, "commit", "-qm", "switch fixture to label layout")
+    _git(store, "push", "-q")
+    _push(env)
+
+    seen = {}
+
+    def decide(push_, page, flags):
+        slug = page["slug"]
+        if slug in seen:
+            return "skip", None
+        seen[slug] = flags
+        return {"fresh-lesson": ("accept", None), "existing": ("merge", "existing"),
+                "leak-gate": ("drop", None)}[slug]
+
+    counts = mx.review(store, decide, lambda _: pytest.fail("asked for project"),
+                       out=lambda _: None, today="2026-10-19")
+
+    assert counts == {"accepted": 1, "merged": 1, "dropped": 1, "deleted": 1}
+    assert "slug matches existing page existing.md" in seen["existing"]
+    assert not os.path.exists(project)
+    assert parse_labels(_read(os.path.join(pages, "fresh-lesson.md"))) == ["repo:demo"]
+    assert _read(os.path.join(pages, "existing.md")).rstrip().endswith("More detail.")
+    view = _read(os.path.join(store, "views", "demo", "MEMORY.md"))
+    assert "(pages/fresh-lesson.md)" in view
+    assert "(pages/existing.md)" in view
+    assert "(pages/shared.md)" in view
+    assert "archived.md" not in view
+    assert _git(store, "status", "--porcelain") == ""
+
+
+def test_label_layout_refuses_existing_slug_from_another_project(tmp_path):
+    store = str(tmp_path)
+    _write(os.path.join(store, "registry.json"), '{"layout": "labels"}')
+    dest = os.path.join(store, "pages", "lesson.md")
+    other = merge_labels(_page("Other", "Other project"), ["repo:other"])
+    _write(dest, other)
+    candidate = {"name": "lesson.md", "text": _page("New", "New lesson")}
+    candidate["fields"] = mx.page_fields(candidate["text"])
+
+    assert mx.accept_page(store, "demo", candidate) is None
+    assert mx.merge_page(store, "demo", "lesson", candidate, {}, "2026-10-19") is None
+    assert _read(dest) == other
 
 
 def test_review_skip_keeps_only_unhandled_pages_pending(env):
