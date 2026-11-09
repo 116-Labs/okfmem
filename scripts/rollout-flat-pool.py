@@ -160,6 +160,22 @@ def classify(link):
     return "foreign", None
 
 
+def link_flag(link, known):
+    """Step 7's verdict for one link: OK, or what is wrong with it. `CASE` is a
+    views link whose folder, or stored target, isn't the store's spelling (#138)."""
+    import memory_init as mi
+
+    kind, name = classify(link)
+    if kind == "views" and (
+        mi._store_spelling(name, known) != name
+        or mi._link_spelling_differs(link, os.path.realpath(link))
+    ):
+        return "CASE"
+    if kind == "views" and os.path.isfile(os.path.join(link, "MEMORY.md")):
+        return "OK"
+    return kind.upper()
+
+
 def preflight(dry):
     """Step 0. True when the store may be pulled."""
     _, out = git("diff", "--name-only", "--", "projects")
@@ -329,10 +345,9 @@ def main():
 
     # 7. report
     bad = 0
+    known = mi._store_project_names(STORE)
     for entry, link in memory_links():
-        kind, _ = classify(link)
-        has_index = os.path.isfile(os.path.join(link, "MEMORY.md"))
-        flag = "OK" if kind == "views" and has_index else kind.upper()
+        flag = link_flag(link, known)
         bad += flag != "OK"
         say("links", f"{flag:9} {entry} -> {os.path.realpath(link)}")
     for path in POINTER_FILES:

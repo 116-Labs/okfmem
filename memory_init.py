@@ -732,10 +732,9 @@ def canonical_project_name(root, reg, store=None):
     if store:
         known = _store_project_names(store)
         candidate = remote or pre_remote
-        if candidate not in known:
-            matches = [name for name in known if name.casefold() == candidate.casefold()]
-            if len(matches) == 1:
-                return matches[0]
+        spelled = _store_spelling(candidate, known)
+        if spelled != candidate:
+            return spelled
         if remote and remote != pre_remote:
             if remote not in known and pre_remote in known:
                 return pre_remote
@@ -763,6 +762,15 @@ def _store_project_names(store):
             elif os.path.isdir(os.path.join(store, sub, entry)):
                 names.add(entry)
     return names
+
+
+def _store_spelling(name, known):
+    """`known`'s spelling of `name` when exactly one store project differs from
+    it only in case (#134, #138); otherwise `name` unchanged."""
+    if name in known:
+        return name
+    matches = [k for k in known if k.casefold() == name.casefold()]
+    return matches[0] if len(matches) == 1 else name
 
 
 def _case_only_registry_name_groups(reg):
@@ -1045,6 +1053,7 @@ def build_registry(store, claude_projects):
     # skipping it dropped every flat-pool mapping from the registry (#118).
     store_bases = [os.path.realpath(os.path.join(store, sub))
                    for sub in ("projects", "views")]
+    known = _store_project_names(store)
     groups = {}
     for entry in sorted(os.listdir(claude_projects)):
         entry_dir = os.path.join(claude_projects, entry)
@@ -1079,7 +1088,9 @@ def build_registry(store, claude_projects):
             continue
 
         entry, target, root, _ = valid
-        project = os.path.basename(target)
+        # Windows realpath returns the on-disk spelling, so a stale `OfflineCV`
+        # folder would flip the entry against `offlinecv` from name resolution (#138).
+        project = _store_spelling(os.path.basename(target), known)
         mapping[root] = project
         # A link still on the pre-remote basename is a pending rename, not a
         # pin: an override would hide it from `_association_rename_candidate`.
@@ -2312,6 +2323,14 @@ def link_project_memory(
         # machine that pulled a migrated store has none yet; compile_view
         # also seeds state/<name>.md when the repo has no state.
         target = os.path.join(store, "views", name)
+        variant = _view_case_variant(store, name)
+        if variant:
+            if dry_run:
+                return ("changed", f"would rename view '{variant}' to '{name}' and relink")
+            try:
+                _respell_dir(os.path.join(store, "views"), variant, name)
+            except OSError as e:
+                return ("skip", f"could not rename view '{variant}' to '{name}': {e}")
         if not os.path.isfile(os.path.join(target, "MEMORY.md")):
             if dry_run:
                 return ("changed", f"would compile view '{name}' and link it")
@@ -2344,6 +2363,49 @@ def link_project_memory(
         if retired:
             status, msg = "changed", msg + retired
     return status, msg
+
+
+def _view_case_variant(store, name):
+    """The one `views/` folder spelled like `name` but for case and not a store
+    project itself. Listed, never probed, as in `_store_project_names`."""
+    views = os.path.join(store, "views")
+    try:
+        entries = os.listdir(views)
+    except OSError:
+        return None
+    if name in entries:
+        return None
+    known = _store_project_names(store)
+    matches = [e for e in entries
+               if e.casefold() == name.casefold() and e not in known
+               and os.path.isdir(os.path.join(views, e))]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _respell_dir(parent, old, new):
+    """Rename `parent/old` to `parent/new` where the two differ only in case.
+    Goes through a temporary name: a case-insensitive filesystem may refuse
+    or ignore a direct case-only rename."""
+    src, dst = os.path.join(parent, old), os.path.join(parent, new)
+    tmp = os.path.join(parent, f".{new}.okfmem-respell-{os.getpid()}")
+    os.rename(src, tmp)
+    try:
+        os.rename(tmp, dst)
+    except OSError:
+        os.rename(tmp, src)
+        raise
+
+
+def _link_spelling_differs(link, target_real):
+    """True when `link`'s stored target ends in a case variant of
+    `target_real`'s last component. realpath + normcase hide this on Windows,
+    so a stale `views\\OfflineCV` link would otherwise never be repointed (#138)."""
+    try:
+        stored = os.path.basename(os.path.normpath(os.readlink(link)))
+    except (OSError, ValueError):
+        return False
+    wanted = os.path.basename(target_real)
+    return stored != wanted and stored.casefold() == wanted.casefold()
 
 
 def _retire_legacy_link(claude_projects, root, proj_dir, target_real, dry_run):
@@ -2387,7 +2449,9 @@ def _link_memory_dir(
     managed_copy = _managed_copy_target(link)
 
     if os.path.islink(link) or _is_junction(link):
-        if os.path.normcase(os.path.realpath(link)) == os.path.normcase(target_real):
+        if os.path.normcase(os.path.realpath(link)) == os.path.normcase(
+            target_real
+        ) and not _link_spelling_differs(link, target_real):
             tier = "symlink" if os.path.islink(link) else "junction"
             return ("ok", f"{name} ({tier})")
         verb = "repoint"
