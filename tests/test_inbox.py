@@ -594,3 +594,48 @@ def test_cmd_wrapper_propagates_json_push_failure(env, tmp_path):
     assert r.returncode != 0
     got = json.loads(r.stdout)
     assert list(got) == ["error"] and got["error"]
+
+
+def _bulk_inbox(store, n):
+    lines = []
+    for i in range(n):
+        meta = json.dumps({"source": "gaal", "repo": "acme/demo", "machine": "m",
+                           "time": f"2026-01-01T00:00:{i % 60:02d}Z"})
+        page = _page(f"Lesson {i}", f"Lesson number {i}")
+        lines += [f"commit refs/okfmem/inbox/m/id{i}", "committer t <t@e.st> 0 +0000",
+                  "data 1", "x", "M 100644 inline meta.json",
+                  f"data {len(meta)}", meta, f"M 100644 inline lesson-{i}.md",
+                  f"data {len(page.encode())}", page, ""]
+    subprocess.run(["git", "-C", store, "fast-import", "--quiet"], check=True,
+                   input="\n".join(lines).encode())
+
+
+def test_pending_git_process_count_does_not_grow_with_pushes(env, monkeypatch):
+    calls = []
+    real = mx.subprocess.run
+    monkeypatch.setattr(mx.subprocess, "run",
+                        lambda cmd, *a, **k: calls.append(cmd) or real(cmd, *a, **k))
+    counts = []
+    for n in (3, 40):
+        _bulk_inbox(env["store"], n)
+        calls.clear()
+        assert len(mx.pending(env["store"])) == n
+        counts.append(len(calls))
+    assert counts[0] == counts[1] <= 4
+
+
+def test_pending_reads_a_thousand_pushes_quickly(env):
+    import time
+    _bulk_inbox(env["store"], 1000)
+    start = time.monotonic()
+    pushes = mx.pending(env["store"])
+    assert time.monotonic() - start < 5
+    assert len(pushes) == 1000
+    assert pushes[0]["pages"][0]["fields"]["name"].startswith("Lesson")
+
+
+def test_render_pending_prints_per_project_counts_before_the_list(env):
+    _bulk_inbox(env["store"], 3)
+    lines = mx.render_pending(mx.pending(env["store"]))
+    assert lines[1] == "demo: 3 pages in 3 pushes"
+    assert lines[2].endswith(":")
