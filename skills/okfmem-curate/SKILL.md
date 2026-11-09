@@ -109,7 +109,7 @@ A non-empty GIT_ROOT is the recovery mechanism; retain it for Recovery and surfa
 **Auto-loaded bytes — the headline numbers.** Only the compiled index and the state file load at session start, so they are the only thing that costs context. Run the report first:
 
 ```bash
-okfmem reindex --report
+okfmem reindex --report --store "$STORE_PATH"
 ```
 
 Its `auto_loaded` table gives the compiled `MEMORY.md` and `STATE.md` bytes against their ceilings, and its per-section breakdown shows which section holds the bytes. If the `MEMORY.md` row reads `OVER`, plan description tightening and relabelling (and deletions) that shrink the compiled view; do not try to edit the view.
@@ -117,7 +117,7 @@ Its `auto_loaded` table gives the compiled `MEMORY.md` and `STATE.md` bytes agai
 Count pointer lines over the per-line budget:
 
 ```bash
-okfmem reindex --budget-check
+okfmem reindex --budget-check --store "$STORE_PATH"
 ```
 
 It is **advisory** (always exit 0). Each over-budget line comes from a page's `name` + `description`, so the fix is to tighten that page's `description`.
@@ -219,8 +219,8 @@ Once approved:
 5. Check the result:
 
    ```bash
-   okfmem reindex --verify
-   okfmem reindex --report
+   okfmem reindex --verify --store "$STORE_PATH"
+   okfmem reindex --report --store "$STORE_PATH"
    ```
 
    `--verify` exits **1** on any dangling pointer or orphan in the compiled view; a non-zero exit means the pages are inconsistent (for example a deleted page still referenced) — fix the pages and recompile before reporting success. Never fix it by editing the compiled index.

@@ -136,8 +136,9 @@ Print this orientation instead of the dashboard:
   `STATE.md` + `MEMORY.md` auto-load. On a *new workstation*, `git -C
   ~/okfmem-store pull --rebase` once (cross-machine pull isn't auto yet).
 - **During a session** — capture is a judgment call. To durably record an
-  insight mid-session, write a `<slug>.md` page + a `MEMORY.md` pointer (same
-  shape `/okfmem-save` uses).
+  insight mid-session, write the page to `$STORE_PATH/pages/<slug>.md` with
+  `labels: [repo:<name>]`, then recompile (`okfmem init --resolve-project
+  --compile`). There is no index to edit: `MEMORY.md` is compiled.
 - **End of session** — run **`/okfmem-save`** (alias `/primer`): cleans up
   worktrees, captures insights, overwrites `STATE.md`, optionally posts an
   impl-complete issue comment, then `okfmem sync` commits+pushes the store.

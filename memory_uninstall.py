@@ -138,6 +138,7 @@ def unlink_skills(dry_run, include_codex=False):
         return actions
     names = sorted(n for n in os.listdir(engine)
                    if os.path.isfile(os.path.join(engine, n, "SKILL.md")))
+    names += [n for n in mi.RETIRED_SKILLS if n not in names]
     dirs = mi.skill_dirs()
     if include_codex:
         dirs.update({"codex": os.path.join(os.path.expanduser("~"), ".agents", "skills"), "codex_legacy": os.path.join(mi.codex_home(), "skills")})
