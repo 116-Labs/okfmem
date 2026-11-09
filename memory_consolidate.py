@@ -135,6 +135,37 @@ def _refresh_view(store, payload=None):
         resolve_project(store, cwd=cwd, compile=True)
     except Exception:
         pass
+    _refresh_all_views(store)
+
+
+def _refresh_all_views(store):
+    """Recompile every views/* dir: consolidate archives and relabels pages
+    store-wide, so a view for a repo other than the cwd's goes stale (#142)."""
+    views_dir = os.path.join(store, "views")
+    try:
+        from memory_init import (
+            _load_registry, _remote_repo_owner, _detect_stack,
+            _resolve_overrides, _resolve_aliases, compile_view,
+        )
+        names = sorted(n for n in os.listdir(views_dir)
+                       if os.path.isdir(os.path.join(views_dir, n)))
+        reg = _load_registry(os.path.join(store, "registry.json"))
+    except Exception:
+        return
+    for name in names:
+        try:
+            roots = sorted(r for r, p in reg["map"].items()
+                           if p == name and os.path.isdir(r))
+            if roots:
+                root = roots[0]
+                org, stack = _resolve_overrides(
+                    reg, root, name, _remote_repo_owner(root), _detect_stack(root))
+            else:
+                org, stack = _resolve_overrides(reg, None, name, None, [])
+            compile_view(store, name, org=org, stack=stack,
+                         aliases=_resolve_aliases(reg, name), reg=reg)
+        except Exception:
+            continue
 
 
 def load_transcript(args, payload):
