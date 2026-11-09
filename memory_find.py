@@ -22,7 +22,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from memory_frontmatter import find_frontmatter, parse_fields, parse_labels  # noqa: E402
 
 DEFAULT_STORE = os.environ.get("OKFMEM_STORE", os.path.expanduser("~/okfmem-store"))
-WEIGHTS = {"slug": 6, "name": 5, "description": 3, "labels": 2}
+# Each tier outweighs every tier below it combined, so a name hit always
+# outranks a description-plus-labels hit; body hits only break field ties.
+WEIGHTS = {"slug": 4, "name": 4, "description": 2, "labels": 1}
 BODY_CAP = 5
 SKIP = ("MEMORY.md", "STATE.md", "CONTEXT.md")
 
@@ -63,7 +65,7 @@ def read_page(path):
 
 
 def score(page, terms):
-    """Weighted hit count, or 0 when any term is missing from the page."""
+    """(field score, body hits), or None when any term is missing from the page."""
     fields = {
         "slug": page["slug"].lower().replace("-", " "),
         "name": page["name"].lower(),
@@ -71,14 +73,15 @@ def score(page, terms):
         "labels": " ".join(page["labels"]).lower(),
     }
     body = page["body"].lower()
-    total = 0
+    field_score = body_hits = 0
     for term in terms:
-        hits = sum(w for k, w in WEIGHTS.items() if term in fields[k])
-        hits += min(body.count(term), BODY_CAP)
-        if not hits:
-            return 0
-        total += hits
-    return total
+        f = sum(w for k, w in WEIGHTS.items() if term in fields[k])
+        b = min(body.count(term), BODY_CAP)
+        if not (f or b):
+            return None
+        field_score += f
+        body_hits += b
+    return field_score, body_hits
 
 
 def snippet(body, terms, width=140):
@@ -105,11 +108,13 @@ def find(store, terms, repo=None, archive=False, limit=10):
             continue
         s = score(page, terms)
         if s:
+            field_score, body_hits = s
             rel = os.path.relpath(path, store).replace(os.sep, "/")
             results.append(
                 {
                     "path": rel,
-                    "score": s,
+                    "field_score": field_score,
+                    "body_hits": body_hits,
                     "slug": page["slug"],
                     "name": page["name"],
                     "description": page["description"],
@@ -118,7 +123,14 @@ def find(store, terms, repo=None, archive=False, limit=10):
                     "snippet": snippet(page["body"], terms),
                 }
             )
-    results.sort(key=lambda r: (-r["score"], -_day(r["last_accessed"]), r["slug"]))
+    results.sort(
+        key=lambda r: (
+            -r["field_score"],
+            -r["body_hits"],
+            -_day(r["last_accessed"]),
+            r["slug"],
+        )
+    )
     return results[:limit] if limit else results
 
 
@@ -141,11 +153,14 @@ def main(argv=None):
     ap.add_argument("terms", nargs="*")
     ap.add_argument("--repo")
     ap.add_argument("--archive", action="store_true")
-    ap.add_argument("--limit", type=int, default=10)
+    ap.add_argument("--limit", type=int, default=10, help="0 lists every match")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--store", default=DEFAULT_STORE)
     args = ap.parse_args(argv)
-    terms = args.terms
+    terms = [t for t in args.terms if t.strip()]
+    if args.limit < 0:
+        print("okfmem find: --limit must be 0 (no cap) or more", file=sys.stderr)
+        return 2
     if not terms:
         print(
             "okfmem find: give at least one search term, e.g. `okfmem find keychain`",

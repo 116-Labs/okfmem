@@ -105,3 +105,36 @@ def test_cli_json_output(store, capsys):
     assert mf.main(["watch", "--json", "--store", str(store)]) == 0
     [r] = json.loads(capsys.readouterr().out)
     assert (r["slug"], r["labels"]) == ("p", ["repo:gaal"])
+
+
+def test_name_hit_outranks_many_body_hits(store):
+    page(store / "pages", "body-heavy", body="watch " * 9 + "\n", last="2026-12-01")
+    page(store / "pages", "named", name="Watch stalls", last="2026-01-01")
+    assert slugs(mf.find(str(store), ["watch"], limit=1)) == ["named"]
+
+
+def test_name_hit_outranks_description_plus_labels(store):
+    page(store / "pages", "both", desc="gaal notes", labels=["repo:gaal"])
+    page(store / "pages", "named", name="gaal")
+    assert slugs(mf.find(str(store), ["gaal"])) == ["named", "both"]
+
+
+def test_page_without_frontmatter_is_searchable(store):
+    (store / "pages" / "plain.md").write_text(
+        "# Plain\n\nthe watch log\n", encoding="utf-8"
+    )
+    [r] = mf.find(str(store), ["watch"])
+    assert (r["slug"], r["snippet"]) == ("plain", "the watch log")
+
+
+def test_cli_rejects_blank_query_and_negative_limit(store, capsys):
+    assert mf.main(["", " ", "--store", str(store)]) == 2
+    assert "search term" in capsys.readouterr().err
+    assert mf.main(["watch", "--limit", "-1", "--store", str(store)]) == 2
+    assert "--limit" in capsys.readouterr().err
+
+
+def test_limit_zero_lists_every_match(store):
+    for i in range(12):
+        page(store / "pages", f"p{i}", body="watch\n")
+    assert len(mf.find(str(store), ["watch"], limit=0)) == 12
