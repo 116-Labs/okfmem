@@ -54,7 +54,7 @@ Usage:
               with <project> from --project, else the cwd's git-root name
               (the same rule `okfmem init`/`graduate` use).
   --json      machine-readable output instead of markdown (stable contract for
-              callers such as the /okfmem-reindex skill).
+              callers).
   --budget    override the auto-load byte ceiling for this run.
   --lane-budget  override the per-recall lane-index byte ceiling for this run.
 

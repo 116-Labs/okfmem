@@ -1,16 +1,8 @@
 ---
 name: okfmem-curate
-description: "Judgment-driven memory curation (rare; routine hygiene is automatic via the okfmem consolidation Stop hook). Inventory, flag stale entries, propose deletions/compressions/semantic merges, rewrite MEMORY.md as tight one-line hooks. Hard approval gate before any deletion. Invoked as /okfmem-curate (alias: /memory-curate)."
+description: "Judgment-driven memory curation (rare; routine hygiene is automatic via the okfmem consolidation Stop hook). Inventory pages, flag stale ones, propose deletions/merges/relabels/description rewrites, then recompile the view. Hard approval gate before any deletion. Invoked as /okfmem-curate (alias: /memory-curate)."
 origin: user
 ---
-
-> **Flat-pool store (#97, live 2026-10-27): parts of this skill still describe the
-> retired `projects/<project>/` layout (#122).** Pages now live in `<store>/pages/` with
-> `labels: [repo:<name>]`, and `MEMORY.md` is compiled from them. Act on pages (delete,
-> merge, relabel, tighten `description`) and then run
-> `okfmem init --resolve-project --compile`; **never rewrite a `MEMORY*.md` index by
-> hand** and never write into `views/`. Where a phase below says to rewrite the index,
-> skip it and report instead.
 
 Resolve STORE_PATH from the `store` field of `okfmem init --resolve-project`
 with the user's explicit `--store PATH` when supplied. Pass that exact store
@@ -28,37 +20,35 @@ a home-directory checkout. SKILL_DIR is the real directory containing this skill
 > lives in the `okfmem` repo (`~/okfmem/skills/`); `okfmem init` symlinks it
 > into each harness.
 
-> **Fallback tool (as of 2026-07-16).** Routine memory hygiene is now automatic:
-> the okfmem P3 consolidation job (`~/okfmem/memory_consolidate.py`, wired to the
-> Claude Code session-end Stop hook) decay-scores every page and gracefully
-> archives stale ones (`pages/archive/<year>/`, never deleted), regenerating
-> `MEMORY.md`, every session — no hand-running required. See issue #1.
-> Reach for `/okfmem-curate` only for **judgment-driven** curation the automated
-> decay pass does not do: merging duplicate-with-CLAUDE.md entries, semantic
-> consolidation, or a hard purge the archive gate is too conservative to make.
-> Note the layers differ: consolidation archives (reversible); this skill can
+> **Fallback tool.** Routine memory hygiene is automatic: the okfmem consolidation
+> job (`memory_consolidate.py`, wired to the session-end Stop hook) decay-scores
+> every page and archives stale ones (`pages/archive/<year>/`, never deleted),
+> recompiling the view every session. Reach for `/okfmem-curate` only for
+> **judgment-driven** curation decay does not do: merging duplicates, semantic
+> consolidation, relabelling, or a hard purge the archive gate is too
+> conservative to make. Consolidation archives (reversible); this skill can
 > delete (hard, gated). Prefer letting decay do the routine work.
 
-Curate the per-project auto-memory store under `<resolved-store>/projects/<project>/`. Detects stale, superseded, or duplicate-with-CLAUDE.md entries; proposes a deletion/compression plan; on approval, executes and rewrites `MEMORY.md` as tight one-line hooks per the user's auto-memory convention.
+Curate the label-indexed page pool at `<STORE_PATH>/pages/` (plus `pages/archive/`). The actions are **delete**, **merge**, **relabel**, **tighten `description`**, and **graduate** into `CLAUDE.md`. Pages and their labels are the synced source of truth; the session's `MEMORY.md` and lane indexes are a compiled, gitignored view generated from them.
 
-**Page deletion and archival are store hygiene and recall precision — not a context optimization (#52).** Only `MEMORY.md` and `STATE.md` are auto-loaded at session start; every other page costs zero context regardless of how many exist. A curate pass that deletes or archives 100 pages and touches no pointer saves **0** tokens. The number that moves the needle is auto-loaded bytes — see Phase 2 and Phase 4.
+**Never edit a compiled `MEMORY*.md` index, and never write into `views/` or `projects/`.** An edit there never syncs and is overwritten by the next compile. To change what the index shows, change the page's `description` or `labels` and recompile.
 
-Applies the "deterministic collection + LLM judgment" principle: a script collects facts, then an LLM cross-reads each candidate and produces verdicts. **Hard rule:** no file is deleted and no index is rewritten until the user has explicitly approved the plan.
+**Hard rule:** no page is deleted or rewritten until the user has explicitly approved the plan.
 
 ## When to use
 
-- The user says "clean up memory", "prune memory", "memory hygiene", "tighten MEMORY.md", "context is bloated", or similar.
-- Periodic curation (monthly, or after a project reaches a milestone where many "X landed" memories accumulate).
-- **Not** the byte-ceiling trigger — when `okfmem status` or `okfmem reindex --report` flags `MEMORY.md` as over the auto-load byte ceiling (`memory_reindex.MEMORY_BUDGET_BYTES`, 8192 bytes), that is `/okfmem-reindex`'s trigger, not this skill's: the remedy is a lane split (a pointer move), not a deletion. Phase 2 below still surfaces the same numbers, because a curate pass benefits from knowing them too, but this skill does not execute the split.
-- **Audit-only check-in**: when the user wants the report without committing to deletions yet — invoke with `audit` argument.
+- The user says "clean up memory", "prune memory", "memory hygiene", "context is bloated", or similar.
+- Periodic curation (monthly, or after a milestone where many "X landed" pages accumulate).
+- **The auto-load byte ceiling is tripped.** When `okfmem status` or `okfmem reindex --report` flags the view as over the ceiling (`memory_reindex.MEMORY_BUDGET_BYTES`, 8192 bytes), the remedy is to tighten page descriptions and relabel pages (so the compiler routes them to lane indexes), then recompile. Deleting pages helps only because it removes lines from the compiled view.
+- **Audit-only check-in**: when the user wants the report without committing to changes yet, invoke with the `audit` argument.
 
 ## Modes
 
 | Mode | Trigger | What it does |
 |------|---------|--------------|
-| Default | "clean up memory" / "prune memory" / no arg | All five phases; halts at approval gate; executes on approval |
+| Default | "clean up memory" / "prune memory" / no arg | Phases 1–5; halts at the approval gate; executes on approval |
 | Audit | `audit` arg, or "memory audit" / "what's stale" | Phases 1–3 only; produces the report; no approval gate, no execution |
-| Merge a retired repo | `merge <OLD> into <NEW>`, "fold the old repo's memory into…", or init's "decodes to …, which does not exist" warning | The section below instead of the five phases; halts at its own approval gate |
+| Merge a retired repo | `merge <OLD> into <NEW>`, "fold the old repo's memory into…", or init's "decodes to …, which does not exist" warning | The section below instead of the phases; halts at its own approval gate |
 
 ## Merge a retired repo
 
@@ -100,121 +90,68 @@ that isn't clear-cut; never guess a page's relevance.**
 
 ## How it works
 
-Five phases. Phases 4 and 5 are gated on explicit user approval — never execute deletions or rewrite MEMORY.md without it. The lesson behind this skill: an unguarded "cleanup pass" feels efficient until the index points at deleted files.
+Five phases. Phases 4 and 5 are gated on explicit user approval. The lesson behind this skill: an unguarded "cleanup pass" feels efficient until something load-bearing is gone.
 
-### Phase 1: Resolve target directory
+### Phase 1: Resolve the store
 
-If the user passed an explicit path argument (e.g. `/okfmem-curate audit <path>`), use it as
-`MEM_DIR` directly and skip the probe below — this is the escape hatch for running outside a
-repo.
+Run `okfmem init --resolve-project` (read-only JSON), honoring an explicit `--store PATH` or `$OKFMEM_STORE`. Take `store` as STORE_PATH and the repo's label as `repo:<name>`. For `uninitialized`, run `okfmem init --store STORE_PATH` from the repository; for `not-a-repo` or an unreachable engine, stop or ask for an explicit store. Pages live in `$STORE_PATH/pages/`; that is PAGES_DIR for every later phase. If the user passed an explicit store path, use it and skip the probe.
 
-Otherwise run `okfmem init --resolve-project` (read-only JSON), honoring an explicit
-`--store PATH` or `$OKFMEM_STORE`. Set MEM_DIR to the returned memory_dir only
-when state is ready. For uninitialized, run okfmem init --store STORE_PATH from the repository;
-for not-a-repo or an unreachable engine, stop or request an explicit path.
-Never substitute the projects root for an unresolved project. This works with
-Codex, AGY, and Claude without depending on a Claude memory link.
-
-Detect whether the dir is git-backed (so deletions are recoverable). Run:
+Check that deletions are recoverable by asking git about the **store root**, not the compiled view:
 
 ```bash
-# Test the property, not a proxy for it. `$MEM_DIR` is now the symlink's TARGET
-# inside the store, not the `<resolved-store>/projects/<project>` symlink — so
-# `readlink` prints nothing and exits 1 here, which would report "not
-# recoverable" on every correctly linked, fully git-backed store. Ask git.
-GIT_ROOT=$(git -C "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}" rev-parse --show-toplevel 2>/dev/null)
+GIT_ROOT=$(git -C "${STORE_PATH:?Phase 1 did not resolve a store — do not fall back to a default}" rev-parse --show-toplevel 2>/dev/null)
 ```
 
-A non-empty GIT_ROOT is the enclosing repo — retain it for Recovery and surface it to the user as the recovery mechanism. An empty GIT_ROOT means the dir is genuinely not under git: *say so explicitly* — recovery is harder. This also works for the explicit-path escape hatch, which `readlink` never handled.
+A non-empty GIT_ROOT is the recovery mechanism; retain it for Recovery and surface it to the user. An empty GIT_ROOT means the store is not under git: *say so explicitly* — deletions are not recoverable, and the approval gate needs extra confirmation language.
 
 ### Phase 2: Inventory (deterministic)
 
-**Auto-loaded bytes — the headline numbers.** Run the reindex engine first.
-Its `auto_loaded` table is the only thing that costs context at session start
-(`MEMORY.md` + `STATE.md` against their ceiling), and its per-section
-breakdown of `MEMORY.md` shows **which section holds the bytes** — a single
-dominant block is the finding that decides whether the remedy is "tighten a
-few hooks" or "split a lane"; total file size alone never shows it:
+**Auto-loaded bytes — the headline numbers.** Only the compiled index and the state file load at session start, so they are the only thing that costs context. Run the report first:
 
 ```bash
-okfmem reindex --report "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"
+okfmem reindex --report
 ```
 
-**If the `MEMORY.md` row reads `OVER`, the restructure trigger has fired
-(#53) — but that trigger is `/okfmem-reindex`'s to act on, not this
-skill's.** The recommended remedy is a lane split, never "tighten hooks":
-moving a lane's pointers out of `MEMORY.md` into a new or existing
-`MEMORY-<lane>.md` index recovers far more bytes than shortening a handful
-of hooks, and once a pointer moves to a lane index it is never re-flattened
-back to the root. `/okfmem-reindex` clusters the split, proposes it for
-approval, and executes it — see that skill for the full process. Report
-the `OVER` finding here (it belongs in this skill's numbers too, since a
-curate pass often runs on the same store), but hand the split itself to
-`/okfmem-reindex` rather than doing it inline.
+Its `auto_loaded` table gives the compiled `MEMORY.md` and `STATE.md` bytes against their ceilings, and its per-section breakdown shows which section holds the bytes. If the `MEMORY.md` row reads `OVER`, plan description tightening and relabelling (and deletions) that shrink the compiled view; do not try to edit the view.
 
-Also count pointer lines over the per-line budget (#52 — `okfmem-save`
-enforces ≤150 chars at write time; this is the check that catches what
-slipped through):
+Count pointer lines over the per-line budget:
 
 ```bash
-okfmem reindex --budget-check "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"
+okfmem reindex --budget-check
 ```
 
-It walks **every** index, not just the root — after a lane split (or once
-#53's write-time routing is in effect) most pointers live in lane indexes,
-so checking `MEMORY.md` alone would miss almost all of them — and it accepts
-**both** pointer syntaxes, so the bare `- slug.md — hook` form a lane index
-uses is counted too. It reports each over-budget line with its index file,
-line number, and character count, and it is **advisory**: always exit 0,
-never a gate (the budget rule itself is advisory — see `okfmem-save` Step 3).
+It is **advisory** (always exit 0). Each over-budget line comes from a page's `name` + `description`, so the fix is to tighten that page's `description`.
 
-> Do not hand-roll this as a shell one-liner. The `awk` version this replaced
-> was wrong in both directions at once: a `/^- \[/` guard is blind to every
-> bare pointer (exactly the ones a lane index holds), and BSD `awk`'s
-> `length($0)` counts **bytes**, so the convention's em-dash over-reported
-> every line carrying one. Same fail-open-on-macOS class as the old `sed`
-> verifier below. The budget constant lives in one place —
-> `memory_reindex.POINTER_BUDGET_CHARS`.
-
-Lead the curation report (Phase 4) with these numbers: `MEMORY.md` /
-`STATE.md` bytes vs. ceiling, and pointer overage count.
-
-**Page-level detail — store hygiene, not context.** Run the inventory script
-for per-file age, link status, and heuristic flags:
+**Page-level detail — store hygiene, not context.** Run the inventory script on the page pool:
 
 ```bash
-python3 "$SKILL_DIR/scripts/inventory.py" "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"
+python3 "$SKILL_DIR/scripts/inventory.py" "$STORE_PATH/pages"
 ```
 
-Page count and on-disk total bytes are **not auto-loaded and cost zero
-context at session start** — demote them to context for the plan, not a
-finding. Deleting or archiving a page changes none of the headline numbers
-above unless it also removes or shortens a `MEMORY.md` pointer.
+It emits per-file age, size, frontmatter `type` and `name`, and heuristic flags. Ignore its link-status column and the `orphan` / `dangling` flags: pages are not linked from hand-written indexes, so they do not apply to the compiled view. Filter the table to pages carrying the target `repo:<name>` label (or the labels the user named), and read `labels:` from each page's frontmatter.
 
-The inventory script emits a markdown report with three sections:
+Flags that apply:
 
-1. **Summary**: page count, total bytes, MEMORY.md size + line count, per-index pointer counts.
-2. **Per-file table**: name, size, age (days since mtime), frontmatter `type` if present, frontmatter `name`, link status (linked / orphan). Link status is computed across **every** `MEMORY*.md` in both pointer syntaxes — a page carried by a lane index is linked, not an orphan.
-3. **Heuristic flags**: per file, comma-separated flags drawn from filename + content patterns:
-   - `ck_snapshot` — filename starts `ck_` (retired CK session-end saves; ephemeral by nature). These are *never* counted as orphans — they were never indexed by design, and every engine pass (`consolidate`, `backfill`, `reindex --verify`) skips them for the same reason. This skill is the one pass that still surfaces them, so a plan can propose deleting them.
-   - `landed_doc` — filename or frontmatter `name` contains `landed` / `_operational` (project-state, prone to age out)
-   - `superseded_marker` — body contains `SUPERSEDED`, `superseded by`, `replaced by`, or `(Note:` markers indicating self-deprecation
-   - `orphan` — a durable page that exists but is linked from no index (`MEMORY.md` *or* any `MEMORY-*.md` lane index); `ck_*.md` snapshots are excluded
-   - `dangling` — linked from an index but file missing (reported with the index it came from)
-   - `old_45d` — mtime older than 45 days
-   - `old_90d` — mtime older than 90 days
+- `ck_snapshot` — filename starts `ck_` (retired session-end saves; ephemeral by nature). A plan can propose deleting them.
+- `landed_doc` — filename or `name` contains `landed` / `_operational` (project-state, prone to age out)
+- `superseded_marker` — body contains `SUPERSEDED`, `superseded by`, `replaced by`, or `(Note:`
+- `old_45d` / `old_90d` — mtime older than 45 / 90 days
+
+Page count and on-disk bytes cost zero context at session start; they are background for the plan, not a finding. Deleting a page changes the headline numbers only when it removes a line from the compiled view.
 
 These flags are *signals*, not verdicts. Phase 3 turns them into recommendations.
 
 ### Phase 3: LLM judgment (cross-read)
 
-For every flagged file (any flag set), read its frontmatter + first ~30 lines and classify as one of:
+For every flagged page, read its frontmatter + first ~30 lines and classify as one of:
 
-- **keep** — pattern memories, user feedback, current operational state. Default for `feedback_*`, named patterns, and the most recent `*_landed` doc per project surface.
-- **delete** — superseded markers, CK snapshots older than the most recent two, pure-noise files whose `name`/`description` is fully covered by the project's `CLAUDE.md` (no unique content worth keeping), "X landed" docs older than 7 days where the design rules survive in pattern memories.
-- **graduate** — a *still-valuable* page whose rule belongs in the always-loaded `CLAUDE.md` (not recall-on-demand memory): promote it into `CLAUDE.md`/`AGENTS.md` and archive the source with provenance, rather than deleting it. This is the forward, lossless alternative to `delete` for the duplicate-with-CLAUDE.md case — run `okfmem graduate <slug> --store "$STORE_PATH" [--to <dir>/CLAUDE.md]` (it distills + places, mirrors a real-file `AGENTS.md`, archives the page stamped `graduated_to`, and drops its `MEMORY.md` pointer). Reserve `delete` for duplicates with no unique content.
-- **compress** — files with unique content but verbose framing; output a one-paragraph rewrite.
-- **unsure** — content needs user judgment. Surface verbatim with a short question.
+- **keep** — pattern memories, user feedback, current operational state. Default for `feedback_*`, named patterns, and the most recent `*_landed` doc per surface.
+- **delete** — superseded markers, snapshots older than the most recent two, pure-noise pages fully covered by the project's `CLAUDE.md`, "X landed" docs older than 7 days where the design rules survive in pattern memories.
+- **merge** — two or more pages covering the same ground: fold the unique content into the newer page, then delete the others.
+- **relabel** — the page is right but carries the wrong or missing `labels:` (e.g. it belongs to another repo now); propose the new label set.
+- **tighten** — the page is fine but its `description` is verbose or over the pointer budget; propose a one-line replacement. The compiled index line is built from `name` + `description`.
+- **graduate** — a *still-valuable* page whose rule belongs in the always-loaded `CLAUDE.md`: run `okfmem graduate <slug> --store "$STORE_PATH" [--to <dir>/CLAUDE.md]`. It distills and places the rule, mirrors a real-file `AGENTS.md`, and archives the page stamped `graduated_to`. Reserve `delete` for duplicates with no unique content.
+- **unsure** — needs user judgment. Surface verbatim with a short question.
 
 **Cross-check against project CLAUDE.md:**
 
@@ -222,112 +159,91 @@ For every flagged file (any flag set), read its frontmatter + first ~30 lines an
 grep -F -i "$NAME_FROM_FRONTMATTER" "$CWD/CLAUDE.md" 2>/dev/null
 ```
 
-If the memory's `name` or first-line content appears in CLAUDE.md, the page is a drift risk. Split by value: a page with unique, still-valuable rules → **graduate** (promote + archive, lossless, keeps provenance); a pure-noise duplicate with nothing worth keeping → **delete**. Prefer `graduate` whenever the content still carries a rule worth having in `CLAUDE.md` — deleting it loses both the content and where it came from.
+If the page's `name` or first-line content appears there, it is a drift risk. A page with unique, still-valuable rules → **graduate**; a pure-noise duplicate → **delete**. Prefer `graduate` whenever the content still carries a rule worth keeping.
 
-**Recency rule for `*_landed` docs:** group by surface (e.g., `agnt29_*`, `agnt32_*` are AGNT-related landed docs). Keep the most recent in each group; older ones are candidates for delete unless they encode unique content not covered elsewhere.
+**Recency rule for `*_landed` docs:** group by surface; keep the most recent in each group; older ones are delete candidates unless they encode unique content covered nowhere else.
 
 ### Phase 4: Approval gate (HARD STOP)
 
-Present the plan as a single markdown response with three buckets:
+Present the plan as a single markdown response:
 
 ```markdown
 ## Cleanup plan for review
 
-### Bucket A — high-confidence delete (N files)
-| File | Why |
+### Bucket A — high-confidence delete (N pages)
+| Page | Why |
 |---|---|
-| ... | ... |
 
-### Bucket B — duplicates with CLAUDE.md (N files)
-Recommended action per file: **graduate** a still-valuable page (promote into `CLAUDE.md`/`AGENTS.md` + archive with provenance via `okfmem graduate <slug> --store "$STORE_PATH"`), **delete** only a pure-noise duplicate. Graduate is lossless and keeps provenance; prefer it whenever the rule is worth keeping.
-
-| File | Where it lives in CLAUDE.md | Action (graduate / delete) |
+### Bucket B — duplicates with CLAUDE.md (N pages)
+| Page | Where it lives in CLAUDE.md | Action (graduate / delete) |
 |---|---|---|
-| ... | ... | ... |
 
-### Bucket C — superseded / aged out (N files)
-| File | Reason |
+### Bucket C — superseded / aged out (N pages)
+| Page | Reason |
 |---|---|
-| ... | ... |
 
-### Bucket D — compress (N files)
-| File | Proposed one-paragraph rewrite |
+### Bucket D — merge (N groups)
+| Pages | Surviving page | What is folded in |
+|---|---|---|
+
+### Bucket E — relabel / tighten description (N pages)
+| Page | Current | Proposed |
+|---|---|---|
+
+### Unsure / ask user (N pages)
+| Page | Question |
 |---|---|
-| ... | ... |
 
-### Unsure / ask user (N files)
-| File | Question |
-|---|---|
-| ... | ... |
+**Net effect:** compiled `MEMORY.md` XKB → ~YKB (re-measured after the recompile), reads **0** if no line of the view changes. N pages deleted/archived is a store-hygiene count, reported separately; it is not a context saving by itself.
 
-**Net effect:** ~Z fewer tokens auto-loaded per session (MEMORY.md XKB → ~YKB; STATE.md unchanged unless also rewritten) — reads **0** if no auto-loaded file changes size. -N files archived/deleted is a store-hygiene count, reported separately; it is not a context saving by itself.
-
-→ Approve as-is, or call out files to keep, before I touch anything.
+→ Approve as-is, or call out pages to keep, before I touch anything.
 ```
 
-**STOP HERE.** Do not invoke any `rm`, `Edit`, or `Write` tool until the user has explicitly approved. If the user replies with corrections ("keep file X", "delete Y too", "actually compress instead"), update the plan and present again — still no execution. Only proceed to Phase 5 on a clear "approve" / "proceed" / "yes go ahead" signal.
+**STOP HERE.** Do not invoke any `rm`, `Edit`, or `Write` tool until the user has explicitly approved. Corrections ("keep X", "delete Y too") update the plan and present it again — still no execution. Proceed to Phase 5 only on a clear "approve" / "proceed" / "yes go ahead".
 
-In **audit mode** the skill stops here regardless and reports completion — no approval question, no execution.
+In **audit mode** the skill stops here and reports completion — no approval question, no execution.
 
-### Phase 5: Execute and verify
+### Phase 5: Execute, recompile, sync
 
 Once approved:
 
-1. Delete the approved files using `rm` (single batched command if possible).
-2. For `compress` decisions: rewrite the file in place with the agreed paragraph.
-3. For every file the approved plan marked **graduate**, run `okfmem graduate <slug> --store "$STORE_PATH" --yes` (add `--to <dir>/CLAUDE.md` for a lane-scoped target). Phase 4 **is** the human approval gate, so pass `--yes` to skip graduate's own rung-2 `[y/N]` — without it, invoked non-interactively with no tty the prompt silently skips and prints only a manual hint, so nothing lands while Phase 5 would wrongly report success. Each run distills the rule into `CLAUDE.md` (mirroring a real-file `AGENTS.md`), archives the source page stamped `graduated_to`, and drops its `MEMORY.md` pointer — so run these **before** the MEMORY.md rewrite below.
-4. **Read MEMORY.md once** (required before Write).
-5. Rewrite MEMORY.md as the tightened index:
-   - Group entries by frontmatter `type` (or by topical sections if types aren't consistent): "Current operational state", "Design patterns", "Gotchas / references", "User feedback (preferences)", "Cross-references".
-   - Each entry: `- [filename](filename) — one-line hook ≤150 chars`. Strip embedded summaries; the hook is what the user sees in the index, not the memory's full content.
-   - Preserve any cross-reference section pointing into other projects' memory dirs.
-6. Run the verification block:
+1. Delete the approved pages from `$STORE_PATH/pages/` (one batched `rm`).
+2. For **merge**, edit the surviving page to carry the folded content, then delete the others. For **relabel** and **tighten**, edit the page's frontmatter (`labels:`, `description:`) in place.
+3. For every page marked **graduate**, run `okfmem graduate <slug> --store "$STORE_PATH" --yes` (add `--to <dir>/CLAUDE.md` for a lane-scoped target). Phase 4 **is** the human approval gate, so `--yes` skips graduate's own `[y/N]`; without it a non-interactive run silently skips and prints only a manual hint.
+4. Recompile the view from the repo's checkout:
 
-```bash
-okfmem reindex --verify "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"; echo "verify exit: $?"
-okfmem reindex --report "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"    # after-numbers for step 8
-```
+   ```bash
+   okfmem init --resolve-project --compile --store "$STORE_PATH"
+   ```
 
-`--verify` walks **every** `MEMORY*.md` (not just the root index) and accepts
-**both** pointer syntaxes — `[title](slug.md)` and the bare `- slug.md — hook`
-a lane index uses. It exits **0** when the index is intact and **1** on any
-dangling pointer or orphan, so this line is a real gate: a non-zero exit means
-the rewrite broke the index — fix it before reporting success. Each dangling
-pointer is named **with the index file it came from**, which is what makes it
-fixable.
+5. Check the result:
 
-> This used to be a `grep | sed | comm` pipeline, and it was wrong in the
-> unsafe direction: it read only `MEMORY.md`, only the rich link form, and its
-> BRE `\?` is a GNU extension that BSD `sed` (macOS) does not support — so on
-> the primary platform it silently failed to strip the prefix and reported
-> nothing. A verifier that fails open is worse than no verifier. The logic
-> lives in Python now (issue #54) precisely so it cannot diverge per platform.
-> If you ever hand-roll this again: anchor on the **link target**, never a
-> loose `- \[\?` prefix, or a pointer whose *title* starts with a filename
-> (`- [CLAUDE.md subdir lanes](real-slug.md)`) reports a phantom `CLAUDE.md`.
+   ```bash
+   okfmem reindex --verify
+   okfmem reindex --report
+   ```
 
-If any dangling pointers appear, the new MEMORY.md is broken — fix immediately.
-If orphans appear, decide per file: add the link back, or delete the orphan
-(with user confirmation).
+   `--verify` exits **1** on any dangling pointer or orphan in the compiled view; a non-zero exit means the pages are inconsistent (for example a deleted page still referenced) — fix the pages and recompile before reporting success. Never fix it by editing the compiled index.
+6. Verify each **graduate**: confirm the rule landed and the source moved.
 
-7. Verify each **graduate** with the same rigor as delete/compress — confirm the rule actually landed and the source actually moved:
+   ```bash
+   for slug in $GRADUATED_SLUGS; do
+     git -C "$REPO_ROOT" diff -- CLAUDE.md AGENTS.md | grep -q '^+' && echo "OK: $slug rule landed" || echo "MISSING: no CLAUDE.md diff for $slug"
+     ARCH="$STORE_PATH/pages/archive/$(date -u +%Y)/$slug.md"  # graduate prints the exact path
+     [ ! -f "$STORE_PATH/pages/$slug.md" ] && [ -f "$ARCH" ] && grep -q 'graduated_to:' "$ARCH" \
+       && echo "OK: $slug archived with graduated_to stamp" \
+       || echo "BROKEN: $slug not cleanly archived (still live, missing, or unstamped)"
+   done
+   ```
 
-```bash
-for slug in $GRADUATED_SLUGS; do
-  echo "=== $slug: rule landed in CLAUDE.md ==="
-  git -C "$REPO_ROOT" diff -- CLAUDE.md AGENTS.md | grep -q '^+' && echo "OK: CLAUDE.md/AGENTS.md gained the rule" || echo "MISSING: no CLAUDE.md diff for $slug"
-  echo "=== $slug: source archived, not left live ==="
-  ARCH="$STORE_PATH/pages/archive/$(date -u +%Y)/$slug.md"  # graduate prints the exact path
-  [ ! -f "$MEM_DIR/$slug.md" ] && [ -f "$ARCH" ] \
-    && grep -q 'graduated_to:' "$ARCH" \
-    && echo "OK: moved to pages/archive/ with graduated_to stamp" \
-    || echo "BROKEN: $slug not cleanly archived (still live, missing, or unstamped)"
-done
-```
+   A `MISSING:`/`BROKEN:` line means the graduate did not apply (commonly `--yes` was omitted); re-run it and re-verify.
+7. Push the store:
 
-A `MISSING:`/`BROKEN:` line here means the graduate did not apply (commonly: `--yes` was omitted so the non-interactive `[y/N]` silently skipped) — re-run `okfmem graduate <slug> --store "$STORE_PATH" --yes` and re-verify before rewriting MEMORY.md's counts.
+   ```bash
+   okfmem sync --store "$STORE_PATH" -m "curate: <short summary>"
+   ```
 
-8. Report the final numbers from the step-6 `okfmem reindex --report` run, in this order: (1) `MEMORY.md` + `STATE.md` bytes before/after against the ceiling and the resulting tokens saved per session (~bytes delta / 3.5) — the number that matters; (2) pages before/after, labelled non-context — store hygiene, not a context saving. "We deleted N files" must never be presented as a context saving on its own; say so only alongside a `MEMORY.md`/`STATE.md` byte drop.
+8. Report the numbers from the step-5 `okfmem reindex --report`, in this order: (1) compiled `MEMORY.md` + `STATE.md` bytes before/after against the ceiling and the tokens saved per session (~bytes delta / 3.5) — the number that matters; (2) pages before/after, labelled non-context store hygiene. "We deleted N pages" is never a context saving on its own.
 
 ## Recovery
 
@@ -337,19 +253,19 @@ If the user disagrees with deletions:
 git -C "${GIT_ROOT:?Phase 1 found no Git-backed recovery root}" restore .
 ```
 
-Restores everything in the symlinked memory dir. Only works if the memory dir is git-backed (which the user's `~/okfmem-store` setup ensures). Skill must check this in Phase 1 and surface it; if memory dir is *not* git-backed, the approval gate requires extra confirmation language ("this is not recoverable via git").
+This restores pages deleted since the last commit, and works only if the store is git-backed (checked in Phase 1). After `okfmem sync` has pushed, recover with `git revert` of the curate commit instead, then recompile. If the store is *not* git-backed, the approval gate requires the extra confirmation language ("this is not recoverable via git").
 
 ## Style guarantees
 
-- One-line MEMORY.md hooks ≤150 chars (the user's stated convention).
-- Never delete a file that has a frontmatter `type: feedback` without explicit user override — feedback memories encode user preferences and are durable by design.
-- Never delete a file whose frontmatter `name` is referenced verbatim by another *kept* file's body (cross-reference cluster).
+- Never delete a page with frontmatter `type: feedback` without explicit user override — feedback pages encode user preferences and are durable by design.
+- Never delete a page whose frontmatter `name` is referenced verbatim by another *kept* page's body (cross-reference cluster).
 - The most recent `_landed` / `_operational` doc per surface always survives unless explicitly listed for deletion.
+- Descriptions stay one line, ≤150 chars.
 
 ## Anti-patterns
 
-- **Executing before approval.** Phase 4 is a hard stop. The skill exists because manual cleanup loses files when the index isn't updated atomically; the same risk applies even when an LLM is driving.
-- **Deleting frontmatter `type: feedback` files** without explicit user instruction. These are user preferences — durable by design.
-- **Updating MEMORY.md before deletions complete**, or vice versa. The two operations are atomic from the user's perspective; do them as the last two steps of Phase 5.
-- **Treating the inventory script's flags as verdicts.** Flags are signals; the LLM judgment in Phase 3 is the verdict.
-- **Inventing file deletions outside the approved plan.** If the user approves Bucket A but Phase 5 reveals extra junk, surface it as a follow-up — don't fold it in silently.
+- **Executing before approval.** Phase 4 is a hard stop.
+- **Editing the compiled index or the view.** Change pages and recompile; never touch `MEMORY*.md` or `views/` by hand.
+- **Deleting `type: feedback` pages** without explicit user instruction.
+- **Treating the inventory script's flags as verdicts.** Flags are signals; the Phase 3 judgment is the verdict.
+- **Inventing deletions outside the approved plan.** If Phase 5 reveals extra junk, surface it as a follow-up — don't fold it in silently.

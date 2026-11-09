@@ -3682,12 +3682,9 @@ def cmd_status(store, show_all=False, project_filter=None):
         state = "yes" if has_state else "no"
         flag = ""
         if mem_bytes > MEMORY_BUDGET_BYTES:
-            # Remedy is a lane split, not tightening hooks: hook-tightening
-            # recovers a few hundred bytes, a lane split recovers thousands
-            # (issue #53). Once split, pointers are never re-flattened back.
             flag = (
                 f"   {glyph('warn')} over {MEMORY_BUDGET_BYTES}-byte "
-                "auto-load ceiling -- split a lane index (/okfmem-reindex)"
+                "auto-load ceiling -- tighten descriptions / relabel (/okfmem-curate)"
             )
         print(
             f"  {marker} {name:20} pages:{pages:<4} "

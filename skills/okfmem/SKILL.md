@@ -49,7 +49,6 @@ Four moving parts:
 | **hygiene** (decay/archive/regen MEMORY.md) | Stop hook → `memory_consolidate.py` | deterministic; archives stale pages (reversible), never deletes |
 | **sync in** | SessionStart hook → `git pull --rebase` | freshens the store before the session |
 | **hard curation** | `/okfmem-curate` (rare, gated) | semantic merge / hard purge decay won't do |
-| **reindex** | `/okfmem-reindex` (byte ceiling trips, gated) | clusters flat pointers into lane indexes; moves, never deletes |
 
 `okfmem sync` (shared git helper) backs **both** `/okfmem-save` and the Stop-hook
 consolidation, so pull-rebase + concurrency-lock behavior is identical on both.
@@ -87,7 +86,7 @@ prints:
 ```
   projects (14):
   * okfmem              pages:27   MEMORY.md:4200  B archived:0    STATE:yes
-    tools               pages:158  MEMORY.md:15600 B archived:0    STATE:yes   ! over 8192-byte auto-load ceiling -- split a lane index (/okfmem-reindex)
+    tools               pages:158  MEMORY.md:15600 B archived:0    STATE:yes   ! over 8192-byte auto-load ceiling -- tighten descriptions / relabel (/okfmem-curate)
     + 11 more (okfmem status --all)
   decay: epoch 2026-07-16
 ```
@@ -95,11 +94,9 @@ prints:
 - The `*` marks the project the current working directory maps to.
 - Any project whose `MEMORY.md` exceeds the auto-load byte ceiling
   (`memory_reindex.MEMORY_BUDGET_BYTES`, 8192 bytes) is flagged inline
-  (`! over 8192-byte auto-load ceiling`) — a candidate for `/okfmem-reindex`,
-  not `/okfmem-curate`. Bytes, not line count, are the trigger (#53): a
-  store can sit well under the old 200-line mark while over the byte
-  ceiling once pointers run long. The recommended remedy is a lane split,
-  not tightening hooks.
+  (`! over 8192-byte auto-load ceiling`) — a candidate for `/okfmem-curate`.
+  Bytes, not line count, are the trigger (#53). The remedy is tightening
+  page descriptions or relabelling, then recompiling.
 - The default view collapses to the current project plus any over-ceiling
   project. When the user wants the **full** list, re-run
   `okfmem status --all`; for a single project,
@@ -150,10 +147,6 @@ Print this orientation instead of the dashboard:
 - `/okfmem-save` (`/primer`) — session close-out (capture + STATE + push).
 - `/okfmem-curate` (`/memory-curate`) — **rare**; judgment-driven purge/merge
   the automatic decay pass won't do. Routine hygiene is already automatic.
-- `/okfmem-reindex` — when `MEMORY.md` trips the byte ceiling: clusters the
-  flat pointers into lane indexes and rewrites `MEMORY.md` as a routing
-  table. Nothing is deleted — pointers only move. `audit` mode previews the
-  cluster proposal without writing.
 - `okfmem sync --store "$STORE_PATH" -m "…"` — commit+push the store by hand (pull-rebase + lock).
 - `okfmem init` — run once **in each repo** you want memory for (the link is
   per-repo; the installer only wired the repo it ran in). Also (re)wires skills
