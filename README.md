@@ -115,7 +115,15 @@ okfmem update --check  # report whether a newer version exists; change nothing
 `okfmem status` also prints a passive nudge when your clone is behind (checked at
 most once a day, and never over a pipe or from the Stop hook). Updates are
 fast-forward only: if you've made local engine commits that diverge from origin,
-the pull refuses rather than clobbering them — stash or branch first.
+the pull refuses rather than clobbering them. Save them on a branch and move the
+default branch back to origin (`reset --keep` refuses to drop uncommitted edits),
+then update again:
+
+```bash
+git -C "<engine>" branch local-engine-work-<short-sha>
+git -C "<engine>" reset --keep origin/main
+okfmem update
+```
 
 ## Why okfmem
 

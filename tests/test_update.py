@@ -156,6 +156,159 @@ def test_update_clean_default_branch_pulls_and_runs_init(engine, monkeypatch, ca
     assert len(calls) == 1 and calls[0][1].endswith("memory_init.py")
 
 
+def _diverge(tmp_path, clone):
+    """Commit locally on the engine's main and push a different commit to origin."""
+    (clone / "local.txt").write_text("mine\n")
+    _run(clone, "add", "local.txt")
+    _run(clone, "commit", "-m", "local work")
+    seed = tmp_path / "seed"
+    (seed / "upstream.txt").write_text("theirs\n")
+    _run(seed, "add", "upstream.txt")
+    _run(seed, "commit", "-m", "upstream work")
+    _run(seed, "push", str(tmp_path / "origin.git"), "main")
+
+
+def _stub_init(update, monkeypatch):
+    real_run = subprocess.run
+
+    def fake_run(args, **kw):
+        if args[0] == "git":
+            return real_run(args, **kw)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(update.subprocess, "run", fake_run)
+
+
+def test_update_diverged_default_branch_names_keep_and_reset_commands(
+        engine, tmp_path, monkeypatch, capsys):
+    update, clone = engine
+    _diverge(tmp_path, clone)
+    _stub_init(update, monkeypatch)
+
+    assert _exit_code(update.cmd_update, [], yes=True) == 1
+
+    err = capsys.readouterr().err
+    assert "fast-forward pull failed" in err
+    assert "'main' has 1 local commit(s) not on origin/main" in err
+    assert f'git -C "{clone}" branch local-engine-work-{update._short()}\n' in err
+    assert f'git -C "{clone}" reset --keep origin/main' in err
+    assert "stash" not in err
+
+
+def test_update_succeeds_after_following_diverged_advice(engine, tmp_path, monkeypatch, capsys):
+    update, clone = engine
+    _diverge(tmp_path, clone)
+    _stub_init(update, monkeypatch)
+    keep = f"local-engine-work-{update._short()}"
+    assert _exit_code(update.cmd_update, [], yes=True) == 1
+    assert f"branch {keep}\n" in capsys.readouterr().err
+
+    _run(clone, "branch", keep)
+    _run(clone, "reset", "--keep", "origin/main")
+
+    assert _exit_code(update.cmd_update, [], yes=True) == 0
+    assert "re-running init" in capsys.readouterr().out
+    assert (clone / "upstream.txt").exists()
+    assert not (clone / "local.txt").exists()
+    assert "local work" in subprocess.run(
+        ["git", "-C", str(clone), "log", "-1", "--format=%s", keep],
+        capture_output=True, text=True, check=True).stdout
+
+
+def test_repeat_divergence_names_a_fresh_keep_branch(engine, tmp_path, monkeypatch, capsys):
+    update, clone = engine
+    _stub_init(update, monkeypatch)
+    _diverge(tmp_path, clone)
+    first = f"local-engine-work-{update._short()}"
+    _run(clone, "branch", first)
+    _run(clone, "reset", "--keep", "origin/main")
+    assert _exit_code(update.cmd_update, [], yes=True) == 0
+    (clone / "local.txt").write_text("again\n")
+    _run(clone, "add", "local.txt")
+    _run(clone, "commit", "-m", "more local work")
+    seed = tmp_path / "seed"
+    (seed / "upstream2.txt").write_text("theirs again\n")
+    _run(seed, "add", "upstream2.txt")
+    _run(seed, "commit", "-m", "more upstream work")
+    _run(seed, "push", str(tmp_path / "origin.git"), "main")
+    capsys.readouterr()
+
+    assert _exit_code(update.cmd_update, [], yes=True) == 1
+
+    err = capsys.readouterr().err
+    assert f"branch local-engine-work-{update._short()}\n" in err
+    assert f"branch {first}\n" not in err
+
+
+def test_update_pull_failure_without_local_commits_gives_no_reset_advice(
+        engine, monkeypatch, capsys):
+    update, clone = engine
+    real_git = update._git
+
+    def failing_pull(*args, **kw):
+        if args[0] == "pull":
+            return subprocess.CompletedProcess(args, 1, "", "fatal: no upstream")
+        return real_git(*args, **kw)
+
+    monkeypatch.setattr(update, "_git", failing_pull)
+
+    assert _exit_code(update.cmd_update, [], yes=True) == 1
+
+    err = capsys.readouterr().err
+    assert "fast-forward pull failed" in err
+    assert "reset --keep" not in err
+    assert "stash" not in err
+
+
+def test_update_pull_failure_ahead_only_gives_no_reset_advice(engine, monkeypatch, capsys):
+    update, clone = engine
+    (clone / "local.txt").write_text("mine\n")
+    _run(clone, "add", "local.txt")
+    _run(clone, "commit", "-m", "local work")
+    real_git = update._git
+
+    def failing_pull(*args, **kw):
+        if args[0] == "pull":
+            return subprocess.CompletedProcess(args, 1, "", "fatal: unable to access origin")
+        return real_git(*args, **kw)
+
+    monkeypatch.setattr(update, "_git", failing_pull)
+
+    assert _exit_code(update.cmd_update, [], yes=True) == 1
+
+    err = capsys.readouterr().err
+    assert "fast-forward pull failed" in err
+    assert "local commit(s) not on" not in err
+    assert "reset --keep" not in err
+
+
+def test_check_diverged_off_default_branch_gives_no_reset_advice(engine, tmp_path, capsys):
+    update, clone = engine
+    _run(clone, "switch", "-c", "some-feature", "--track", "origin/main")
+    _diverge(tmp_path, clone)
+
+    update.cmd_check()
+
+    out = capsys.readouterr().out
+    assert "note: engine checkout is on 'some-feature', not 'main'" in out
+    assert "also 1 local commit(s) ahead" in out
+    assert "reset --keep" not in out
+
+
+def test_check_diverged_default_branch_gives_same_advice(engine, tmp_path, capsys):
+    update, clone = engine
+    _diverge(tmp_path, clone)
+
+    update.cmd_check()
+
+    out = capsys.readouterr().out
+    assert "1 commit(s) behind origin/main" in out
+    assert "also 1 local commit(s) ahead" in out
+    assert f'git -C "{clone}" branch local-engine-work-{update._short()}\n' in out
+    assert f'git -C "{clone}" reset --keep origin/main' in out
+    assert "stash" not in out
+
+
 def test_check_notes_off_default_branch(engine, capsys):
     update, clone = engine
     _run(clone, "switch", "-c", "some-feature")
