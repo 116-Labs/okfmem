@@ -310,6 +310,19 @@ In the label layout, accepting a page adds the project's repo label and writes i
 
 To import into an attached team store, or without a terminal, use `okfmem inbox import --into team --non-interactive --policy policy.yml [--json]`. The policy is a strict YAML file with three required keys: `allowed_types` (list), `allowed_repos` (list) and `max_page_bytes` (integer). A missing or unknown key refuses the import. A candidate that fails any check (type, repo, size, the always-on leak scan, or a slug already in the target store) stays in the inbox, and the output gives one reason per failed check. Imported pages gain `source`, `machine`, `ref`, `imported_at` and `imported_by` in their frontmatter. `--into` also works on `inbox review`, and an unattached name fails closed. A candidate's project is resolved in the target store first, then in the home store. The leak scan also runs on interactive review and import: a page it hits can only be dropped or skipped.
 
+**Triage many pages at once.** `okfmem inbox dump --out DIR [--json]` is read-only: it writes every pending page to `DIR/pending.jsonl` (DIR must lie outside the store), one record per page with a dump-local `id` (`p1`, `p2`, …), its `ref`, `sha`, `meta`, resolved `project`, `slug`, `text`, the leak-scan hits, and `near`: the existing pages in the destination store that review would flag, each with its slug, description and why (slug, name or description). A judge (a model or a person) then writes `DIR/decisions.json`, a JSON array with one record per page:
+
+```json
+[{"id": "p12", "action": "merge", "target": "existing-slug",
+  "add": "markdown appended to the target", "replace": [{"old": "stale line", "new": "fixed line"}],
+  "covers": ["p13", "p18"], "confidence": "high", "reason": "same lesson"},
+ {"id": "p14", "action": "new",
+  "page": {"slug": "new-slug", "name": "…", "description": "…", "type": "feedback", "labels": ["topic:ci"]}},
+ {"id": "p15", "action": "drop", "reason": "noise"}]
+```
+
+`covers` folds duplicates into the same record. A `new` page takes its frontmatter from `page`, falling back to the candidate's, and its body from `add`, falling back to the candidate's body. `okfmem inbox apply DIR/decisions.json [--yes]` reads the dump beside the file and refuses the whole file, listing every problem and writing nothing, when an id is uncovered or covered twice, a slug is invalid, a merge target neither exists nor is created by a `new` record, a new slug already exists, a `replace` text is not found exactly once, or the leak scan hits text it would write. Otherwise it prints `N drop / N merge into K page(s) / N new` and asks `[y/N]` (`--yes` skips the prompt; with no terminal and no `--yes` it writes nothing and prints the command to run). It then writes the pages (new pages land in `pages/` with the project's `repo:` label in the label layout), appends each `add` under `## From inbox (<date>)` unless the page already holds that text, applies each `replace`, deletes the handled refs in one push leased on each ref's dumped sha (a ref re-pushed since the dump stays and is named as still pending), rebuilds the touched views and runs `okfmem sync`. Running it again on the same file does nothing: a `replace` whose old text is gone and whose new text is present counts as done, and a `new` page already in the store with the same name and body counts as written.
+
 **Inbox text is untrusted until you review it.** Nothing in the inbox reaches a loaded page without `okfmem inbox review`: `okfmem pull`, `consolidate` and the Stop hook fetch only the store's branches, never the inbox refs. Read a page before you accept or merge it the way you would read any text from the internet.
 
 ### 10. Remote access over MCP (`okfmem mcp`)

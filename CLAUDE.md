@@ -83,6 +83,8 @@ okfmem inbox pull             # list pending candidates
 okfmem inbox review           # accept, merge or drop each candidate (interactive)
 okfmem store merge <source> --dry-run   # import another store; differing pages kept as <path>.orphan
 okfmem store split --projects a,b --dest PATH [--delete-source]   # copy (typed SPLIT to also remove)
+okfmem inbox dump --out DIR   # read-only: every pending page -> DIR/pending.jsonl
+okfmem inbox apply DIR/decisions.json [--yes]   # validate, [y/N], write, lease-delete refs, sync
 
 python3 scripts/check-leaks.py   # leak gate (also runs first in CI)
 ruff check .                     # lint (advisory in CI today)

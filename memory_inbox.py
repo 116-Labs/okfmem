@@ -27,6 +27,15 @@ the maintainer without letting them anywhere near a loaded page:
       the rest stay in the inbox with a reason each. `--into` names an attached
       store; imported pages carry source/machine/ref/imported_at/imported_by (#141).
 
+  okfmem inbox dump --out DIR [--into STORE] [--json]
+      Read-only: every pending page as one record of DIR/pending.jsonl (id, ref,
+      sha, meta, project, slug, text, near, leaks), for a judge outside the engine.
+  okfmem inbox apply DIR/decisions.json [--into STORE] [--yes]
+      Validate the decisions against the dump beside them (every id covered once,
+      valid slugs, merge targets, no existing new slug, replaces found once), show
+      a summary, ask [y/N], then write pages, delete the handled refs leased on
+      their dumped sha in one push, rebuild views and `okfmem sync` (#165).
+
 Never automatic: `okfmem pull`, `consolidate` and the Stop hook fetch only the
 default refspec (branches), so nothing in the inbox reaches a loaded page
 without `inbox review`.
@@ -48,7 +57,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from memory_consolidate import find_frontmatter, git_clean, parse_fields  # noqa: E402
-from memory_frontmatter import merge_labels, parse_labels
+from memory_frontmatter import merge_labels, normalize_label, parse_labels
 from memory_init import (  # noqa: E402
     _load_registry,
     _resolve_aliases,
@@ -506,20 +515,36 @@ def project_pages(store, project):
     return found
 
 
+def _close_by(page, fields):
+    """The field ("name", then "description") close to the page's, else None."""
+    if _similar(page["fields"].get("name"), fields.get("name")):
+        return "name"
+    if _similar(page["fields"].get("description"), fields.get("description")):
+        return "description"
+    return None
+
+
+def near_existing(page, existing):
+    """[(slug, why)] for the existing pages a candidate duplicates: why is
+    "slug", "name" or "description"."""
+    out = [(page["slug"], "slug")] if page["slug"] in existing else []
+    for slug, (_, fields) in existing.items():
+        why = _close_by(page, fields) if slug != page["slug"] else None
+        if why:
+            out.append((slug, why))
+    return out
+
+
 def flags_for(page, existing, others):
     """Human-readable reasons this candidate needs a closer look."""
     out = []
-    if page["slug"] in existing:
-        out.append(f"slug matches existing page {page['slug']}.md")
-    name, desc = page["fields"].get("name"), page["fields"].get("description")
-    pool = [("existing page", slug, fields) for slug, (_, fields) in existing.items()
-            if slug != page["slug"]]
-    pool += [("pending page", label, fields) for label, fields in others]
-    for kind, label, fields in pool:
-        if _similar(name, fields.get("name")):
-            out.append(f"name close to {kind} {label}")
-        elif _similar(desc, fields.get("description")):
-            out.append(f"description close to {kind} {label}")
+    for slug, why in near_existing(page, existing):
+        out.append(f"slug matches existing page {slug}.md" if why == "slug"
+                   else f"{why} close to existing page {slug}")
+    for label, fields in others:
+        why = _close_by(page, fields)
+        if why:
+            out.append(f"{why} close to pending page {label}")
     return out
 
 
@@ -1010,6 +1035,580 @@ def review(store, decide, ask_project, out=print, today=None, do_sync=True,
     return counts
 
 
+# ---------------------------------------------------------------------------
+# dump / apply: a judge outside the engine writes decisions.json, the engine
+# validates it whole and does every write (#165)
+# ---------------------------------------------------------------------------
+DUMP_FILE = "pending.jsonl"
+ACTIONS = ("drop", "merge", "new")
+TYPE_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+
+
+class ApplyError(RuntimeError):
+    """apply cannot start: the dump or decisions file is unreadable or malformed."""
+
+
+def _inside(path, root):
+    path = os.path.normcase(os.path.realpath(path))
+    root = os.path.normcase(os.path.realpath(root))
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:  # different drives on Windows
+        return False
+
+
+def dump_records(dest, pushes):
+    """One record per pending page, ids p1..pN in pending order."""
+    records, existing_by_project = [], {}
+    for push_ in pushes:
+        project = push_["project"]
+        if project not in existing_by_project:
+            existing_by_project[project] = project_pages(dest, project) if project else {}
+        existing = existing_by_project[project]
+        for page in push_["pages"]:
+            near = [{"slug": slug, "why": why,
+                     "description": existing[slug][1].get("description", "")}
+                    for slug, why in near_existing(page, existing)]
+            records.append({"id": f"p{len(records) + 1}", "ref": push_["ref"],
+                            "sha": push_["sha"], "meta": push_["meta"],
+                            "project": project, "slug": page["slug"],
+                            "text": page["text"], "near": near,
+                            "leaks": leak_hits(page["text"])})
+    return records
+
+
+def dump(store, out_dir, dest=None, out=print):
+    """Write every pending page to `out_dir/pending.jsonl`; the store and its refs
+    are left as they are. Returns (exit code, {out, pages, pushes} or {error})."""
+    dest = dest or store
+    for root in dict.fromkeys((store, dest)):
+        if _inside(out_dir, root):
+            msg = f"--out {out_dir} is inside the store {root} — pick a directory outside it."
+            out(f"okfmem inbox dump: {msg}")
+            return 2, {"error": msg}
+    ok, err = fetch_inbox(store)
+    if not ok:
+        out(f"okfmem inbox dump: fetch failed ({err or 'offline?'}) — "
+            "dumping what was fetched before.")
+    try:
+        pushes = pending(store, dest)
+    except InboxReadError as e:
+        out(f"okfmem inbox dump: could not read the inbox ({_safe(e)}) — nothing dumped.")
+        return 1, {"error": f"could not read the inbox: {e}"}
+    records = dump_records(dest, pushes)
+    path = os.path.join(out_dir, DUMP_FILE)
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            for rec in records:
+                f.write(json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n")
+    except OSError as e:
+        out(f"okfmem inbox dump: cannot write {path}: {e}")
+        return 1, {"error": f"cannot write {path}: {e}"}
+    n_pushes = sum(1 for p in pushes if p["pages"])
+    out(f"okfmem inbox dump: {len(records)} page(s) from {n_pushes} push(es) -> {path}")
+    return 0, {"out": path, "pages": len(records), "pushes": n_pushes}
+
+
+def load_dump(path):
+    records, n = [], 0
+    try:
+        with open(path, encoding="utf-8") as f:
+            for n, line in enumerate(f, 1):
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                if (not isinstance(rec, dict)
+                        or not all(isinstance(rec.get(k), str)
+                                   for k in ("id", "ref", "sha", "slug", "text"))
+                        or not isinstance(rec.get("meta"), dict)
+                        or not isinstance(rec.get("project"), (str, type(None)))):
+                    raise ApplyError(f"{path} line {n}: not an inbox dump record")
+                records.append(rec)
+    except OSError as e:
+        raise ApplyError(f"cannot read the dump {path} ({e.strerror or e}) — "
+                         "run `okfmem inbox dump --out DIR` and write DIR/decisions.json")
+    except (ValueError, UnicodeDecodeError) as e:
+        raise ApplyError(f"{path} line {n}: {e}")
+    return records
+
+
+def load_decisions(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except OSError as e:
+        raise ApplyError(f"cannot read {path} ({e.strerror or e})")
+    except (ValueError, UnicodeDecodeError) as e:
+        raise ApplyError(f"{path} is not JSON: {e}")
+    if not isinstance(data, list):
+        raise ApplyError(f"{path} must hold a JSON array of decisions")
+    return data
+
+
+def remote_inbox_refs(store):
+    """{ref: sha} of the remote's inbox refs, or None when the remote can't be read."""
+    r = _git(store, "ls-remote", "--refs", REMOTE, f"{INBOX_NS}/*")
+    if r.returncode != 0:
+        return None
+    refs = {}
+    for line in _out(r).splitlines():
+        sha, _, ref = line.partition("\t")
+        if ref.startswith(INBOX_NS + "/"):
+            refs[ref] = sha
+    return refs
+
+
+def _with_eol(text, eol):
+    return text.replace("\r\n", "\n").replace("\n", eol)
+
+
+def _replace_state(text, old, new):
+    """One of apply, applied (every `old` already sits inside a `new`), missing
+    or ambiguous."""
+    n_old, n_new = text.count(old), text.count(new)
+    if n_new and n_old == n_new * new.count(old):
+        return "applied"
+    if n_old == 1:
+        return "apply"
+    return "missing" if n_old == 0 else "ambiguous"
+
+
+def new_page_path(store, project, slug):
+    if has_layout_marker(store):
+        return os.path.join(store, "pages", slug + ".md")
+    return os.path.join(store, "projects", project, slug + ".md")
+
+
+def build_page(name, description, typ, labels, body):
+    lines = ["---", f"name: {_yaml_scalar(name)}",
+             f"description: {_yaml_scalar(description)}", f"type: {typ}"]
+    if labels:
+        lines.append(f"labels: [{', '.join(labels)}]")
+    lines.append("---")
+    return "\n".join(lines) + "\n\n" + body.replace("\r\n", "\n").strip("\n") + "\n"
+
+
+def _str_or_none(value):
+    return value is None or isinstance(value, str)
+
+
+class _Planner:
+    """Validates decisions against a dump and the destination store, building
+    every write in memory; nothing touches disk until `problems` is empty."""
+
+    def __init__(self, dest, dumped, today, imported_by):
+        self.dest, self.today, self.imported_by = dest, today, imported_by
+        self.by_id = {r["id"]: r for r in dumped}
+        self.dumped = dumped
+        self.problems, self.low = [], []
+        self.files = {}  # path -> {text, orig, new, project, slug, page}
+        self.adds = {}  # path -> [text appended under one heading]
+        self.counts = {"drop": 0, "merge": 0, "new": 0, "replace": 0}
+        self.targets, self.touched = set(), set()
+        self._existing = {}
+
+    def existing(self, project):
+        if project not in self._existing:
+            self._existing[project] = project_pages(self.dest, project)
+        return self._existing[project]
+
+    def problem(self, where, msg):
+        self.problems.append(f"{where}: {msg}")
+
+    def project_of(self, where, pages):
+        projects = {p["project"] for p in pages}
+        if None in projects:
+            bad = [p["id"] for p in pages if p["project"] is None]
+            self.problem(where, f"{', '.join(bad)} resolve to no project — drop them, "
+                                "or register the repo and dump again")
+            return None
+        if len(projects) > 1:
+            self.problem(where, f"covers pages of several projects ({', '.join(sorted(projects))})")
+            return None
+        return projects.pop() if projects else None
+
+    def leak_check(self, where, text):
+        hits = leak_hits(text)
+        if hits:
+            self.problem(where, "leak gate: " + ", ".join(hits) + " — drop it or rewrite the text")
+
+    def read(self, path):
+        if path not in self.files:
+            with open(path, encoding="utf-8", newline="") as f:
+                text = f.read()
+            self.files[path] = {"text": text, "orig": text, "new": False}
+        return self.files[path]
+
+    def parse(self, decisions):
+        """[(where, decision, [dump records])] for well-formed decisions."""
+        covered, parsed = {}, []
+        for i, d in enumerate(decisions, 1):
+            where = f"decision {i}"
+            if not isinstance(d, dict):
+                self.problem(where, "not a JSON object")
+                continue
+            if isinstance(d.get("id"), str):
+                where += f" ({d['id']})"
+            covers = d.get("covers", [])
+            if not isinstance(d.get("id"), str):
+                self.problem(where, "needs a string `id`")
+                continue
+            if not isinstance(covers, list) or not all(isinstance(c, str) for c in covers):
+                self.problem(where, "`covers` must be a list of ids")
+                continue
+            if d.get("action") not in ACTIONS:
+                self.problem(where, f"`action` must be one of {', '.join(ACTIONS)}")
+                continue
+            if d.get("confidence") not in (None, "high", "low"):
+                self.problem(where, "`confidence` must be high or low")
+            elif d.get("confidence") == "low":
+                self.low.append(f"{where}: {d.get('question') or '(no question given)'}")
+            pages = []
+            for pid in [d["id"], *covers]:
+                if pid not in self.by_id:
+                    self.problem(where, f"unknown id {pid!r} (not in the dump)")
+                elif pid in covered:
+                    self.problem(where, f"{pid} is already covered by {covered[pid]}")
+                else:
+                    covered[pid] = where
+                    pages.append(self.by_id[pid])
+            parsed.append((where, d, pages))
+        missing = [r["id"] for r in self.dumped if r["id"] not in covered]
+        if missing:
+            self.problems.append("not covered by any decision: " + ", ".join(missing))
+        return parsed
+
+    def plan_new(self, where, d, pages):
+        primary = self.by_id[d["id"]]
+        project = self.project_of(where, pages)
+        spec = d.get("page") or {}
+        if not isinstance(spec, dict):
+            self.problem(where, "`page` must be an object")
+            return
+        if not all(_str_or_none(spec.get(k)) for k in ("slug", "name", "description", "type")):
+            self.problem(where, "`page` slug, name, description and type must be strings")
+            return
+        if not _str_or_none(d.get("add")):
+            self.problem(where, "`add` must be a string")
+            return
+        fields = page_fields(primary["text"]) or {}
+        slug = spec.get("slug") or primary["slug"]
+        name = spec.get("name") or fields.get("name") or slug
+        description = spec.get("description") or fields.get("description") or ""
+        typ = (spec.get("type") or fields.get("type") or "").lower()
+        raw_labels = spec.get("labels") or []
+        labels = ([normalize_label(x) if isinstance(x, str) else None for x in raw_labels]
+                  if isinstance(raw_labels, list) else [None])
+        body = d.get("add") or page_body(primary["text"])
+        if not importable_name(slug + ".md"):
+            self.problem(where, f"invalid page slug {slug!r}")
+            return
+        if not TYPE_RE.match(typ):
+            self.problem(where, f"invalid page type {typ!r}")
+        if None in labels:
+            self.problem(where, "`page.labels` must be a list of valid labels")
+        self.leak_check(where, f"{name}\n{description}\n{body}")
+        if project is None or None in labels or not TYPE_RE.match(typ):
+            return
+        if has_layout_marker(self.dest):
+            labels.append(f"repo:{project}")
+        text = with_provenance(build_page(name, description, typ, labels, body),
+                               primary["meta"], self.imported_by)
+        path = new_page_path(self.dest, project, slug)
+        if path in self.files:
+            self.problem(where, f"new slug {slug!r} is already created by another decision")
+            return
+        if os.path.exists(path):
+            try:
+                current = self.read(path)
+            except (OSError, UnicodeDecodeError) as e:
+                self.problem(where, f"new slug {slug!r} already exists and cannot be read: {e}")
+                return
+            want = page_fields(text) or {}
+            have = page_fields(current["text"]) or {}
+            eol = "\r\n" if "\r\n" in current["text"] else "\n"
+            if have.get("name") != want.get("name") or (
+                    _with_eol(page_body(text), eol) not in current["text"]):
+                self.problem(where, f"new slug {slug!r} already exists in the store")
+                return
+            current.update(project=project, slug=slug)  # applied by an earlier run
+        else:
+            self.files[path] = {"text": text, "orig": None, "new": True, "project": project,
+                                "slug": slug}
+            self.counts["new"] += 1
+        self.touched.add(project)
+
+    def plan_merge(self, where, d, pages):
+        project = self.project_of(where, pages)
+        target, add, replace = d.get("target"), d.get("add"), d.get("replace") or []
+        if not isinstance(target, str) or not importable_name(target.removesuffix(".md") + ".md"):
+            self.problem(where, f"merge needs a valid `target` slug, got {target!r}")
+            return
+        target = target.removesuffix(".md")
+        if not _str_or_none(add):
+            self.problem(where, "`add` must be a string")
+            return
+        if not isinstance(replace, list) or not all(
+                isinstance(r, dict) and isinstance(r.get("old"), str) and r["old"]
+                and isinstance(r.get("new"), str) and r["new"] and r["old"] != r["new"]
+                for r in replace):
+            self.problem(where, "`replace` must be a list of {old, new} with non-empty, "
+                                "different strings")
+            return
+        self.leak_check(where, "\n".join([add or "", *(r["new"] for r in replace)]))
+        if project is None:
+            return
+        path = None
+        if target in self.existing(project):
+            path = self.existing(project)[target][0]
+        else:
+            candidate = new_page_path(self.dest, project, target)
+            if candidate in self.files:
+                path = candidate
+        if path is None:
+            self.problem(where, f"merge target {target!r} is neither a page of {project} "
+                                "nor created by a `new` decision")
+            return
+        try:
+            entry = self.read(path)
+        except (OSError, UnicodeDecodeError) as e:
+            self.problem(where, f"cannot read merge target {target!r}: {e}")
+            return
+        eol = "\r\n" if "\r\n" in entry["text"] else "\n"
+        for r in replace:
+            old, new = _with_eol(r["old"], eol), _with_eol(r["new"], eol)
+            state = _replace_state(entry["text"], old, new)
+            if state == "apply":
+                entry["text"] = entry["text"].replace(old, new, 1)
+                self.counts["replace"] += 1
+            elif state == "missing":
+                self.problem(where, f"replace: {_preview(r['old'])!r} not found in {target}")
+            elif state == "ambiguous":
+                self.problem(where, f"replace: {_preview(r['old'])!r} found "
+                                    f"{entry['text'].count(old)} times in {target}")
+        block = _with_eol((add or "").strip("\r\n"), eol)
+        queued = self.adds.setdefault(path, [])
+        if block and block not in entry["text"] and block not in queued:
+            queued.append(block)
+        self.counts["merge"] += len(pages)
+        self.targets.add(path)
+        self.touched.add(project)
+
+    def finish(self):
+        for path, blocks in self.adds.items():
+            if not blocks:
+                continue
+            entry = self.files[path]
+            eol = "\r\n" if "\r\n" in entry["text"] else "\n"
+            entry["text"] = (entry["text"].rstrip("\r\n") + eol + eol
+                             + f"## From inbox ({self.today}){eol}{eol}"
+                             + (eol + eol).join(blocks) + eol)
+
+    def run(self, decisions):
+        parsed = self.parse(decisions)
+        # Every `new` first, so a merge may target a page created in the same file.
+        for where, d, pages in parsed:
+            if d["action"] == "new":
+                self.plan_new(where, d, pages)
+        for where, d, pages in parsed:
+            if d["action"] == "merge":
+                self.plan_merge(where, d, pages)
+            elif d["action"] == "drop":
+                self.counts["drop"] += len(pages)
+        self.finish()
+
+
+def _preview(text, width=40):
+    flat = " ".join(text.split())
+    return flat if len(flat) <= width else flat[:width - 1] + "…"
+
+
+def plan_apply(dest, dumped, decisions, remote, today, imported_by):
+    """(plan, problems): the writes and ref deletions `decisions` asks for, or
+    every problem that refuses the file."""
+    planner = _Planner(dest, dumped, today, imported_by)
+    planner.run(decisions)
+    refs = {}
+    for rec in dumped:
+        refs.setdefault(rec["ref"], rec["sha"])
+    delete, gone, moved = {}, [], []
+    for ref, sha in sorted(refs.items()):
+        if ref not in remote:
+            gone.append(ref)
+        elif remote[ref] != sha:
+            moved.append(ref)
+        else:
+            delete[ref] = sha
+    new = {p: e for p, e in planner.files.items() if e["new"]}
+    changed = {p: e for p, e in planner.files.items()
+               if not e["new"] and e["text"] != e["orig"]}
+    plan = {"new": new, "changed": changed, "counts": planner.counts,
+            "targets": len(planner.targets), "low": planner.low,
+            "touched": planner.touched, "delete": delete, "gone": gone, "moved": moved}
+    return plan, planner.problems
+
+
+def plan_lines(plan, dest):
+    c = plan["counts"]
+    lines = [f"okfmem inbox apply: {c['drop']} drop / {c['merge']} merge into "
+             f"{plan['targets']} page(s) / {c['new']} new"]
+    for path in sorted(plan["new"]):
+        lines.append(f"  new      {os.path.relpath(path, dest)}")
+    for path in sorted(plan["changed"]):
+        lines.append(f"  update   {os.path.relpath(path, dest)}")
+    if c["replace"]:
+        lines.append(f"  {c['replace']} in-place correction(s)")
+    for low in plan["low"]:
+        lines.append(_safe(f"  low confidence — {low}"))
+    lines.append(f"  inbox: clear {len(plan['delete'])} push(es)"
+                 + (f"; {len(plan['gone'])} already cleared" if plan["gone"] else "")
+                 + (f"; {len(plan['moved'])} re-pushed since the dump, left pending"
+                    if plan["moved"] else ""))
+    return lines
+
+
+def delete_refs(store, refs):
+    """Delete every ref in `refs` ({ref: sha}) on the remote in one push, each
+    leased on its sha so a ref re-pushed since it was read survives.
+    Returns (deleted, {ref: why it is still there})."""
+    if not refs:
+        return [], {}
+    leases = [f"--force-with-lease={ref}:{sha}" for ref, sha in sorted(refs.items())]
+    p = _git(store, "push", "--porcelain", *leases, REMOTE,
+             *(f":{ref}" for ref in sorted(refs)))
+    deleted, failed = [], {}
+    for line in p.stdout.decode("utf-8", "replace").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3 or ":" not in parts[1]:
+            continue
+        ref = parts[1].split(":", 1)[1]
+        if ref not in refs:
+            continue
+        if parts[0] == "-":
+            deleted.append(ref)
+        else:
+            failed[ref] = parts[2].strip()
+    for ref in refs:
+        if ref not in deleted and ref not in failed:
+            failed[ref] = _err(p) or f"git push exited {p.returncode}"
+    for ref in deleted:
+        _git(store, "update-ref", "-d", ref)
+    return deleted, failed
+
+
+def write_plan(dest, plan):
+    """Write the planned pages; returns the paths written."""
+    written = []
+    for path, entry in sorted(plan["new"].items()):
+        page = {"name": entry["slug"] + ".md", "slug": entry["slug"], "text": entry["text"],
+                "fields": page_fields(entry["text"])}
+        got = accept_page(dest, entry["project"], page)
+        if got is None:
+            raise OSError(f"{path} appeared while applying — nothing more written")
+        written.append(got)
+    for path, entry in sorted(plan["changed"].items()):
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(entry["text"])
+        written.append(path)
+    return written
+
+
+def apply(store, decisions_path, confirm, dest=None, out=print, today=None,
+          imported_by=None, do_sync=True, hint=None):
+    """Apply `decisions_path` against the `pending.jsonl` dumped beside it.
+    `confirm()` returns True, False, or None when nobody can be asked.
+    Returns the exit code."""
+    dest = dest or store
+    today = today or datetime.now(timezone.utc).date().isoformat()
+    imported_by = imported_by or default_importer()
+    dump_path = os.path.join(os.path.dirname(os.path.abspath(decisions_path)), DUMP_FILE)
+    try:
+        dumped = load_dump(dump_path)
+        decisions = load_decisions(decisions_path)
+    except ApplyError as e:
+        out(f"okfmem inbox apply: {e} — nothing written.")
+        return 2
+    if not git_clean(dest):
+        out("okfmem inbox apply: store working tree is dirty — run `okfmem sync` "
+            "first so the apply's commit holds only its own pages.")
+        return 3
+    fetch_inbox(store)  # a failed fetch is fine: ls-remote below decides every ref
+    remote = remote_inbox_refs(store)
+    if remote is None:
+        out(f"okfmem inbox apply: cannot read remote '{REMOTE}' — nothing written.")
+        return 1
+    plan, problems = plan_apply(dest, dumped, decisions, remote, today, imported_by)
+    if problems:
+        out(f"okfmem inbox apply: {len(problems)} problem(s) in {decisions_path} — "
+            "nothing written:")
+        for p in problems:
+            out(_safe(f"  - {p}"))
+        return 1
+    for line in plan_lines(plan, dest):
+        out(line)
+    for ref in plan["moved"]:
+        out(f"  still pending: {ref} (re-pushed since the dump)")
+    if not (plan["new"] or plan["changed"] or plan["delete"]):
+        out("okfmem inbox apply: nothing to do — already applied.")
+        return 0
+    answer = confirm()
+    if answer is None:
+        out("okfmem inbox apply: no terminal to confirm — nothing written. To apply, run:")
+        out(f"  {hint or 'okfmem inbox apply ' + decisions_path + ' --yes'}")
+        return 2
+    if not answer:
+        out("okfmem inbox apply: not confirmed — nothing written.")
+        return 1
+    try:
+        written = write_plan(dest, plan)
+    except OSError as e:
+        out(f"okfmem inbox apply: write failed ({_safe(e)}) — no inbox ref deleted; "
+            "fix it, then run `okfmem sync` and apply again.")
+        return 1
+    finally:
+        if plan["touched"] and has_layout_marker(dest):
+            _refresh_project_views(dest, plan["touched"], out)
+    deleted, failed = delete_refs(store, plan["delete"])
+    code = 0
+    for ref, why in sorted(failed.items()):
+        out(_safe(f"  still pending: {ref} ({why})"))
+        if "stale info" not in why:
+            code = 1
+    out(f"okfmem inbox apply: wrote {len(written)} page(s); cleared {len(deleted)} push(es)")
+    if do_sync and written:
+        c = plan["counts"]
+        res = sync_store(dest, f"okfmem inbox: applied {c['drop']} drop, {c['merge']} merge, "
+                               f"{c['new']} new")
+        out(f"okfmem sync: {res['reason']}")
+        if res["push_error"]:
+            out(f"  push failed: {res['push_error']}")
+            code = 1
+    return code
+
+
+def _quote_arg(arg):
+    """`arg` as one argument for bash, zsh, PowerShell and cmd alike: Windows
+    paths keep their backslashes, spaces are double-quoted."""
+    if re.fullmatch(r"[A-Za-z0-9_./:\\@%+=,~-]+", arg):
+        return arg
+    return '"' + arg.replace('"', '\\"') + '"'
+
+
+def apply_hint(store, decisions_path, into=None):
+    into_part = f" --into {_quote_arg(into)}" if into else ""
+    return (f"okfmem inbox apply --store {_quote_arg(store)}{into_part} "
+            f"{_quote_arg(decisions_path)} --yes")
+
+
+def _interactive_confirm():
+    try:
+        ans = input("okfmem inbox apply: write these pages and clear the inbox refs? [y/N] ")
+    except EOFError:
+        return False
+    return ans.strip().lower() in ("y", "yes")
+
+
 def _interactive_decide(push_, page, flags):
     while True:
         try:
@@ -1119,10 +1718,27 @@ def main():
                     help="who is importing (default: the current user)")
     im.add_argument("--json", action="store_true",
                     help="print {imported, held, skipped, held_pages} on stdout")
+    du = sub.add_parser("dump", help="write every pending page to DIR/pending.jsonl "
+                                     "(read-only)")
+    du.add_argument("--store", default=argparse.SUPPRESS)
+    du.add_argument("--into", metavar="STORE",
+                    help="look for near pages in this attached store")
+    du.add_argument("--out", required=True, metavar="DIR",
+                    help="directory for pending.jsonl, outside the store")
+    du.add_argument("--json", action="store_true",
+                    help="print {out, pages, pushes} on stdout; messages go to stderr")
+    ap_ = sub.add_parser("apply", help="apply a decisions.json written against a dump")
+    ap_.add_argument("decisions", metavar="DIR/decisions.json")
+    ap_.add_argument("--store", default=argparse.SUPPRESS)
+    ap_.add_argument("--into", metavar="STORE",
+                     help="write into this attached store instead of the home store")
+    ap_.add_argument("--yes", action="store_true", help="skip the [y/N] confirmation")
+    ap_.add_argument("--imported-by", metavar="NAME",
+                     help="who is importing (default: the current user)")
     args = ap.parse_args()
     store = os.path.abspath(os.path.expanduser(args.store))
     dest = store
-    if args.cmd in ("review", "import") and args.into:
+    if args.cmd in ("review", "import", "dump", "apply") and args.into:
         dest, why = resolve_into(store, args.into)
         if dest is None:
             print(f"okfmem inbox {args.cmd}: {why}", file=sys.stderr)
@@ -1146,6 +1762,32 @@ def main():
         sys.exit(code)
     if args.cmd == "pull":
         sys.exit(pull(store))
+    if args.cmd == "dump":
+        log = (lambda m: print(m, file=sys.stderr)) if args.json else print
+        code, result = dump(store, os.path.abspath(os.path.expanduser(args.out)), dest,
+                            out=log)
+        if args.json:
+            if "error" in result:
+                result = {"error": " ".join(result["error"].split())}
+            print(json.dumps(result))
+        sys.exit(code)
+    if args.cmd == "apply":
+        decisions = os.path.abspath(os.path.expanduser(args.decisions))
+        if args.yes:
+            confirm = lambda: True  # noqa: E731
+        elif _isatty():
+            confirm = _interactive_confirm
+        else:
+            confirm = lambda: None  # noqa: E731
+        try:
+            code = apply(store, decisions, confirm, dest=dest,
+                         imported_by=args.imported_by,
+                         hint=apply_hint(store, decisions, args.into))
+        except KeyboardInterrupt:
+            print("\nokfmem inbox apply: interrupted — run `okfmem status` to see "
+                  "what was written.")
+            code = 130
+        sys.exit(code)
     non_interactive = args.cmd == "import" and args.non_interactive
     if args.cmd == "import" and (args.policy or args.json) and not non_interactive:
         print("okfmem inbox import: --policy and --json need --non-interactive.",
