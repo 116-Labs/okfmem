@@ -212,9 +212,10 @@ def classify_target(raw):
     """Normalize a raw inline-link target to ``(kind, value)``.
 
     kind is ``"page"`` for a same-directory ``.md`` filename, ``"external"``
-    for a URL or a cross-directory path (real, but not resolvable against this
-    memory dir, so never reported dangling), or ``None`` for anything that is
-    not a page pointer at all (an image, a bare anchor, a non-md asset).
+    for a URL or a cross-directory path, or ``None`` for anything that is not
+    a page pointer at all (an image, a bare anchor, a non-md asset). An
+    external target is not checked, except a view's link into its ``pages/``
+    pool, which ``Scan`` resolves and reports dangling when missing (#142).
     """
     t = raw.strip()
     if t.startswith("<") and ">" in t:
@@ -358,6 +359,15 @@ def page_files(mem_dir, include_ck=False):
             and (include_ck or not is_ck_snapshot(n))]
 
 
+def _view_pages_root(mem_dir):
+    """``<view>/pages`` (the link, copy or junction into the pool) when mem_dir
+    is ``<store>/views/<name>``, even reached through a link such as the
+    agent's memory dir; links are resolved lexically through it."""
+    if os.path.basename(os.path.dirname(os.path.realpath(mem_dir))) != "views":
+        return None
+    return os.path.join(os.path.normpath(os.path.abspath(mem_dir)), "pages")
+
+
 class Scan(object):
     """Everything both modes need, collected in one pass over the dir."""
 
@@ -390,6 +400,22 @@ class Scan(object):
                     continue
                 seen.add((p.target, p.line))
                 self.dangling.append(Dangling(idx, p.target, p.line, p.syntax))
+
+        # A view links into the store's pages/ pool (#142); resolve those.
+        pages_root = _view_pages_root(mem_dir)
+        if pages_root:
+            for idx in self.indexes:
+                kept = []
+                for p in self.external[idx]:
+                    resolved = os.path.normpath(
+                        os.path.join(os.path.abspath(mem_dir), p.target))
+                    if "://" in p.target or not (
+                            resolved.startswith(pages_root + os.sep)):
+                        kept.append(p)
+                    elif not os.path.isfile(resolved):
+                        self.dangling.append(
+                            Dangling(idx, p.target, p.line, p.syntax))
+                self.external[idx] = kept
 
         # linked-from map, for orphans and for spotting a half-finished move.
         self.linked_from = {}
