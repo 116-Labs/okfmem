@@ -50,7 +50,8 @@ def _link(claude_projects, root, target):
     entry = os.path.join(claude_projects, mi.encode_root(root))
     os.makedirs(entry, exist_ok=True)
     link = os.path.join(entry, "memory")
-    os.symlink(target, link)
+    # Windows may make a file symlink when it misjudges a case-variant target.
+    os.symlink(target, link, target_is_directory=True)
     return link
 
 
@@ -171,7 +172,27 @@ def test_failed_respell_restores_the_folder_and_skips(offlinecv, monkeypatch):
     assert os.listdir(os.path.join(offlinecv["store"], "views")) == ["OfflineCV"]
 
 
-def test_a_variant_that_is_its_own_store_project_is_not_renamed(offlinecv):
+def test_respell_repoints_another_checkouts_link_to_the_variant(offlinecv):
+    other = _link(offlinecv["claude"], os.path.join(os.path.dirname(offlinecv["root"]), "wt"),
+                  os.path.join(offlinecv["store"], "views", "OfflineCV"))
+
+    status, msg = _link_project(offlinecv)
+
+    assert status == "changed", msg
+    assert "repointed 1 other link(s) to offlinecv" in msg
+    assert os.path.basename(os.readlink(other)) == "offlinecv"
+    assert os.path.isfile(os.path.join(other, "MEMORY.md"))
+
+
+def _filesystem_is_case_insensitive(path):
+    probe = path / "Probe"
+    probe.write_text("", encoding="utf-8")
+    return (path / "probe").exists()
+
+
+def test_a_variant_that_is_its_own_store_project_is_not_renamed(offlinecv, tmp_path):
+    if _filesystem_is_case_insensitive(tmp_path):
+        pytest.skip("two store projects differing only in case cannot coexist here")
     state = os.path.join(offlinecv["store"], "state")
     with open(os.path.join(state, "OfflineCV.md"), "w", encoding="utf-8") as f:
         f.write("# STATE\n")

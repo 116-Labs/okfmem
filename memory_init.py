@@ -2317,6 +2317,7 @@ def link_project_memory(
         return ("skip", "not inside a git repo")
     name = canonical_project_name(root, reg, store)
     seeded = False
+    variant = None
     if has_layout_marker(store):
         # #112: on the flat pool the memory dir is the compiled view, never
         # projects/<name>. Compile it here -- views/ is per-machine, so a
@@ -2358,6 +2359,12 @@ def link_project_memory(
     status, msg = _link_memory_dir(
         proj_dir, target_real, name, seeded, dry_run, assume_yes, non_interactive
     )
+    if variant:
+        others = _repoint_variant_links(
+            claude_projects, os.path.join(store, "views"), variant, target_real,
+            os.path.join(proj_dir, "memory"))
+        if others:
+            status, msg = "changed", f"{msg}; repointed {others} other link(s) to {name}"
     if status != "skip":
         retired = _retire_legacy_link(claude_projects, root, proj_dir, target_real, dry_run)
         if retired:
@@ -2394,6 +2401,43 @@ def _respell_dir(parent, old, new):
     except OSError:
         os.rename(tmp, src)
         raise
+
+
+def _repoint_variant_links(claude_projects, views, variant, target_real, own_link):
+    """Repoint every other checkout's memory link still stored as
+    `views/<variant>` once `_respell_dir` renamed it: on a case-sensitive store
+    that path is gone, so the link would dangle. Returns how many moved."""
+    try:
+        entries = sorted(os.listdir(claude_projects))
+    except OSError:
+        return 0
+    views_key = os.path.normcase(os.path.realpath(views))
+    moved = 0
+    for entry in entries:
+        proj_dir = os.path.join(claude_projects, entry)
+        link = os.path.join(proj_dir, "memory")
+        if link == own_link or not (os.path.islink(link) or _is_junction(link)):
+            continue
+        try:
+            stored = os.readlink(link)
+        except (OSError, ValueError):
+            continue
+        # Windows junctions read back with the extended-length prefix.
+        stored = os.path.normpath(stored.removeprefix("\\\\?\\"))
+        if os.path.basename(stored) != variant or os.path.normcase(
+            os.path.realpath(os.path.dirname(stored))
+        ) != views_key:
+            continue
+        try:
+            if os.path.islink(link):
+                os.remove(link)
+            else:
+                os.rmdir(link)  # unlink the junction, not its target
+            _install_memory_link(proj_dir, link, target_real)
+        except OSError:
+            continue
+        moved += 1
+    return moved
 
 
 def _link_spelling_differs(link, target_real):
