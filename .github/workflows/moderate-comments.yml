@@ -4,6 +4,7 @@
 # Auto-hide obvious spam on issue / PR comments.
 # Hide-only: matched comments are minimized as "spam" (collapsed, reversible).
 # Only comments from non-members are ever touched, so maintainers can't trip it.
+# The age gate and spam patterns live in scripts/vet_pr.py, shared with vet-fork-pr.yml.
 name: Moderate comments
 
 on:
@@ -11,6 +12,7 @@ on:
     types: [created]
 
 permissions:
+  contents: read
   issues: write
   pull-requests: write
 
@@ -23,49 +25,27 @@ jobs:
       github.event.comment.author_association != 'MEMBER' &&
       github.event.comment.author_association != 'COLLABORATOR'
     steps:
-      - name: Score and hide
+      # issue_comment runs on the default branch, so this is the repo's own script.
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Reads the comment from $GITHUB_EVENT_PATH and writes hide=true|false.
+      - name: Score
+        id: score
+        run: python scripts/vet_pr.py --comment-check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Hide
+        if: steps.score.outputs.hide == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            // Minimum account age (days) for a non-contributor to comment.
-            // Younger accounts are auto-hidden regardless of content — the
-            // permanent "new accounts can't interact" gate. Tune freely.
-            const MIN_ACCOUNT_AGE_DAYS = 30;
-
-            let reason = null;
-
-            // 1. Account-age gate. Look up the commenter's creation date.
-            const login = context.payload.comment.user.login;
-            const { data: user } = await github.rest.users.getByUsername({ username: login });
-            const ageDays = (Date.now() - new Date(user.created_at).getTime()) / 86_400_000;
-            if (ageDays < MIN_ACCOUNT_AGE_DAYS) {
-              reason = `account age ${ageDays.toFixed(1)}d < ${MIN_ACCOUNT_AGE_DAYS}d`;
-            }
-
-            // 2. Content signals (catch older accounts posting obvious spam).
-            if (!reason) {
-              const body = (context.payload.comment.body || '').toLowerCase();
-              // Tunable spam signals. Add/remove patterns as the spam evolves.
-              const patterns = [
-                /t\.me\//,                          // telegram invite links
-                /\b(whats?app|telegram)\b.*\+?\d/,  // "whatsapp +1..." contact bait
-                /\b(crypto|bitcoin|forex|binary option|airdrop|nft mint)\b/,
-                /\b(hack|recover(y)?)\b.*\b(wallet|funds|account|bitcoin)\b/,
-                /\b(cheap|buy).{0,20}(followers|likes|views)\b/,
-                /(https?:\/\/[^\s]+){4,}/,          // 4+ links in one comment
-                /\b(loan|investment).{0,20}(guaranteed|profit)\b/,
-              ];
-              const hits = patterns.filter((re) => re.test(body)).map(String);
-              if (hits.length > 0) reason = `spam signals: ${hits.join(', ')}`;
-            }
-
-            if (!reason) {
-              core.info('No age or content signal. Leaving comment as-is.');
-              return;
-            }
-            core.info(`Hiding comment from @${login} — ${reason}`);
-
-            // Minimize (hide) the comment as spam via GraphQL.
             await github.graphql(
               `mutation ($id: ID!) {
                  minimizeComment(input: { subjectId: $id, classifier: SPAM }) {

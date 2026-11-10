@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Vet each fork PR from an outside author (#151): approve its pending CI runs when the
+# account and diff pass scripts/vet_pr.py's checks, close high-confidence spam, and
+# otherwise label it needs-human so a maintainer approves CI by hand.
+#
+# Security invariant: pull_request_target holds a write token, so this workflow never
+# checks out, installs, imports or runs anything from the PR head. The script reads the
+# PR only through the REST API, and no run: line interpolates PR title, body or branch.
+name: Vet fork PR
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  actions: write
+  pull-requests: write
+  issues: write
+  contents: read
+
+concurrency:
+  group: vet-fork-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  vet:
+    if: >
+      github.event.pull_request.head.repo.full_name != github.repository &&
+      !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    runs-on: ubuntu-latest
+    steps:
+      # The base branch only: never point this at the PR head.
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Vet and act
+        run: python scripts/vet_pr.py --repo "$GITHUB_REPOSITORY" --pr "$PR_NUMBER"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}

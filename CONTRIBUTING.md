@@ -36,6 +36,13 @@ Try changes against a throwaway store: `OKFMEM_STORE=/tmp/okfmem-test okfmem <cm
 4. Never include real transcripts, secrets, or personal paths — see the
    sanitization constraints in issue #2.
 
+**Outside pull requests.** CI on a first pull request from a fork waits for
+approval. `scripts/vet_pr.py` checks the account and the diff: when both pass
+(an established account with merged work elsewhere, a small diff that stays off
+the `.github/CODEOWNERS` paths), CI is approved automatically and the PR gets a
+comment saying why. Otherwise the PR is labelled `needs-human` and a maintainer
+approves CI by hand. Spam pull requests are closed and labelled `invalid`.
+
 ## Roadmap
 
 Open issues track the direction:
