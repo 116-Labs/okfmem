@@ -43,6 +43,23 @@ the `.github/CODEOWNERS` paths), CI is approved automatically and the PR gets a
 comment saying why. Otherwise the PR is labelled `needs-human` and a maintainer
 approves CI by hand. Spam pull requests are closed and labelled `invalid`.
 
+## Cutting a release (maintainers)
+
+`okfmem update` installs from `main`, so a release names what `main` already ships:
+`VERSION`, an annotated `vX.Y.Z` tag and a GitHub release. `scripts/release.sh`
+does every step and checks each one first (on `main`, clean, even with origin,
+CI green, the version is newer, the tag is free):
+
+```bash
+scripts/release.sh status                        # commits since the last tag + suggested bump
+scripts/release.sh prepare minor --notes notes.md --title "short headline"   # release PR
+# merge the PR, then:
+scripts/release.sh publish X.Y.Z --notes notes.md   # tag the VERSION commit + GitHub release
+```
+
+Every subcommand takes `--dry-run`. In Claude Code, `/okfmem-release` proposes the
+bump, drafts the notes and runs the script.
+
 ## Roadmap
 
 Open issues track the direction:
