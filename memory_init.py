@@ -383,6 +383,45 @@ def has_layout_marker(store):
     return False
 
 
+_STORE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def attached_stores(store, reg=None):
+    """Read stores attached beside `store` in registry.json `stores` (#139), in
+    order, as dicts {name, path, remote}. Attaching is the trust decision.
+    A relative `path` is relative to the home store, never the caller's cwd."""
+    if reg is None:
+        reg = _load_registry(os.path.join(store, "registry.json"))
+    raw = reg.get("stores") if isinstance(reg, dict) else None
+    if not isinstance(raw, list):
+        return []
+    store_abs = os.path.abspath(store)
+    home = os.path.normcase(os.path.realpath(store_abs))
+    out, seen = [], set()
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        name, path = entry.get("name"), entry.get("path")
+        if not (isinstance(name, str) and _STORE_NAME_RE.match(name)
+                and isinstance(path, str) and path.strip()):
+            continue
+        path = os.path.abspath(os.path.join(store_abs, os.path.expanduser(path.strip())))
+        if name.casefold() in seen or os.path.normcase(os.path.realpath(path)) == home:
+            continue
+        seen.add(name.casefold())
+        remote = entry.get("remote")
+        out.append({"name": name, "path": path,
+                    "remote": remote if isinstance(remote, str) and remote else None})
+    return out
+
+
+def store_remote_url(remote):
+    """Clone URL for an attached store's `remote`; `owner/repo` means GitHub."""
+    if remote and re.match(r"^[\w.-]+/[\w.-]+$", remote):
+        return f"https://github.com/{remote.removesuffix('.git')}.git"
+    return remote
+
+
 def _memory_target(store, name):
     """Where a repo's memory link should point: the compiled view on a
     flat-pool store, else the legacy project dir (#112, #118)."""
@@ -412,9 +451,13 @@ def _page_title_fallback(text, slug):
 
 
 def _format_view_pointer(page):
-    target = f"pages/{page['slug']}.md"
-    if page.get("hook"):
-        return f"- [{page['title']}]({target}) — {page['hook']}"
+    target = page.get("target") or f"pages/{page['slug']}.md"
+    hook = page.get("hook") or ""
+    if page.get("store"):
+        tag = f"(store: {page['store']})"
+        hook = f"{hook} {tag}" if hook else tag
+    if hook:
+        return f"- [{page['title']}]({target}) — {hook}"
     return f"- [{page['title']}]({target})"
 
 
@@ -424,9 +467,17 @@ def _check_view_budget(lines):
 
 
 def _make_view_pages_link(store, view_dir):
-    pages_target = os.path.join(store, "pages")
-    link_path = os.path.join(view_dir, "pages")
-    rel_target = os.path.relpath(pages_target, view_dir)
+    _make_dir_link(os.path.join(store, "pages"), os.path.join(view_dir, "pages"))
+
+
+def _make_dir_link(pages_target, link_path):
+    """Link `link_path` to the directory `pages_target`: relative symlink, else
+    absolute symlink, else a junction on Windows, else a copy."""
+    try:
+        rel_target = os.path.relpath(pages_target, os.path.dirname(link_path))
+    except ValueError:
+        # Windows: an attached store on another drive has no relative path.
+        rel_target = pages_target
     if os.path.islink(link_path) or _is_junction(link_path):
         if os.path.normcase(os.path.realpath(link_path)) == os.path.normcase(os.path.realpath(pages_target)):
             return
@@ -545,7 +596,6 @@ def compile_view(store, repo, org=None, stack=None, aliases=None, reg=None):
             except OSError:
                 pass
 
-    pages_dir = os.path.join(store, "pages")
     repo_pages = []
     org_pages = []
     stack_pages = []
@@ -557,9 +607,22 @@ def compile_view(store, repo, org=None, stack=None, aliases=None, reg=None):
     org_label = f"org:{org}" if org else None
     stack_labels = {f"stack:{s}" for s in (stack or [])}
 
-    if os.path.isdir(pages_dir):
+    # Home first, so a slug already in this view is never repeated from an
+    # attached store (#139: on a clash the home page wins).
+    attached = [a for a in attached_stores(store, reg)
+                if os.path.isdir(os.path.join(a["path"], "pages"))]
+    sources = [(None, os.path.join(store, "pages"), "pages")]
+    sources += [(a["name"], os.path.join(a["path"], "pages"), f"stores/{a['name']}")
+                for a in attached]
+    seen_slugs = set()
+
+    for source, pages_dir, link_prefix in sources:
+        if not os.path.isdir(pages_dir):
+            continue
         for fname in sorted(os.listdir(pages_dir)):
             if not fname.endswith(".md") or fname in ("MEMORY.md", "STATE.md", "CONTEXT.md"):
+                continue
+            if fname[:-3] in seen_slugs:
                 continue
             fpath = os.path.join(pages_dir, fname)
             if not os.path.isfile(fpath):
@@ -593,15 +656,21 @@ def compile_view(store, repo, org=None, stack=None, aliases=None, reg=None):
                 "importance": importance,
                 "recency": recency,
                 "labels": labels,
+                "store": source,
+                "target": f"{link_prefix}/{slug}.md",
             }
 
             labels_set = set(labels)
             if labels_set & all_repo_labels:
-                repo_pages.append(page_info)
+                tier = repo_pages
             elif org_label and org_label in labels_set:
-                org_pages.append(page_info)
+                tier = org_pages
             elif labels_set & stack_labels:
-                stack_pages.append(page_info)
+                tier = stack_pages
+            else:
+                continue
+            tier.append(page_info)
+            seen_slugs.add(slug)
 
     def sort_key(p):
         rec_clean = p["recency"].replace("-", "")
@@ -698,7 +767,37 @@ def compile_view(store, repo, org=None, stack=None, aliases=None, reg=None):
             f.write("\n".join(r_lines) + "\n")
 
     _make_view_pages_link(store, view_dir)
+    _make_view_store_links(view_dir, attached)
     _make_view_state_link(store, view_dir, repo)
+
+
+def _make_view_store_links(view_dir, attached):
+    """Link views/<repo>/stores/<name> to each attached store's pages/ and drop
+    links for stores no longer attached. A copy fallback is left in place."""
+    stores_dir = os.path.join(view_dir, "stores")
+    wanted = {a["name"] for a in attached}
+    if os.path.isdir(stores_dir):
+        for entry in os.listdir(stores_dir):
+            path = os.path.join(stores_dir, entry)
+            if entry in wanted:
+                continue
+            try:
+                if _is_junction(path):
+                    os.rmdir(path)
+                elif os.path.islink(path):
+                    os.unlink(path)
+            except OSError:
+                pass
+    if attached:
+        os.makedirs(stores_dir, exist_ok=True)
+        for a in attached:
+            _make_dir_link(os.path.join(a["path"], "pages"),
+                           os.path.join(stores_dir, a["name"]))
+    else:
+        try:
+            os.rmdir(stores_dir)
+        except OSError:
+            pass
 
 
 def _remote_repo_name(root):
@@ -3757,6 +3856,41 @@ def project_for_cwd(reg):
     return reg.get("map", {}).get(root)
 
 
+def attached_store_last_fetch(path):
+    """UTC datetime of the last `git fetch` in `path` (FETCH_HEAD's mtime), or
+    None when it was never fetched or is not a git repo."""
+    if not os.path.exists(os.path.join(path, ".git")):
+        return None
+    try:
+        r = subprocess.run(["git", "-C", path, "rev-parse", "--git-path", "FETCH_HEAD"],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    fetch_head = os.path.join(path, r.stdout.strip())
+    try:
+        return datetime.fromtimestamp(os.path.getmtime(fetch_head), timezone.utc)
+    except OSError:
+        return None
+
+
+def attached_store_fetch_note(a):
+    """One status phrase for an attached store: its last fetch, or how to fix it."""
+    if not os.path.isdir(a["path"]):
+        url = store_remote_url(a["remote"])
+        hint = f" — git clone {url} {_short(a['path'])}" if url else ""
+        return f"{glyph('warn')} not cloned{hint}"
+    if not os.path.isdir(os.path.join(a["path"], "pages")):
+        return f"{glyph('warn')} no pages/ — not an okfmem store"
+    if not os.path.exists(os.path.join(a["path"], ".git")):
+        return f"{glyph('warn')} not a git repo — okfmem pull cannot update it"
+    when = attached_store_last_fetch(a["path"])
+    if when is None:
+        return "last fetch: never (okfmem pull)"
+    return f"last fetch: {when.strftime('%Y-%m-%d %H:%M UTC')}"
+
+
 def cmd_status(store, show_all=False, project_filter=None):
     from memory_codex import status
     print("Codex: " + status(store))
@@ -3962,6 +4096,12 @@ def cmd_status(store, show_all=False, project_filter=None):
         else:
             suffix = f" with {upstream_name}" if upstream_name else ""
             print(f"  store sync: clean, in sync{suffix}")
+
+    attached = attached_stores(store)
+    if attached:
+        print(f"  attached stores ({len(attached)}):")
+        for a in attached:
+            print(f"    {a['name']:12} {_short(a['path'])}   {attached_store_fetch_note(a)}")
 
     legacy_clone = detect_legacy_clone()
     if legacy_clone:

@@ -334,6 +334,20 @@ flowchart TD
 
 By default, the store is created at `~/okfmem-store`. To put it elsewhere, set `$OKFMEM_STORE` in your shell profile or pass `--store PATH` to any command.
 
+### Attached team stores
+
+A team can share memory without sharing anyone's personal store. Clone the team's store next to your own, then list it under `stores` in your home store's `registry.json`:
+
+```json
+{ "stores": [ { "name": "team", "path": "~/okfmem-team", "remote": "<org>/team-memory" } ] }
+```
+
+Attaching a store is the trust decision: its pages enter your compiled views with no review step, so attach only stores whose writers you trust. Each name is letters, digits, `.`, `_` or `-`. A `path` may be absolute, start with `~`, or be relative; a relative path is resolved against your home store (so `"../okfmem-team"` sits beside it), never against the directory a command runs in.
+
+*   **Views.** `okfmem init --resolve-project --compile` builds each repo's view from your store and every attached one, in the usual tiers: repo, then org, then stack. An attached page is linked as `stores/<name>/<slug>.md` and its entry ends with `(store: <name>)`. When both stores have a page with the same slug for this view, it appears once, from your store. The 8 KB, 200-line budget covers the merged view.
+*   **Ownership.** `STATE.md` always comes from your store. `okfmem consolidate` decays and archives only your store's pages; an attached store's owners maintain it.
+*   **Sync.** `okfmem pull` pulls your store, then each attached store; one that fails is reported and the rest are still pulled. A store that is not cloned yet is reported with its `git clone` command. `okfmem status` lists every attached store with its last fetch.
+
 ---
 Design & research: the full design, decay math, prior-art survey, and phased plan
 live in the tracked issues — [#1](https://github.com/116-Labs/okfmem/issues/1)
