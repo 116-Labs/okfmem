@@ -34,6 +34,7 @@ def two_views(tmp_path):
     _set_registry(store, {repo_a: "a", repo_b: "b"})
     _write_page(store, "old-a", ["repo:a"])
     _write_page(store, "org-page", ["org:acme"])
+    _write_page(store, "stack-page", ["stack:python"])
     mi.resolve_project(store, cwd=repo_a, compile=True)
     mi.resolve_project(store, cwd=repo_b, compile=True)
     return store, repo_a, repo_b
@@ -59,27 +60,76 @@ def test_refresh_adds_new_page_to_other_repos_view(two_views):
     assert "pages/new-a.md" in _view(store, "a")
 
 
-def test_non_cwd_view_with_local_root_keeps_org_section(two_views):
+def test_non_cwd_view_with_local_root_keeps_org_and_stack_sections(two_views):
     store, _, repo_b = two_views
     assert "pages/org-page.md" in _view(store, "a")
+    assert "pages/stack-page.md" in _view(store, "a")
+    _write_page(store, "new-a", ["repo:a"])
 
     mc._refresh_view(store, {"cwd": repo_b})
 
-    assert "pages/org-page.md" in _view(store, "a")
+    text = _view(store, "a")
+    assert "pages/new-a.md" in text
+    assert "pages/org-page.md" in text
+    assert "pages/stack-page.md" in text
 
 
-def test_view_without_local_root_compiles_repo_tier_only(two_views, tmp_path):
+def test_view_without_local_root_compiles_repo_tier_only(two_views):
     store, _, repo_b = two_views
-    _write_page(store, "ghost-page", ["repo:ghost"])
     _write_page(store, "ghost-org", ["org:acme"])
     mi.compile_view(store, "ghost")
-    _set_registry(store, {repo_b: "b"})
+    _write_page(store, "ghost-page", ["repo:ghost"])
 
     mc._refresh_view(store, {"cwd": repo_b})
 
     text = _view(store, "ghost")
     assert "pages/ghost-page.md" in text
     assert "ghost-org" not in text
+
+
+def test_unregistered_cwd_view_keeps_org_section(tmp_path):
+    store = _make_store(tmp_path / "store")
+    repo = _make_repo(tmp_path / "a", remote="https://github.com/acme/a.git")
+    _write_page(store, "page-a", ["repo:a"])
+    _write_page(store, "org-page", ["org:acme"])
+    mi.resolve_project(store, cwd=repo, compile=True)
+    assert "pages/org-page.md" in _view(store, "a")
+
+    mc._refresh_view(store, {"cwd": repo})
+
+    assert "pages/org-page.md" in _view(store, "a")
+
+
+@pytest.fixture
+def case_variant_view(tmp_path):
+    store = _make_store(tmp_path / "store")
+    repo = _make_repo(tmp_path / "offlinecv",
+                      remote="https://github.com/acme/offlinecv.git")
+    other = _make_repo(tmp_path / "b")
+    _set_registry(store, {repo: "OfflineCV", other: "b"})
+    os.makedirs(os.path.join(store, "state"))
+    Path(store, "state", "offlinecv.md").write_text("# State\n", encoding="utf-8")
+    _write_page(store, "cv-page", ["repo:offlinecv"])
+    _write_page(store, "org-page", ["org:acme"])
+    mi.resolve_project(store, cwd=repo, compile=True)
+    assert "pages/org-page.md" in _view(store, "offlinecv")
+    return store, repo, other
+
+
+def test_case_variant_cwd_view_keeps_org_section(case_variant_view):
+    store, repo, _ = case_variant_view
+
+    mc._refresh_view(store, {"cwd": repo})
+
+    assert "pages/org-page.md" in _view(store, "offlinecv")
+
+
+def test_case_variant_non_cwd_view_keeps_org_section(case_variant_view):
+    store, _, other = case_variant_view
+
+    mc._refresh_view(store, {"cwd": other})
+
+    assert "pages/org-page.md" in _view(store, "offlinecv")
 
 
 def test_dirty_tree_soft_skip_refreshes_every_view(two_views, monkeypatch, capsys):
@@ -128,6 +178,19 @@ def test_verify_flags_dangling_link_into_pages(tmp_path, copy):
         ("MEMORY.md", "pages/gone.md")]
     assert scan.dangling[0].line > 0
     assert not scan.ok
+
+
+def test_verify_flags_dangling_link_through_linked_view_dir(tmp_path):
+    _, view = _linked_view(tmp_path, copy=False)
+    link = tmp_path / "claude" / "memory"
+    link.parent.mkdir()
+    if mi._make_link(str(view), str(link)) == "copy":
+        pytest.skip("no symlink or junction available")
+
+    scan = mr.Scan(str(link))
+
+    assert [(d.index, d.target) for d in scan.dangling] == [
+        ("MEMORY.md", "pages/gone.md")]
 
 
 def test_verify_passes_when_pages_links_resolve(tmp_path):

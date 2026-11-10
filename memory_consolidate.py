@@ -128,40 +128,52 @@ def read_hook_payload(args):
 
 
 def _refresh_view(store, payload=None):
+    compiled = None
     try:
         from memory_init import resolve_project
         hook_cwd = payload.get("cwd") if isinstance(payload, dict) else None
         cwd = hook_cwd or os.getcwd()
-        resolve_project(store, cwd=cwd, compile=True)
+        compiled = resolve_project(store, cwd=cwd, compile=True).get("project")
     except Exception:
         pass
-    _refresh_all_views(store)
+    _refresh_all_views(store, skip=compiled)
 
 
-def _refresh_all_views(store):
-    """Recompile every views/* dir: consolidate archives and relabels pages
-    store-wide, so a view for a repo other than the cwd's goes stale (#142)."""
+def _view_context(store, reg, name):
+    """org/stack for view `name` from the first local root that resolves to it.
+    Map values are matched case-insensitively and confirmed through identity,
+    as `canonical_project_name` maps a case-variant entry to the store's name."""
+    from memory_init import _resolve_overrides, resolve_project
+    roots = sorted(r for r, p in reg["map"].items()
+                   if isinstance(p, str) and p.casefold() == name.casefold()
+                   and os.path.isdir(r))
+    for root in roots:
+        try:
+            resolved = resolve_project(store, cwd=root)
+        except Exception:
+            continue
+        if resolved.get("project") == name:
+            return resolved["org"], resolved["stack"]
+    return _resolve_overrides(reg, None, name, None, [])
+
+
+def _refresh_all_views(store, skip=None):
+    """Recompile every views/* dir except `skip`, the cwd's view already
+    compiled: consolidate archives and relabels pages store-wide, so a view
+    for a repo other than the cwd's goes stale (#142)."""
     views_dir = os.path.join(store, "views")
     try:
-        from memory_init import (
-            _load_registry, _remote_repo_owner, _detect_stack,
-            _resolve_overrides, _resolve_aliases, compile_view,
-        )
+        from memory_init import _load_registry, _resolve_aliases, compile_view
         names = sorted(n for n in os.listdir(views_dir)
                        if os.path.isdir(os.path.join(views_dir, n)))
         reg = _load_registry(os.path.join(store, "registry.json"))
     except Exception:
         return
     for name in names:
+        if name == skip:
+            continue
         try:
-            roots = sorted(r for r, p in reg["map"].items()
-                           if p == name and os.path.isdir(r))
-            if roots:
-                root = roots[0]
-                org, stack = _resolve_overrides(
-                    reg, root, name, _remote_repo_owner(root), _detect_stack(root))
-            else:
-                org, stack = _resolve_overrides(reg, None, name, None, [])
+            org, stack = _view_context(store, reg, name)
             compile_view(store, name, org=org, stack=stack,
                          aliases=_resolve_aliases(reg, name), reg=reg)
         except Exception:
