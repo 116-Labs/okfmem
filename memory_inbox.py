@@ -298,39 +298,92 @@ def resolve_repo_project(store, repo):
     return None
 
 
+class InboxReadError(RuntimeError):
+    """The pending listing could not be read; callers must not act on a partial one."""
+
+
+def _cat_file_batch(store, specs):
+    """Contents of each object spec from one `git cat-file --batch` process
+    (bytes, or None when missing), in order."""
+    if not specs:
+        return []
+    r = _git(store, "cat-file", "--batch", data=("\n".join(specs) + "\n").encode(),
+             timeout=max(NET_TIMEOUT, len(specs) // 100))
+    if r.returncode != 0:
+        # An empty listing would make `review` delete every push as page-less.
+        raise InboxReadError(_err(r) or f"git cat-file exited {r.returncode}")
+    out, pos = [], 0
+    buf = r.stdout
+    for _ in specs:
+        end = buf.find(b"\n", pos)
+        if end < 0:
+            out.append(None)
+            continue
+        header = buf[pos:end].split()
+        pos = end + 1
+        if len(header) != 3:
+            out.append(None)
+            continue
+        size = int(header[2])
+        out.append(buf[pos:pos + size])
+        pos += size + 1
+    return out
+
+
+def _parse_tree(data, raw_len):
+    """[(name, hex blob sha)] for the blob entries of a raw tree object."""
+    entries, pos = [], 0
+    while pos < len(data):
+        nul = data.index(b"\0", pos)
+        mode, _, name = data[pos:nul].partition(b" ")
+        sha = data[nul + 1:nul + 1 + raw_len].hex()
+        pos = nul + 1 + raw_len
+        if mode.startswith(b"100"):
+            entries.append((name.decode("utf-8", "replace"), sha))
+    return entries
+
+
 def pending(store):
     """Every pending push, oldest first: dicts with ref, sha, meta, project, pages
     (each page: name, slug, text, fields)."""
     r = _git(store, "for-each-ref", "--format=%(refname) %(objectname)", INBOX_NS)
     if r.returncode != 0:
         return []
+    refs = [line.rsplit(" ", 1) for line in _out(r).splitlines()]
+    trees = _cat_file_batch(store, [f"{sha}^{{tree}}" for _, sha in refs])
+    entries = []  # per push: [(name, blob sha)]
+    for (_, sha), tree in zip(refs, trees):
+        entries.append(_parse_tree(tree, len(sha) // 2) if tree is not None else [])
+    wanted = []
+    for ents in entries:
+        wanted.extend(b for n, b in ents if n == "meta.json" or importable_name(n))
+    blobs = dict(zip(wanted, _cat_file_batch(store, wanted)))
+    projects = {}
     pushes = []
-    for line in _out(r).splitlines():
-        ref, sha = line.rsplit(" ", 1)
-        m = _git(store, "show", f"{sha}:meta.json")
+    for (ref, sha), ents in zip(refs, entries):
+        raw_meta = next((blobs.get(b) for n, b in ents if n == "meta.json"), None)
         try:
-            meta = json.loads(m.stdout.decode("utf-8")) if m.returncode == 0 else {}
+            meta = json.loads(raw_meta.decode("utf-8")) if raw_meta is not None else {}
         except (ValueError, UnicodeDecodeError):
             meta = {}
         if not isinstance(meta, dict):
             meta = {}
         meta = {k: v for k, v in meta.items() if isinstance(v, str)}
-        names = _git(store, "ls-tree", "--name-only", sha)
         pages = []
-        for name in _out(names).splitlines():
-            if not importable_name(name):
+        for name, blob_sha in ents:
+            if not importable_name(name) or blobs.get(blob_sha) is None:
                 continue
-            blob = _git(store, "show", f"{sha}:{name}")
-            if blob.returncode != 0:
-                continue
-            text = blob.stdout.decode("utf-8", "replace")
+            text = blobs[blob_sha].decode("utf-8", "replace")
             fields = page_fields(text)
             if fields is None:
                 continue
             pages.append({"name": name, "slug": name[:-3], "text": text,
                           "fields": fields})
+        repo = meta.get("repo")
+        if repo not in projects:
+            projects[repo] = resolve_repo_project(store, repo)
         pushes.append({"ref": ref, "sha": sha, "meta": meta, "pages": pages,
-                       "project": resolve_repo_project(store, meta.get("repo"))})
+                       "project": projects[repo]})
     pushes.sort(key=lambda p: (str(p["meta"].get("time") or ""), p["ref"]))
     return pushes
 
@@ -350,6 +403,17 @@ def render_pending(pushes):
     if not rows:
         return ["okfmem inbox: nothing pending."]
     lines = [f"okfmem inbox: {len(rows)} pending page(s) in {len(pushes)} push(es)"]
+    page_counts, push_counts = {}, {}
+    for p in pushes:
+        if not p["pages"]:
+            continue
+        project = p["project"] or _safe(
+            f"(unresolved: {p['meta'].get('repo') or 'no repo'})")
+        page_counts[project] = page_counts.get(project, 0) + len(p["pages"])
+        push_counts[project] = push_counts.get(project, 0) + 1
+    for project in sorted(page_counts):
+        lines.append(f"{project}: {page_counts[project]:,} pages in "
+                     f"{push_counts[project]:,} pushes")
     current = None
     for project, slug, meta in sorted(rows, key=lambda r: (r[0], r[1])):
         if project != current:
@@ -364,7 +428,13 @@ def pull(store, out=print):
     if not ok:
         out(f"okfmem inbox pull: fetch failed ({err or 'offline?'}) — "
             "listing what was fetched before.")
-    for line in render_pending(pending(store)):
+    try:
+        lines = render_pending(pending(store))
+    except InboxReadError as e:
+        out(f"okfmem inbox pull: could not read the inbox ({_safe(e)}) — "
+            "nothing listed.")
+        return 1
+    for line in lines:
         out(line)
     return 0
 
@@ -630,8 +700,13 @@ def review(store, decide, ask_project, out=print, today=None, do_sync=True):
     if not ok:
         out(f"okfmem inbox review: fetch failed ({err or 'offline?'}) — "
             "reviewing what was fetched before.")
-    pushes = pending(store)
     counts = {"accepted": 0, "merged": 0, "dropped": 0, "deleted": 0}
+    try:
+        pushes = pending(store)
+    except InboxReadError as e:
+        out(f"okfmem inbox review: could not read the inbox ({_safe(e)}) — "
+            "nothing reviewed or deleted.")
+        return counts
     if not pushes:
         out("okfmem inbox: nothing pending.")
         return counts
