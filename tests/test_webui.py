@@ -29,6 +29,15 @@ def _call(srv, path, token=True, body=None):
         return e.code, e.read()
 
 
+def _wake(srv):
+    """Unblock a pending handle_request after stop(). serve may already have
+    closed the socket (it polls every 0.5s), so a refused connection is fine."""
+    try:
+        _call(srv, "/api/state")
+    except urllib.error.URLError:
+        pass
+
+
 def _serve(srv):
     t = threading.Thread(target=srv.serve, kwargs={"open_browser": False}, daemon=True)
     t.start()
@@ -58,7 +67,7 @@ def test_request_without_the_token_gets_403_including_post():
         assert _call(srv, f"/?t={srv.token}", token=False)[0] == 200
     finally:
         srv.stop()
-        _call(srv, "/api/x")
+        _wake(srv)
 
 
 def test_idle_timeout_ends_serve():
@@ -83,7 +92,7 @@ def _run_review(env, work, confirm=lambda: True, decisions_post=None, lines=None
         post = _call(srv, "/api/done", body={"decisions": decisions_post(state)})
     if t.is_alive() and (post is None or post[0] != 200):
         srv.stop()
-        _call(srv, "/api/state")
+        _wake(srv)
     t.join(10)
     return state, post, result, lines
 
