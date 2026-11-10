@@ -10,8 +10,14 @@ pointer blocks refresh. install.sh / install.ps1 bootstrap the first time;
   okfmem update --check    # report whether a newer version exists; change nothing
 
 Fast-forward only: if you have committed local engine changes that diverge from
-origin, the pull refuses rather than clobbering them — stash or branch first. A
-dirty working tree is likewise refused up front, before anything is fetched.
+origin, the pull refuses rather than clobbering them. Save them on a branch and
+move the default branch back to origin, then update again:
+
+  git -C "<ENGINE>" branch local-engine-work-<short-sha>
+  git -C "<ENGINE>" reset --keep origin/<default>
+  okfmem update
+
+A dirty working tree is likewise refused up front, before anything is fetched.
 
 Store passthrough: --store (else $OKFMEM_STORE, else ~/okfmem-store) is forwarded
 to the init step, which resolves it the same way every other subcommand does.
@@ -24,6 +30,7 @@ import sys
 # realpath: the CLI is reached through a symlink/wrapper; resolve to the real
 # engine dir so git operates on the clone, not on ~/.local/bin.
 ENGINE = os.path.dirname(os.path.realpath(__file__))
+KEEP_BRANCH_PREFIX = "local-engine-work-"
 
 
 def _git(*args, check=False):
@@ -61,6 +68,16 @@ def _engine_branch_state():
     return (branch or None), default
 
 
+def _keep_and_reset_hint(target):
+    # Stash skips commits and update refuses other branches: reset the default (#174).
+    # The sha suffix avoids a name clash failing `branch` while a pasted `reset` runs.
+    return (f"  to keep those commits and update, save them on a branch, then move this\n"
+            f"  branch back to {target}:\n"
+            f'    git -C "{ENGINE}" branch {KEEP_BRANCH_PREFIX}{_short()}\n'
+            f'    git -C "{ENGINE}" reset --keep {target}\n'
+            f"    okfmem update")
+
+
 def _engine_version():
     try:
         with open(os.path.join(ENGINE, "VERSION"), encoding="utf-8") as f:
@@ -92,7 +109,8 @@ def cmd_check():
               f"(local {_short()} -> {_short(up)})")
         if ahead != "0":
             print(f"  note: also {ahead} local commit(s) ahead — the pull will "
-                  f"refuse (diverged history); stash or branch them first")
+                  f"refuse (diverged history)")
+            print(_keep_and_reset_hint(up))
         print("  run: okfmem update")
     else:
         print(f"ahead of {up} by {ahead} commit(s); nothing to pull")
@@ -132,8 +150,13 @@ def cmd_update(store_args, yes=False):
         print(pull.stderr.strip(), file=sys.stderr)
         print("error: fast-forward pull failed (diverged history or no upstream).",
               file=sys.stderr)
-        print("  if you have local engine commits, stash or branch them first.",
-              file=sys.stderr)
+        target = f"origin/{default}"
+        ahead = _git("rev-list", "--count", f"{target}..HEAD")
+        count = ahead.stdout.strip() if ahead.returncode == 0 else "0"
+        if count not in ("", "0"):
+            print(f"  '{default}' has {count} local commit(s) not on {target}.",
+                  file=sys.stderr)
+            print(_keep_and_reset_hint(target), file=sys.stderr)
         sys.exit(1)
     after = _short()
 
