@@ -1280,7 +1280,7 @@ class _Planner:
         return parsed
 
     def plan_new(self, where, d, pages):
-        primary = self.by_id[d["id"]]
+        primary = self.by_id.get(d["id"])
         project = self.project_of(where, pages)
         spec = d.get("page") or {}
         if not isinstance(spec, dict):
@@ -1291,6 +1291,8 @@ class _Planner:
             return
         if not _str_or_none(d.get("add")):
             self.problem(where, "`add` must be a string")
+            return
+        if primary is None:
             return
         fields = page_fields(primary["text"]) or {}
         slug = spec.get("slug") or primary["slug"]

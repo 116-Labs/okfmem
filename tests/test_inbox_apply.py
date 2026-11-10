@@ -179,8 +179,15 @@ def _leaky_add(recs):
     return d, "leak gate: private key"
 
 
+def _unknown_new_id(recs):
+    d = _good_decisions(recs)
+    d[1]["id"] = "p99"
+    return d, "unknown id 'p99'"
+
+
 @pytest.mark.parametrize("make", [_uncovered, _double_cover, _missing_target,
-                                  _existing_new_slug, _replace_missing, _leaky_add])
+                                  _existing_new_slug, _replace_missing, _leaky_add,
+                                  _unknown_new_id])
 def test_apply_refuses_a_bad_file_and_writes_nothing(env, make):
     _push(env)
     out_dir, recs = _dump(env)
@@ -318,6 +325,7 @@ def test_apply_in_label_layout_labels_new_pages_and_merges_into_them(env):
 def test_apply_keeps_crlf_endings_from_a_dump_dir_with_a_space(env):
     store = env["store"]
     target = os.path.join(store, "projects", "demo", "existing.md")
+    _git(store, "config", "core.autocrlf", "false")
     _write(target, _read(target).replace("\n", "\r\n"))
     _git(store, "add", "-A")
     _git(store, "commit", "-qm", "crlf page")
