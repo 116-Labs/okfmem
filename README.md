@@ -298,6 +298,7 @@ Headless agent runs on other machines learn things worth keeping, but they never
 okfmem inbox push ./pages --source gaal --repo owner/repo --ref '#12'   # on the worker
 okfmem inbox pull                                                       # list what is pending
 okfmem inbox review                                                     # accept, merge or drop each page
+okfmem inbox review --web [--dir DIR]                                   # same, in a local browser page (127.0.0.1, one-time token); a decisions.json in DIR pre-fills it, against the pending.jsonl beside it
 ```
 
 **`push`** puts the directory's valid OKF pages (frontmatter with `name`, `description`, `type`; anything else is skipped with a line) plus a `meta.json` (source, repo, ref, machine, time) into one parentless commit at `refs/okfmem/inbox/<machine>/<id>` on the store remote. The id comes from the pages' content, so pushing the same pages again adds nothing, and a ref per push means machines never race on a branch. It never touches the store's working tree, branches, `MEMORY.md` or `STATE.md`. **`pull`** fetches those refs and lists the pending pages by project, then slug, with their source, repo, ref and machine. The repo maps to the project of a registered checkout whose `origin` is that repo, else the project named like it.

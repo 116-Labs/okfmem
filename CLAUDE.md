@@ -81,6 +81,7 @@ okfmem reindex --verify       # read-only: link integrity across every MEMORY*.m
 okfmem inbox push <dir> --source NAME   # candidate pages -> refs/okfmem/inbox/<machine>/<id> on the store remote
 okfmem inbox pull             # list pending candidates
 okfmem inbox review           # accept, merge or drop each candidate (interactive)
+okfmem inbox review --web     # same in a local browser page (memory_webui.py shell, webui/)
 okfmem store merge <source> --dry-run   # import another store; differing pages kept as <path>.orphan
 okfmem store split --projects a,b --dest PATH [--delete-source]   # copy (typed SPLIT to also remove)
 okfmem inbox dump --out DIR   # read-only: every pending page -> DIR/pending.jsonl
