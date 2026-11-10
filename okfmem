@@ -31,6 +31,12 @@ Usage:
   okfmem migrate-to-labels [--dry-run] [--store PATH]
                                                  # flatten projects/ into pages/
                                                  # with injected repo labels — #100
+  okfmem store merge <source> [--dry-run] [--yes] [--preserve-history]
+                                                 # import another store; a differing
+                                                 # page is kept as <path>.orphan — #78
+  okfmem store split --projects a,b --dest PATH [--delete-source] [--dry-run] [--yes]
+                                                 # copy projects into another store;
+                                                 # --delete-source asks you to type SPLIT
   okfmem state check [--project P] [--session ID|--since S --hash H]
                                                  # read-only: guard state file
                                                  # against baseline differences
@@ -62,7 +68,8 @@ MODULES = {"backfill": "memory_backfill.py", "init": "memory_init.py",
            "pull": "memory_pull.py", "update": "memory_update.py",
            "graduate": "memory_graduate.py", "reindex": "memory_reindex.py",
            "inbox": "memory_inbox.py", "migrate-to-labels": "memory_migrate.py",
-           "state": "memory_state.py", "find": "memory_find.py"}
+           "state": "memory_state.py", "find": "memory_find.py",
+           "store": "memory_store.py"}
 # Opt-in plugin commands -> plugins/<file>. Loaded ONLY if the file is present,
 # so core install stays harness-agnostic. Several commands may share one plugin.
 PLUGINS = {"index": "memory_search.py", "search": "memory_search.py",
