@@ -25,7 +25,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 MIN_ACCOUNT_AGE_DAYS = 30
 MAX_CHANGED_LINES = 500
@@ -82,7 +82,7 @@ SENSITIVE_PATHS: tuple[str, ...] = (
 
 LEAK_GATE = "scripts/check-leaks.py"
 URL_RE = re.compile(r"https?://", re.IGNORECASE)
-BLOB_RE = re.compile(r"[A-Za-z0-9+/=]{%d,}" % (LONG_BLOB_CHARS + 1))
+BLOB_RE = re.compile(rf"[A-Za-z0-9+/=]{{{LONG_BLOB_CHARS + 1},}}")
 OBFUSCATION_MARKERS: list[tuple[str, re.Pattern[str], re.Pattern[str] | None]] = [
     (
         "a base64 decode next to exec/eval",
@@ -111,11 +111,11 @@ def account_age_days(created_at: str | None, now: datetime) -> float | None:
     if not created_at:
         return None
     try:
-        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        created = datetime.fromisoformat(created_at)
     except (TypeError, ValueError):
         return None
     if created.tzinfo is None:
-        created = created.replace(tzinfo=timezone.utc)
+        created = created.replace(tzinfo=UTC)
     return (now - created).total_seconds() / 86400
 
 
@@ -256,9 +256,7 @@ def vet(
     ]
 
 
-def comment_spam_reason(
-    body: str, created_at: str | None, now: datetime
-) -> str | None:
+def comment_spam_reason(body: str, created_at: str | None, now: datetime) -> str | None:
     """Why a comment should be hidden, or None. An unknown age skips the age gate."""
     age = account_age_days(created_at, now)
     if age is not None and age < MIN_ACCOUNT_AGE_DAYS:
@@ -513,7 +511,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("GITHUB_TOKEN is not set")
     api = GitHub(token)
     event = _load_event()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     if args.comment_check:
         comment_check(api, event, now, os.environ.get("GITHUB_OUTPUT"))

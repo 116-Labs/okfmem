@@ -1,16 +1,15 @@
 import os
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
-
 from conftest import ROOT
 
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
-import vet_pr  # noqa: E402
+import vet_pr
 
-NOW = datetime(2026, 11, 10, tzinfo=timezone.utc)
+NOW = datetime(2026, 11, 10, tzinfo=UTC)
 WORKFLOWS = os.path.join(ROOT, ".github", "workflows")
 
 
@@ -54,7 +53,7 @@ def changed(name, added=("x = 1",), status="modified", **over):
         "additions": len(lines),
         "deletions": 0,
         "changes": len(lines),
-        "patch": "@@ -1,0 +1,%d @@\n" % len(lines) + "\n".join(lines),
+        "patch": f"@@ -1,0 +1,{len(lines)} @@\n" + "\n".join(lines),
     }
     data.update(over)
     return data
@@ -323,7 +322,7 @@ def test_escalate_labels_and_comments_and_leaves_runs_pending():
     assert verdict == "escalate"
     writes = api.writes()
     assert ("POST", "/repos/o/r/issues/7/labels", {"labels": ["needs-human"]}) in writes
-    body = [b for m, p, b in writes if p == "/repos/o/r/issues/7/comments"][0]["body"]
+    body = next(b for m, p, b in writes if p == "/repos/o/r/issues/7/comments")["body"]
     assert "4 days old" in body
     assert not any(p.endswith("/approve") for _, p, _ in writes)
     assert not any("/actions/runs" in p for _, p, _ in api.calls)
@@ -336,7 +335,7 @@ def test_reject_closes_labels_invalid_and_comments():
     writes = api.writes()
     assert ("POST", "/repos/o/r/issues/7/labels", {"labels": ["invalid"]}) in writes
     assert ("PATCH", "/repos/o/r/pulls/7", {"state": "closed"}) in writes
-    body = [b for m, p, b in writes if p == "/repos/o/r/issues/7/comments"][0]["body"]
+    body = next(b for m, p, b in writes if p == "/repos/o/r/issues/7/comments")["body"]
     assert "closed automatically" in body
 
 
@@ -426,7 +425,7 @@ def _run_lines(text):
 
 def test_vet_workflow_never_runs_pr_code_or_interpolates_pr_text():
     text = _read("vet-fork-pr.yml")
-    assert re.search(r"^on:\n  pull_request_target:", text, re.M)
+    assert re.search(r"^on:\n  pull_request_target:", text, re.MULTILINE)
     assert "ref:" not in text
     runs = _run_lines(text)
     assert runs and all("${{" not in line for line in runs)
@@ -438,7 +437,7 @@ def test_vet_workflow_skips_same_repo_branches_and_trusted_authors():
     text = _read("vet-fork-pr.yml")
     assert "github.event.pull_request.head.repo.full_name != github.repository" in text
     assert (
-        "!contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), "
+        '!contains(fromJSON(\'["OWNER","MEMBER","COLLABORATOR"]\'), '
         "github.event.pull_request.author_association)"
     ) in text
 
