@@ -32,6 +32,8 @@ elif args[:2] == ["release", "view"]:
         print(os.environ.get("GH_LATEST", ""))
 elif args[:2] == ["pr", "create"]:
     print("https://example.invalid/pull/1")
+elif args[:2] == ["release", "create"] and os.environ.get("GH_FAIL_RELEASE"):
+    sys.exit("HTTP 401: Bad credentials")
 """
 
 
@@ -107,6 +109,14 @@ def test_status_suggests_major_on_breaking_marker(repo):
     (repo["work"] / "c.txt").write_text("c\n")
     _git(repo["work"], "add", "c.txt")
     _git(repo["work"], "commit", "-q", "-m", "feat(z)!: drop old flag")
+    assert "suggested    major -> 1.0.0" in rel(repo, "status").stdout
+
+
+def test_status_suggests_major_on_breaking_footer_only(repo):
+    (repo["work"] / "c.txt").write_text("c\n")
+    _git(repo["work"], "add", "c.txt")
+    _git(repo["work"], "commit", "-q", "-m", "feat(z): drop --foo",
+         "-m", "BREAKING CHANGE: --foo is removed")
     assert "suggested    major -> 1.0.0" in rel(repo, "status").stdout
 
 
@@ -211,6 +221,28 @@ def test_publish_tags_the_version_commit_and_creates_release(repo):
     assert tagged == vsha
     log = repo["log"].read_text()
     assert "release create v0.3.0 --repo o/r --verify-tag --title v0.3.0 — a and b --notes-file" in log
+
+
+def test_publish_failed_release_prints_only_the_owed_command(repo):
+    _merge_release(repo)
+    p = rel(repo, "publish", "0.3.0", "--notes", str(repo["notes"]), "--yes",
+            env={"GH_FAIL_RELEASE": "1"})
+    assert p.returncode == 1
+    assert "stopped at step 3 of 3" in p.stderr
+    assert "gh release create v0.3.0 --repo o/r --verify-tag" in p.stderr
+    assert "git tag -a" not in p.stderr and "git push" not in p.stderr
+    assert remote_has(repo, "refs/tags/v0.3.0")
+
+
+def test_publish_without_terminal_or_yes_prints_every_step(repo):
+    _merge_release(repo)
+    p = rel(repo, "publish", "0.3.0", "--notes", str(repo["notes"]))
+    assert p.returncode == 0, p.stderr
+    assert "not published" in p.stdout
+    assert "git tag -a v0.3.0" in p.stdout and "git push origin v0.3.0" in p.stdout
+    assert "gh release create v0.3.0" in p.stdout
+    assert not remote_has(repo, "refs/tags/v0.3.0")
+    assert "release create" not in repo["log"].read_text()
 
 
 def test_publish_refuses_before_merge(repo):

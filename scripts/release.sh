@@ -98,14 +98,14 @@ current_version() { tr -d '[:space:]' < VERSION; }
 
 latest_tag() { git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1; }
 
-# Subjects of the commits since the latest tag (or all, with none).
-commits_since() {
+# The commits since the latest tag (or all, with none), in git log format $1.
+log_since() {
   local tag
   tag=$(latest_tag)
   if [ -n "$tag" ]; then
-    git log --format='%h %s' "$tag..${1:-HEAD}"
+    git log --format="$1" "$tag..HEAD"
   else
-    git log --format='%h %s' "${1:-HEAD}"
+    git log --format="$1" HEAD
   fi
 }
 
@@ -154,7 +154,7 @@ cmd_status() {
   git fetch -q "$REMOTE" --tags || say "warning: fetch failed; showing local state"
   cur=$(current_version)
   tag=$(latest_tag)
-  lines=$(commits_since HEAD)
+  lines=$(log_since '%h %s')
   echo "VERSION      $cur"
   echo "latest tag   ${tag:-(none)}"
   if [ -z "$lines" ]; then
@@ -181,6 +181,8 @@ cmd_status() {
   done
   local kind
   kind=$(printf '%s\n' "$lines" | suggest_bump)
+  # A squash merge keeps the branch's commit body, so the footer alone can mark a break.
+  if grep -Eq '^BREAKING[ -]CHANGE:' <<<"$(log_since %B)"; then kind=major; fi
   echo
   echo "suggested    $kind -> $(bump "$cur" "$kind")"
 }
@@ -278,9 +280,11 @@ cmd_publish() {
   say "tag v$ver -> ${sha:0:12} ($subject)"
   say "release title: $title"
   if confirm "Tag v$ver, push it and publish the release on $slug?"; then
-    run git tag -a "v$ver" -m "$title" "$sha"
-    run git push -q "$REMOTE" "v$ver"
-    run gh release create "v$ver" --repo "$slug" --verify-tag --title "$title" --notes-file "$NOTES"
+    # A re-run refuses once the tag exists, so a failed write hands over the rest by hand.
+    run git tag -a "v$ver" -m "$title" "$sha" || publish_owed 1
+    run git push -q "$REMOTE" "v$ver" || publish_owed 2
+    run gh release create "v$ver" --repo "$slug" --verify-tag --title "$title" \
+      --notes-file "$NOTES" || publish_owed 3
     if [ "$DRY" = 0 ]; then
       local latest
       latest=$(gh release view --repo "$slug" --json tagName --jq .tagName)
@@ -289,11 +293,23 @@ cmd_publish() {
     fi
   else
     say "not published. To finish by hand:"
-    printf '  git tag -a v%s -m %s %s\n' "$ver" "$(q "$title")" "$sha"
-    printf '  git push %s v%s\n' "$REMOTE" "$ver"
-    printf '  gh release create v%s --repo %s --verify-tag --title %s --notes-file %s\n' \
-      "$ver" "$slug" "$(q "$title")" "$(q "$NOTES")"
+    publish_steps 1
   fi
+}
+
+# Print publish's write steps from step $1 (1 tag, 2 push, 3 release) as commands.
+# Reads cmd_publish's locals ver, title, sha and slug.
+publish_steps() {
+  if [ "$1" -le 1 ]; then printf '  git tag -a v%s -m %s %s\n' "$ver" "$(q "$title")" "$sha"; fi
+  if [ "$1" -le 2 ]; then printf '  git push %s v%s\n' "$REMOTE" "$ver"; fi
+  printf '  gh release create v%s --repo %s --verify-tag --title %s --notes-file %s\n' \
+    "$ver" "$slug" "$(q "$title")" "$(q "$NOTES")"
+}
+
+publish_owed() {
+  echo "release: publish stopped at step $1 of 3. To finish by hand:" >&2
+  publish_steps "$1" >&2
+  exit 1
 }
 
 # ---------------------------------------------------------------- main
