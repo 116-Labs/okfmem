@@ -20,6 +20,12 @@ the maintainer without letting them anywhere near a loaded page:
       name/description, then accept / merge / drop it. A push whose pages are
       all handled has its ref deleted on the remote. Ends with `okfmem sync`.
 
+  okfmem inbox import [--into STORE] --non-interactive --policy FILE [--json]
+      Import, without a terminal, only the candidates a written policy passes
+      (allowed types and repos, size cap, leak gate always on, no existing slug);
+      the rest stay in the inbox with a reason each. `--into` names an attached
+      store; imported pages carry source/machine/ref/imported_at/imported_by (#141).
+
 Never automatic: `okfmem pull`, `consolidate` and the Stop hook fetch only the
 default refspec (branches), so nothing in the inbox reaches a loaded page
 without `inbox review`.
@@ -28,7 +34,9 @@ Store location: --store, else $OKFMEM_STORE, else ~/okfmem-store.
 """
 import argparse
 import difflib
+import getpass
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -45,6 +53,7 @@ from memory_init import (  # noqa: E402
     _resolve_aliases,
     _resolve_overrides,
     _seed_store_project,
+    attached_stores,
     compile_view,
     has_layout_marker,
     resolve_project,
@@ -618,6 +627,238 @@ def record_handled(store, push_, handled, counts, out):
             out(f"  could not update {push_['ref']} on the remote: {err}")
 
 
+PROVENANCE_KEYS = ("source", "machine", "ref", "imported_at", "imported_by")
+
+
+def default_importer():
+    try:
+        return getpass.getuser() or "unknown"
+    except (KeyError, OSError, ImportError):
+        return "unknown"
+
+
+def _yaml_scalar(value):
+    """Untrusted text as one double-quoted frontmatter scalar: no newline or
+    quote can escape it into another key."""
+    return json.dumps(" ".join(str(value).split()), ensure_ascii=False)
+
+
+def with_provenance(text, meta, imported_by, now=None):
+    """`text` with source/machine/ref/imported_at/imported_by set in its
+    frontmatter. Candidate-supplied values for those keys are replaced, so a
+    page cannot claim a provenance it was not imported with."""
+    fm = find_frontmatter(text)
+    if not fm:
+        raise ValueError("page has no frontmatter")
+    eol, body_start, body_end = fm
+    now = now or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    values = {"source": meta.get("source") or "unknown",
+              "machine": meta.get("machine") or "unknown",
+              "ref": meta.get("ref") or "unknown",
+              "imported_at": now, "imported_by": imported_by}
+    lines = text[body_start:body_end].split(eol)
+    if lines and lines[-1] == "":
+        lines.pop()
+    keep = [ln for ln in lines
+            if not any(re.match(rf"{k}[ \t]*:", ln) for k in PROVENANCE_KEYS)]
+    keep += [f"{k}: {_yaml_scalar(values[k])}" for k in PROVENANCE_KEYS]
+    return text[:body_start] + eol.join(keep) + eol + text[body_end:]
+
+
+def with_provenance_page(page, meta, imported_by):
+    return dict(page, text=with_provenance(page["text"], meta, imported_by))
+
+
+# ---------------------------------------------------------------------------
+# non-interactive import under a written policy
+# ---------------------------------------------------------------------------
+POLICY_KEYS = ("allowed_types", "allowed_repos", "max_page_bytes")
+_POLICY_LIST_KEYS = ("allowed_types", "allowed_repos")
+
+
+class PolicyError(ValueError):
+    """The policy file is missing a key, has an unknown one, or is malformed."""
+
+
+def _policy_item(raw, where):
+    v = _unquote(raw.strip())
+    if not v or any(c in v for c in "[]{},#"):
+        raise PolicyError(f"{where}: bad list item {raw.strip()!r}")
+    return v
+
+
+def parse_policy(text):
+    """Strict YAML subset: `key: [a, b]` or a `- a` block for the two allowlists,
+    `max_page_bytes: N`, `#` comment lines. Every key is required, none may
+    repeat, and anything else refuses the import."""
+    values, current = {}, None
+    for n, line in enumerate(text.splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        where = f"line {n}"
+        item = re.match(r"^\s+-\s+(.*)$", line)
+        if item:
+            if current not in _POLICY_LIST_KEYS:
+                raise PolicyError(f"{where}: list item outside an allowlist")
+            values[current].append(_policy_item(item.group(1), where))
+            continue
+        m = re.match(r"^([A-Za-z_][\w-]*):[ \t]*(.*?)\s*$", line)
+        if not m:
+            raise PolicyError(f"{where}: cannot parse {line.strip()[:40]!r}")
+        key, rest = m.groups()
+        if key not in POLICY_KEYS:
+            raise PolicyError(f"unknown key '{key}'")
+        if key in values:
+            raise PolicyError(f"duplicate key '{key}'")
+        current = key
+        if key == "max_page_bytes":
+            if not re.fullmatch(r"[1-9][0-9]*", rest):
+                raise PolicyError(f"'{key}' must be a positive integer")
+            values[key] = int(rest)
+        elif rest.startswith("[") and rest.endswith("]"):
+            inner = rest[1:-1].strip()
+            values[key] = [_policy_item(s, where) for s in inner.split(",")] if inner else []
+        elif rest == "":
+            values[key] = []
+        else:
+            raise PolicyError(f"'{key}' must be a list")
+    for key in POLICY_KEYS:
+        if key not in values:
+            raise PolicyError(f"missing key '{key}'")
+    return values
+
+
+def load_policy(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return parse_policy(f.read())
+    except (OSError, UnicodeDecodeError) as e:
+        raise PolicyError(f"cannot read policy {path}: {e}")
+
+
+SECRET_PATTERNS = (
+    ("private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("AWS access key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")),
+    ("API token", re.compile(r"\b(?:sk|xox[abp])-[A-Za-z0-9-]{20,}")),
+    ("credential assignment",
+     re.compile(r"(?i)\b(?:password|passwd|secret|api[_-]?key|token)\s*[:=]\s*['\"]?[A-Za-z0-9/+_.-]{12,}")),
+)
+
+
+def _repo_leak_patterns():
+    """Patterns of the repo's own leak gate, when this engine runs from a
+    checkout that ships scripts/check-leaks.py."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "scripts", "check-leaks.py")
+    if not os.path.isfile(path):
+        return []
+    try:
+        spec = importlib.util.spec_from_file_location("okfmem_check_leaks", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return list(mod.PATTERNS)
+    except Exception:
+        return []
+
+
+def leak_hits(text):
+    """Labels of every secret or private-string pattern the page text matches."""
+    return [label for label, pat in (*SECRET_PATTERNS, *_repo_leak_patterns())
+            if pat.search(text)]
+
+
+def policy_reasons(policy, push_, page, project, dest_pages):
+    """One reason per failed check; empty means the candidate may be imported."""
+    reasons = []
+    typ = _unquote(page["fields"].get("type") or "").lower()
+    if typ not in {t.lower() for t in policy["allowed_types"]}:
+        reasons.append(f"type '{typ}' is not allowed")
+    repo = (push_["meta"].get("repo") or "").lower()
+    allowed = {r.lower() for r in policy["allowed_repos"]}
+    if not repo:
+        reasons.append("no repo: label (push carries no repo)")
+    elif repo not in allowed and (project or "").lower() not in allowed:
+        reasons.append(f"repo '{repo}' is not allowed")
+    if not project:
+        reasons.append("repo resolves to no project in the target store")
+    size = len(page["text"].encode("utf-8"))
+    if size > policy["max_page_bytes"]:
+        reasons.append(f"size {size} bytes exceeds cap {policy['max_page_bytes']}")
+    hits = leak_hits(page["text"])
+    if hits:
+        reasons.append("leak gate: " + ", ".join(hits))
+    if page["slug"] in dest_pages:
+        reasons.append(f"slug '{page['slug']}' already exists — hold for review")
+    return reasons
+
+
+def import_policy(store, dest, policy, imported_by, out=print, do_sync=True):
+    """Import every pending candidate that passes `policy` into `dest`; the rest
+    stay in the inbox. Returns {imported, held, skipped, held_pages}."""
+    result = {"imported": 0, "held": 0, "skipped": 0, "held_pages": []}
+    ok, err = fetch_inbox(store)
+    if not ok:
+        out(f"okfmem inbox import: fetch failed ({err or 'offline?'}) — "
+            "importing what was fetched before.")
+    try:
+        pushes = pending(store)
+    except InboxReadError as e:
+        out(f"okfmem inbox import: could not read the inbox ({_safe(e)}) — "
+            "nothing imported or deleted.")
+        result["error"] = str(e)
+        return result
+    changed, counts = set(), {"accepted": 0, "merged": 0, "dropped": 0, "deleted": 0}
+    try:
+        for push_ in pushes:
+            project = push_["project"]
+            handled = set()
+            for page in push_["pages"]:
+                dest_pages = project_pages(dest, project) if project else {}
+                reasons = policy_reasons(policy, push_, page, project, dest_pages)
+                if not reasons:
+                    path = accept_page(dest, project,
+                                       with_provenance_page(page, push_["meta"], imported_by))
+                    if path is None:
+                        reasons = [f"slug '{page['slug']}' already exists — hold for review"]
+                if reasons:
+                    result["held"] += 1
+                    result["held_pages"].append({"ref": push_["ref"], "page": page["name"],
+                                                 "reasons": reasons})
+                    out(_safe(f"  held {page['name']} ({push_['ref']}): " + "; ".join(reasons)))
+                    continue
+                handled.add(page["name"])
+                changed.add(project)
+                result["imported"] += 1
+                out(f"  imported -> {os.path.relpath(path, dest)}")
+            record_handled(store, push_, handled, counts, out)
+            if not push_["pages"]:
+                result["skipped"] += 1
+    finally:
+        if changed and has_layout_marker(dest):
+            _refresh_project_views(dest, changed, out)
+    out(f"okfmem inbox import: imported {result['imported']}, held {result['held']}, "
+        f"skipped {result['skipped']}")
+    if do_sync and result["imported"]:
+        res = sync_store(dest, f"okfmem inbox: imported {result['imported']} ({imported_by})")
+        out(f"okfmem sync: {res['reason']}")
+        if res["push_error"]:
+            out(f"  push failed: {res['push_error']}")
+    return result
+
+
+def resolve_into(store, name):
+    """Path of the store attached under `name`, or (None, why). Fail closed."""
+    attached = attached_stores(store)
+    for a in attached:
+        if a["name"].casefold() == name.casefold():
+            if not os.path.isdir(os.path.join(a["path"], ".git")):
+                return None, f"attached store '{a['name']}' is not a git clone at {a['path']}"
+            return a["path"], None
+    names = ", ".join(a["name"] for a in attached) or "none"
+    return None, f"no attached store named '{name}' (attached: {names})"
+
+
 def show_page(project, push_, page, flags, out):
     out("")
     out(_safe(f"{project}/{page['slug']}  {_origin_line(push_['meta'])}"))
@@ -632,9 +873,13 @@ def show_page(project, push_, page, flags, out):
         out(f"  ! {_safe(fl)}")
 
 
-def review_page(store, project, push_, page, all_pending, decide, counts, out, today):
-    """Show one candidate and return the action taken, or None if skipped."""
-    existing = project_pages(store, project)
+def review_page(store, project, push_, page, all_pending, decide, counts, out, today,
+                dest_store=None, imported_by=None):
+    """Show one candidate and return the action taken, or None if skipped.
+    Accepted and merged pages land in `dest_store` (default: `store`)."""
+    dest_store = dest_store or store
+    imported_by = imported_by or default_importer()
+    existing = project_pages(dest_store, project)
     others = [(f"{q['slug']} ({o['meta'].get('machine') or '?'})", q["fields"])
               for o, q in all_pending if q is not page]
     flags = flags_for(page, existing, others)
@@ -642,21 +887,22 @@ def review_page(store, project, push_, page, all_pending, decide, counts, out, t
     while True:
         action, arg = decide(push_, page, flags)
         if action == "accept":
-            dest = accept_page(store, project, page)
+            stamped = with_provenance_page(page, push_["meta"], imported_by)
+            dest = accept_page(dest_store, project, stamped)
             if dest is None:
                 out(f"  {page['name']} already exists in {project} — "
                     "merge or drop it instead")
                 continue
-            out(f"  accepted -> {os.path.relpath(dest, store)}")
+            out(f"  accepted -> {os.path.relpath(dest, dest_store)}")
             counts["accepted"] += 1
         elif action == "merge":
             slug = (arg or "").removesuffix(".md")
-            dest = (merge_page(store, project, slug, page, push_["meta"], today)
+            dest = (merge_page(dest_store, project, slug, page, push_["meta"], today)
                     if PAGE_NAME_RE.match(slug + ".md") else None)
             if dest is None:
                 out(f"  no page {_safe(slug)!r} in {project}")
                 continue
-            out(f"  merged into {os.path.relpath(dest, store)}")
+            out(f"  merged into {os.path.relpath(dest, dest_store)}")
             counts["merged"] += 1
         elif action == "drop":
             out("  dropped")
@@ -691,10 +937,13 @@ def _refresh_project_views(store, projects, out):
             out(f"  could not rebuild view for {_safe(project)}: {_safe(exc)}")
 
 
-def review(store, decide, ask_project, out=print, today=None, do_sync=True):
+def review(store, decide, ask_project, out=print, today=None, do_sync=True,
+           dest=None, imported_by=None):
     """Walk every pending page. `decide(push, page, flags)` returns one of
     ("accept", None), ("merge", slug), ("drop", None), ("skip", None);
-    `ask_project(repo)` names a project when the repo resolves to none."""
+    `ask_project(repo)` names a project when the repo resolves to none.
+    The inbox is read from `store`; pages are written into `dest` (default: `store`)."""
+    dest = dest or store
     today = today or datetime.now(timezone.utc).date().isoformat()
     ok, err = fetch_inbox(store)
     if not ok:
@@ -728,7 +977,7 @@ def review(store, decide, ask_project, out=print, today=None, do_sync=True):
             try:
                 for page in push_["pages"]:
                     action = review_page(store, project, push_, page, all_pending,
-                                         decide, counts, out, today)
+                                         decide, counts, out, today, dest, imported_by)
                     if action:
                         handled.add(page["name"])
                     if action in ("accept", "merge"):
@@ -736,14 +985,14 @@ def review(store, decide, ask_project, out=print, today=None, do_sync=True):
             finally:
                 record_handled(store, push_, handled, counts, out)
     finally:
-        if changed_projects and has_layout_marker(store):
-            _refresh_project_views(store, changed_projects, out)
+        if changed_projects and has_layout_marker(dest):
+            _refresh_project_views(dest, changed_projects, out)
     out("")
     out(f"okfmem inbox review: accepted {counts['accepted']}, merged "
         f"{counts['merged']}, dropped {counts['dropped']}; "
         f"{counts['deleted']} push(es) cleared")
     if do_sync and (counts["accepted"] or counts["merged"]):
-        res = sync_store(store, f"okfmem inbox: accepted {counts['accepted']}, "
+        res = sync_store(dest, f"okfmem inbox: accepted {counts['accepted']}, "
                                 f"merged {counts['merged']}")
         out(f"okfmem sync: {res['reason']}")
         if res["push_error"]:
@@ -789,6 +1038,33 @@ def _isatty():
         return False
 
 
+def _run_policy_import(store, dest, args):
+    """Exit code for `inbox import --non-interactive`; --json keeps stdout to one object."""
+    log = (lambda m: print(m, file=sys.stderr)) if args.json else print
+
+    def fail(code, message):
+        log(f"okfmem inbox import: {message}")
+        if args.json:
+            print(json.dumps({"error": " ".join(message.split())}))
+        return code
+
+    if not args.policy:
+        return fail(2, "--non-interactive needs --policy FILE.")
+    try:
+        policy = load_policy(args.policy)
+    except PolicyError as e:
+        return fail(2, f"policy refused: {e}")
+    if not git_clean(dest):
+        return fail(3, "store working tree is dirty — run `okfmem sync` first.")
+    imported_by = args.imported_by or default_importer()
+    result = import_policy(store, dest, policy, imported_by, out=log)
+    if result.get("error"):
+        return fail(1, result["error"])
+    if args.json:
+        print(json.dumps({k: result[k] for k in ("imported", "held", "skipped", "held_pages")}))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(prog="okfmem inbox",
                                  description="Candidate pages pushed from other "
@@ -809,8 +1085,28 @@ def main():
     q.add_argument("--store", default=argparse.SUPPRESS)
     r = sub.add_parser("review", help="accept, merge or drop each pending page")
     r.add_argument("--store", default=argparse.SUPPRESS)
+    r.add_argument("--into", metavar="STORE",
+                   help="import into this attached store instead of the home store")
+    im = sub.add_parser("import", help="import pending pages, interactively or "
+                                       "non-interactively under a policy")
+    im.add_argument("--store", default=argparse.SUPPRESS)
+    im.add_argument("--into", metavar="STORE",
+                    help="import into this attached store instead of the home store")
+    im.add_argument("--non-interactive", action="store_true",
+                    help="import only candidates that pass --policy")
+    im.add_argument("--policy", metavar="FILE", help="written import policy (YAML)")
+    im.add_argument("--imported-by", metavar="NAME",
+                    help="who is importing (default: the current user)")
+    im.add_argument("--json", action="store_true",
+                    help="print {imported, held, skipped, held_pages} on stdout")
     args = ap.parse_args()
     store = os.path.abspath(os.path.expanduser(args.store))
+    dest = store
+    if args.cmd in ("review", "import") and args.into:
+        dest, why = resolve_into(store, args.into)
+        if dest is None:
+            print(f"okfmem inbox {args.cmd}: {why}", file=sys.stderr)
+            sys.exit(2)
 
     if args.cmd == "push":
         if not args.json:
@@ -830,16 +1126,24 @@ def main():
         sys.exit(code)
     if args.cmd == "pull":
         sys.exit(pull(store))
-    if not _isatty():
-        print("okfmem inbox review: interactive only — run it in a terminal: "
-              f"okfmem inbox review --store {store}")
+    non_interactive = args.cmd == "import" and args.non_interactive
+    if args.cmd == "import" and (args.policy or args.json) and not non_interactive:
+        print("okfmem inbox import: --policy and --json need --non-interactive.",
+              file=sys.stderr)
         sys.exit(2)
-    if not git_clean(store):
-        print("okfmem inbox review: store working tree is dirty — run "
+    if non_interactive:
+        sys.exit(_run_policy_import(store, dest, args))
+    if not _isatty():
+        print(f"okfmem inbox {args.cmd}: interactive only — run it in a terminal: "
+              f"okfmem inbox {args.cmd} --store {store}")
+        sys.exit(2)
+    if not git_clean(dest):
+        print(f"okfmem inbox {args.cmd}: store working tree is dirty — run "
               "`okfmem sync` first so the review's commit holds only its own pages.")
         sys.exit(3)
     try:
-        review(store, _interactive_decide, _interactive_project)
+        review(store, _interactive_decide, _interactive_project, dest=dest,
+               imported_by=getattr(args, "imported_by", None))
     except KeyboardInterrupt:
         print("\nokfmem inbox review: interrupted — handled pages stay written; "
               "run `okfmem sync` to commit them.")
