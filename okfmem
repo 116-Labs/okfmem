@@ -24,8 +24,10 @@ Usage:
   okfmem --version                               # also `okfmem version`
   okfmem inbox push <dir> --source NAME [--repo R] [--ref T] [--machine M] [--json]
   okfmem inbox pull                              # candidate pages pushed from
-  okfmem inbox review                            # other machines; nothing is
+  okfmem inbox review [--into STORE]             # other machines; nothing is
                                                  # imported without review — #84
+  okfmem inbox import [--into STORE] [--non-interactive --policy FILE [--json]]
+                                                 # policy import into an attached store — #141
   okfmem migrate-to-labels [--dry-run] [--store PATH]
                                                  # flatten projects/ into pages/
                                                  # with injected repo labels — #100
