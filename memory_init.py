@@ -113,12 +113,13 @@ MARKER_OPEN = (
 MARKER_CLOSE = "<!-- /MEMORY-POINTER -->"
 
 POINTER_BODY = """## Memory
-Durable project memory: `~/okfmem-store/projects/<PROJECT>/`
+Durable project memory: `~/okfmem-store/views/<PROJECT>/` (pages live in `~/okfmem-store/pages/`)
 `<PROJECT>` = basename of the git root, unless overridden in `~/okfmem-store/registry.json`.
 - **At session start, eagerly read `STATE.md`** (bounded active-state snapshot) and
   `MEMORY.md` (the topic index) from that dir. Harnesses without native memory
   auto-load (e.g. Antigravity) MUST read both up front — do not wait to be asked.
-- To recall a topic: grep the memory dir for keywords, then open the matching `<slug>.md`.
+- To recall a topic: run `okfmem find <terms>` (add `--repo <PROJECT>` to narrow), then
+  open the matching page. MEMORY.md does not list every page.
   Do NOT eager-read every page.
 - Pages are OKF markdown. Frontmatter (`pinned`/`importance`/`status`/`access_count`) is
   maintenance metadata — ignore it when reasoning."""
@@ -1268,6 +1269,7 @@ def upsert_pointer(path, dry_run, store=None):
         f"{MARKER_OPEN}\n## Memory\n"
         f'Use the private store at "{store}". At session start, run okfmem pull --quiet with --store set to that exact path (fail open), then okfmem init --resolve-project with the same --store. Quote the path using your current shell.\n'
         "Read only STATE.md and MEMORY.md from the returned memory_dir before starting work; open durable pages on demand.\n"
+        f'To recall a topic, run okfmem find <terms> --store "{store}" before answering; MEMORY.md does not list every page.\n'
         "If uninitialized, run okfmem init from this repository. Use okfmem-save to save active state and durable insights.\n"
         f"{MARKER_CLOSE}"
     )
