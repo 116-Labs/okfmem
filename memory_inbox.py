@@ -1994,7 +1994,11 @@ def main():
                     print(review_walkthrough_text().rstrip())
                     sys.exit(0)
                 else:
-                    sys.exit(review_walkthrough(store, dest=dest, into=args.into))
+                    try:
+                        code = review_walkthrough(store, dest=dest, into=args.into)
+                    except KeyboardInterrupt:
+                        code = 130
+                    sys.exit(code)
 
     if not _isatty():
         print(no_terminal_hint(args.cmd, store, args.into))

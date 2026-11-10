@@ -498,6 +498,8 @@ def check_inbox_nudge(store, quiet=False):
             except OSError:
                 pass
         try:
+            import memory_init as mi
+            mi.ensure_store_gitignore(os.path.join(store, ".gitignore"), dry_run=False)
             os.makedirs(okfmem_dir, exist_ok=True)
             with open(nudge_file, "w", encoding="utf-8") as f:
                 f.write(today)

@@ -89,3 +89,46 @@ def test_inbox_review_walkthrough_tty_option_1(env, monkeypatch, capsys):
     assert exc.value.code == 0
     captured = capsys.readouterr()
     assert "Run /okfmem-inbox in your agent harness" in captured.out
+
+
+def test_inbox_review_walkthrough_ctrl_c_exits_130(env, monkeypatch):
+    _bulk_inbox(env["store"], 12)
+    monkeypatch.setattr(mx, "_isatty", lambda: True)
+
+    def boom(_):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", boom)
+    monkeypatch.setattr(sys, "argv", ["memory_inbox.py", "review", "--store", env["store"]])
+    with pytest.raises(SystemExit) as exc:
+        mx.main()
+    assert exc.value.code == 130
+
+
+def test_inbox_review_walkthrough_option_2_starts_web_review(env, monkeypatch):
+    _bulk_inbox(env["store"], 12)
+    calls = []
+    monkeypatch.setattr(mx, "_isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _: "2")
+    monkeypatch.setattr(mx, "git_clean", lambda d: True)
+    monkeypatch.setattr(mx, "review_web",
+                        lambda store, work, confirm, dest=None, into=None:
+                        calls.append((store, dest, into)) or 0)
+    assert mx.review_walkthrough(env["store"], into="proj") == 0
+    assert calls == [(env["store"], None, "proj")]
+
+
+def test_inbox_review_walkthrough_option_2_dirty_tree_exits_3(env, monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "2")
+    monkeypatch.setattr(mx, "git_clean", lambda d: False)
+    monkeypatch.setattr(mx, "review_web", lambda *a, **k: pytest.fail("must not start"))
+    assert mx.review_walkthrough(env["store"]) == 3
+
+
+def test_quiet_nudge_keeps_store_tree_clean(env):
+    _bulk_inbox(env["store"], 14)
+    store = env["store"]
+    mp.check_inbox_nudge(store, quiet=True)
+    out = subprocess.run(["git", "-C", store, "status", "--porcelain"],
+                         capture_output=True, text=True).stdout
+    assert ".okfmem" not in out
