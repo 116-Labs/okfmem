@@ -348,6 +348,19 @@ Attaching a store is the trust decision: its pages enter your compiled views wit
 *   **Ownership.** `STATE.md` always comes from your store. `okfmem consolidate` decays and archives only your store's pages; an attached store's owners maintain it.
 *   **Sync.** `okfmem pull` pulls your store, then each attached store; one that fails is reported and the rest are still pulled. A store that is not cloned yet is reported with its `git clone` command. `okfmem status` lists every attached store with its last fetch.
 
+### Pulling and syncing as an automation
+
+A caller with its own short-lived token, such as a GitHub App installation token, can pull and sync a store without the machine user's git credentials:
+
+```bash
+OKFMEM_GIT_TOKEN=<token> okfmem pull --store ~/okfmem-team
+OKFMEM_GIT_TOKEN=<token> okfmem sync --store ~/okfmem-team -m "<msg>" --author "bot <bot@users.noreply.github.com>"
+```
+
+*   **Token.** `OKFMEM_GIT_TOKEN` authenticates the HTTPS fetch and push of the store named by `--store`. An attached store pulled beside it takes only `OKFMEM_GIT_TOKEN_<NAME>`, its name upper-cased with every character other than a letter or digit turned into `_` (`team-a` reads `OKFMEM_GIT_TOKEN_TEAM_A`), so a token never goes to a remote it was not meant for. When two attached names map to the same variable (`team-a` and `team.a`), neither store gets it: both are pulled without the token, and `okfmem pull` reports the clash (even with `--quiet`) and exits 1 until one is renamed. The token reaches git through a one-shot credential helper for that call only. It is never written to `.git/config` or a credential store, and while it is in use your other credential helpers are not asked.
+*   **Author.** `--author "name <email>"`, else `OKFMEM_GIT_AUTHOR`, sets the author and committer of that one sync commit. Your git identity is left unchanged.
+*   **Failures.** When a token is set and the fetch or push fails, the command exits 1 with one line naming the store and the failing step. The token is never printed. Without a token, an unreachable remote still exits 0, as before.
+
 ---
 Design & research: the full design, decay math, prior-art survey, and phased plan
 live in the tracked issues — [#1](https://github.com/116-Labs/okfmem/issues/1)

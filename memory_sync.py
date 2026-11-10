@@ -49,6 +49,11 @@ Guards:
   - No-op + clean return when nothing is staged (no empty commits) and
     nothing was remote-ahead (no spurious rebase).
 
+Caller-supplied credentials (#140): `$OKFMEM_GIT_TOKEN` authenticates the
+store's HTTPS fetch and push through a one-shot credential helper, and
+`--author "name <email>"` (else `$OKFMEM_GIT_AUTHOR`) authors that one commit.
+Neither is ever written to `.git/config` or a credential store.
+
 Store location: --store, else $OKFMEM_STORE, else ~/okfmem-store.
 """
 
@@ -78,6 +83,73 @@ def _git(store, *args, env=None, timeout=120, encoding=None):
         timeout=timeout,
         env=cmd_env,
     )
+
+
+TOKEN_ENV = "OKFMEM_GIT_TOKEN"
+AUTHOR_ENV = "OKFMEM_GIT_AUTHOR"
+# The token reaches the helper through this variable, so it never sits in argv.
+_CREDENTIAL_ENV = "OKFMEM_GIT_CREDENTIAL"
+# Answers `get` only: git's `store` after a good login has nowhere to persist the token.
+_CREDENTIAL_HELPER = (
+    '!f() { test "$1" = get || return 0; echo username=x-access-token; '
+    f'printf "password=%s\\n" "${_CREDENTIAL_ENV}"; }}; f'
+)
+_AUTHOR_RE = re.compile(r"^\s*([^<>]*?)\s*<([^<>\s]+)>\s*$")
+
+
+def token_env_name(name=None):
+    """`OKFMEM_GIT_TOKEN`, or `OKFMEM_GIT_TOKEN_<NAME>` for the attached store
+    <NAME> (non-alphanumerics become `_`, so distinct names can share one)."""
+    if not name:
+        return TOKEN_ENV
+    return TOKEN_ENV + "_" + re.sub(r"[^A-Za-z0-9]", "_", name).upper()
+
+
+def store_token(name=None, environ=None):
+    """The caller's token for one store (#140), read from `token_env_name(name)`.
+    None when unset or empty."""
+    env = os.environ if environ is None else environ
+    return env.get(token_env_name(name)) or None
+
+
+def git_auth(token):
+    """`(args, env)` that make one git call authenticate HTTP(S) with `token`.
+    The empty `credential.helper` first drops every configured helper, so the
+    user's keychain or manager is neither asked nor written."""
+    if not token:
+        return [], None
+    return (
+        ["-c", "credential.helper=", "-c", f"credential.helper={_CREDENTIAL_HELPER}"],
+        {_CREDENTIAL_ENV: token, "GIT_TERMINAL_PROMPT": "0"},
+    )
+
+
+def redact(text, token):
+    return text.replace(token, "***") if token and text else text
+
+
+def error_line(stderr, token=None):
+    """The one line of git's stderr worth reporting, with `token` redacted."""
+    lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
+    pick = next((ln for ln in lines if ln.startswith(("fatal:", "error:"))),
+                lines[0] if lines else "no output from git")
+    return redact(pick, token)
+
+
+def parse_author(value):
+    """`(name, email)` from `name <email>`, or None when it is not that shape."""
+    m = _AUTHOR_RE.match(value or "")
+    if not m or not m.group(1):
+        return None
+    return m.group(1), m.group(2)
+
+
+def _author_env(author):
+    if author is None:
+        return None
+    name, email = author
+    return {"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email,
+            "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email}
 
 
 def _show_blob(store, stage, path):
@@ -632,16 +704,21 @@ def _release_lock(store, fd):
         pass
 
 
-def sync_store(store, message, do_push=True, do_pull=True):
+def sync_store(store, message, do_push=True, do_pull=True, token=None, author=None):
     """Stage everything, and if anything changed commit (+optionally pull-rebase
     + push). Returns a dict describing what happened:
 
         {committed: bool, sha: str|None, pushed: bool, reason: str,
-         push_error: str|None, conflict: bool}
+         push_error: str|None, conflict: bool, auth_failed: bool}
 
     Never raises on the git operations themselves; the caller decides how loud
     to be. A rebase conflict returns conflict=True, pushed=False so the caller
     can tell the user to resolve `~/okfmem-store` by hand.
+
+    `token` authenticates fetch and push (#140). With it, a failed fetch stops
+    before the commit and a failed fetch or push sets auth_failed, its reason
+    one redacted line naming the store. `author` is a `(name, email)` pair that
+    authors and commits this sync's commit only.
     """
     store = os.path.abspath(os.path.expanduser(store))
     res = {
@@ -651,7 +728,9 @@ def sync_store(store, message, do_push=True, do_pull=True):
         "reason": "",
         "push_error": None,
         "conflict": False,
+        "auth_failed": False,
     }
+    auth_args, auth_env = git_auth(token)
 
     lock = _acquire_lock(store)
     if lock is None:
@@ -679,7 +758,12 @@ def sync_store(store, message, do_push=True, do_pull=True):
         # Only runs when do_push is also true — do_push=False means "fully
         # offline, no network calls at all," matching the prior behavior.
         if do_push and do_pull:
-            fetch = _git(store, "fetch")
+            fetch = _git(store, *auth_args, "fetch", env=auth_env)
+            if fetch.returncode != 0 and token:
+                res["auth_failed"] = True
+                res["reason"] = (f"{store}: fetch failed: {error_line(fetch.stderr, token)}"
+                                 " — NOT committed, NOT pushed.")
+                return res
             if fetch.returncode == 0:
                 upstream = _git(store, "rev-parse", "@{u}")
                 if upstream.returncode == 0:
@@ -742,7 +826,7 @@ def sync_store(store, message, do_push=True, do_pull=True):
         has_changes = staged.returncode != 0
 
         if has_changes:
-            c = _git(store, "commit", "-m", message)
+            c = _git(store, "commit", "-m", message, env=_author_env(author))
             if c.returncode != 0:
                 res["reason"] = c.stdout.strip() or c.stderr.strip() or "commit failed."
                 return res
@@ -774,9 +858,13 @@ def sync_store(store, message, do_push=True, do_pull=True):
                 return res
             res["reason"] = "no new changes; pushing existing unpushed local commit(s)."
 
-        p = _git(store, "push")
+        p = _git(store, *auth_args, "push", env=auth_env)
         if p.returncode == 0:
             res["pushed"] = True
+        elif token:
+            res["auth_failed"] = True
+            kept = f" (committed {res['sha']} locally)" if res["committed"] else ""
+            res["push_error"] = f"{store}: push failed: {error_line(p.stderr, token)}{kept}"
         else:
             res["push_error"] = p.stderr.strip() or "push failed."
         return res
@@ -797,7 +885,18 @@ def main():
         action="store_true",
         help="don't pull --rebase before push (single-machine)",
     )
+    ap.add_argument(
+        "--author",
+        default=os.environ.get(AUTHOR_ENV) or None,
+        help=f'"name <email>" for this commit only (default ${AUTHOR_ENV})',
+    )
     args = ap.parse_args()
+    author = None
+    if args.author is not None:
+        author = parse_author(args.author)
+        if author is None:
+            ap.error(f'--author / ${AUTHOR_ENV} must look like "name <email>", '
+                     f"got {args.author!r}")
 
     # A bare `okfmem sync` shouldn't be a usage error -- ask for the subject,
     # offering a timestamped default so Enter alone works. Only prompt on a
@@ -833,14 +932,19 @@ def main():
         message = answer or default
 
     res = sync_store(
-        args.store, message, do_push=not args.no_push, do_pull=not args.no_pull
+        args.store, message, do_push=not args.no_push, do_pull=not args.no_pull,
+        token=store_token(), author=author,
     )
+    if res.get("auth_failed"):
+        print(f"okfmem sync: {res['push_error'] or res['reason']}")
+        sys.exit(1)
     print(f"okfmem sync: {res['reason']}")
     if res["pushed"]:
         print("  pushed.")
     elif res["push_error"]:
         print(f"  push failed: {res['push_error']}")
-    # Non-zero exit only on a conflict the user must resolve.
+    # Non-zero exit only on a conflict the user must resolve, or (above) when a
+    # caller-supplied token could not reach the remote.
     sys.exit(1 if res["conflict"] else 0)
 
 

@@ -5,8 +5,10 @@ Usage:
   okfmem backfill    [--dry-run] [--store PATH]  # P1: stamp decay frontmatter
   okfmem init        [--dry-run] [--status] ...  # P2: pointers + registry
   okfmem consolidate [--dry-run] ...             # P3: decay + archive + push
-  okfmem sync        -m "<msg>" [--no-push] ...  # commit + pull-rebase + push
+  okfmem sync        -m "<msg>" [--no-push] [--author "name <email>"] ...
+                                                 # commit + pull-rebase + push
   okfmem pull        [--quiet] [--store PATH]    # read-side sync: fetch + integrate, no commit needed
+                                                 # both honour $OKFMEM_GIT_TOKEN[_<NAME>] — #140
   okfmem update      [--check] [--store PATH]    # git pull the engine + re-run init
   okfmem status                                  # alias for `init --status`
   okfmem graduate <slug> [--to PATH] [--dry-run] # promote a page into CLAUDE.md/

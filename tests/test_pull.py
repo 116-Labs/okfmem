@@ -1,7 +1,8 @@
 """Unit coverage for memory_pull.pull_store's fail-open branches.
 
 pull_store is what the #16 SessionStart pull-hook rests on: it must NEVER raise
-and must exit non-zero (via main) ONLY on a rebase conflict. These tests drive
+and must exit non-zero (via main) ONLY on a rebase conflict or a failed or
+withheld caller-supplied token (`auth_failed`, `token_clash`, #140). These tests drive
 each branch with throwaway git repos + local bare "remotes" so the fail-open
 contract is locked in rather than only smoke-verified by hand.
 """
@@ -81,7 +82,7 @@ def test_not_a_git_repo(tmp_path):
     os.makedirs(plain)
     res = mp.pull_store(plain)
     assert res == {"pulled": False, "up_to_date": False, "conflict": False,
-                   "offline": False, "reason": res["reason"]}
+                   "offline": False, "auth_failed": False, "reason": res["reason"]}
     assert "not a git repo" in res["reason"]
 
 
@@ -177,7 +178,8 @@ def test_never_raises_on_garbage_store(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# main() exit-code mapping — conflict is the ONLY non-zero exit
+# main() exit-code mapping — conflict, auth_failed and token_clash are the ONLY
+# non-zero exits
 # --------------------------------------------------------------------------
 
 def _run_main(monkeypatch, canned):

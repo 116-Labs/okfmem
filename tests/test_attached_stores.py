@@ -417,10 +417,10 @@ def test_pull_keeps_going_when_one_store_raises(tmp_path, monkeypatch):
     Path(tmp_path, "gone").mkdir()
     real = mp.pull_store
 
-    def flaky(path, timeout=mp.DEFAULT_TIMEOUT):
+    def flaky(path, timeout=mp.DEFAULT_TIMEOUT, token=None):
         if path.endswith("gone"):
             raise RuntimeError("boom")
-        return real(path, timeout=timeout)
+        return real(path, timeout=timeout, token=token)
 
     monkeypatch.setattr(mp, "pull_store", flaky)
 

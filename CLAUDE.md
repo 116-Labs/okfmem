@@ -75,6 +75,7 @@ okfmem backfill  --dry-run    # stamp decay frontmatter on existing pages
 okfmem init      --dry-run    # per-repo memory link + pointers + registry wiring
 okfmem consolidate --dry-run  # decay + archive stale pages + push
 okfmem sync [-m "<msg>"]      # commit + pull-rebase + push the store (prompts on a tty if -m omitted)
+OKFMEM_GIT_TOKEN=<t> okfmem sync --author "bot <e>"  # caller token (env only, never on disk) + one-commit author; pull takes the token too
 okfmem reindex --report       # read-only: auto-loaded bytes vs ceiling + per-section breakdown
 okfmem reindex --verify       # read-only: link integrity across every MEMORY*.md; exits 1 on dangling/orphans
 okfmem inbox push <dir> --source NAME   # candidate pages -> refs/okfmem/inbox/<machine>/<id> on the store remote
