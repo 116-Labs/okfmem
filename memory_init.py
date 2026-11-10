@@ -1548,9 +1548,10 @@ def skill_dirs():
     """Harness skill directories that exist on this machine, keyed by name.
 
     The engine self-installs its skills here so a fresh `git clone ~/okfmem &&
-    okfmem init` surfaces /okfmem, /okfmem-save, /okfmem-curate in every harness
-    present — no dependency on ~/tools/sync-skills.sh (which still fans the
-    back-compat alias names primer/memory-curate from ~/tools/skills)."""
+    okfmem init` surfaces /okfmem, /okfmem-save, /okfmem-curate, /okfmem-inbox
+    in every harness present — no dependency on ~/tools/sync-skills.sh (which
+    still fans the back-compat alias names primer/memory-curate from
+    ~/tools/skills)."""
     home = os.path.expanduser("~")
     out = {}
     # Claude Code: ~/.claude is its home dir (settings.json, CLAUDE.md live
@@ -1698,16 +1699,17 @@ def _link_matches_target(link, target):
             return os.path.normcase(os.path.realpath(link)) == os.path.normcase(
                 os.path.realpath(target)
             )
-        # Plain directory: a managed tier-3 copy (see _managed_copy_target).
-        # Treat "same SKILL.md bytes" as "matches" — an engine update changes
-        # those bytes, which correctly reports a mismatch so the caller
-        # re-copies and warns. (Only reached for managed copies; a user's real
-        # directory has no marker and never gets here.)
-        src_skill = os.path.join(target, "SKILL.md")
-        dst_skill = os.path.join(link, "SKILL.md")
+        # Managed tier-3 copy: compare every top-level file (SKILL.md, BRIEF.md)
+        # so an engine update to any shipped file triggers a re-copy.
         try:
-            with open(src_skill, "rb") as a, open(dst_skill, "rb") as b:
-                return a.read() == b.read()
+            for fn in os.listdir(target):
+                src_file = os.path.join(target, fn)
+                if not os.path.isfile(src_file):
+                    continue
+                with open(src_file, "rb") as a, open(os.path.join(link, fn), "rb") as b:
+                    if a.read() != b.read():
+                        return False
+            return os.path.isfile(os.path.join(target, "SKILL.md"))
         except OSError:
             return False
     return False

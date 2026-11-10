@@ -148,7 +148,7 @@ def status(store):
         os.path.isfile(
             os.path.join(os.path.expanduser("~"), ".agents", "skills", name, "SKILL.md")
         )
-        for name in ("okfmem", "okfmem-save", "okfmem-curate")
+        for name in ("okfmem", "okfmem-save", "okfmem-curate", "okfmem-inbox")
     )
     return (
         f"skills {'available' if skills else 'missing'}; instructions {'wired' if wired else 'missing'} ({instructions}); project {ready}; "
