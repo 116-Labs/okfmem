@@ -51,8 +51,30 @@ def _ensure_git_repo():
         sys.exit(2)
 
 
+def _engine_branch_state():
+    """(current branch or None when detached, default branch; `main` if unset)."""
+    cur = _git("symbolic-ref", "--short", "-q", "HEAD")
+    branch = cur.stdout.strip() if cur.returncode == 0 else ""
+    head = _git("symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    default = head.stdout.strip() if head.returncode == 0 else ""
+    default = default.removeprefix("origin/") or "main"
+    return (branch or None), default
+
+
+def _engine_version():
+    try:
+        with open(os.path.join(ENGINE, "VERSION"), encoding="utf-8") as f:
+            return f.read().strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
 def cmd_check():
     """Report behind/ahead relative to upstream. Fetches, changes nothing."""
+    branch, default = _engine_branch_state()
+    if branch != default:
+        print(f"note: engine checkout is on '{branch or 'a detached HEAD'}', "
+              f"not '{default}'; okfmem update will refuse until you switch")
     up = _upstream()
     if not up:
         print("cannot check: current branch has no upstream tracking branch")
@@ -78,14 +100,29 @@ def cmd_check():
 
 def cmd_update(store_args, yes=False):
     """Fast-forward the engine, then re-run init. Exits with init's code."""
+    # Only the default branch is updated: pulling a feature branch's upstream
+    # would leave the engine off the default branch while reporting success.
+    branch, default = _engine_branch_state()
+    if branch != default:
+        where = f"branch\n  '{branch}'" if branch else f"a detached HEAD at {_short()}"
+        print(f"error: the okfmem engine is the git checkout at {ENGINE}, and it is on "
+              f"{where}, not '{default}' — okfmem update only updates '{default}'.\n"
+              f"  okfmem --version reports this checkout ({_engine_version()} at {_short()}).\n"
+              f"  To update: commit or park the branch's work, then\n"
+              f'    git -C "{ENGINE}" switch {default}\n'
+              f"    okfmem update", file=sys.stderr)
+        sys.exit(1)
+
     # Refuse on a dirty tree: a ff pull can fail partway or conflict, and we
     # must never clobber a user's local engine edits.
-    dirty = _git("status", "--porcelain").stdout.strip()
+    dirty = [ln for ln in _git("status", "--porcelain").stdout.splitlines() if ln.strip()]
     if dirty:
-        print("error: engine has uncommitted local changes — refusing to update.",
-              file=sys.stderr)
-        print("  stash or discard them, then re-run `okfmem update`:", file=sys.stderr)
-        print(f'    git -C "{ENGINE}" stash', file=sys.stderr)
+        paths = ", ".join(ln[3:] for ln in dirty[:3])
+        more = ", …" if len(dirty) > 3 else ""
+        print(f"error: the okfmem engine is the git checkout at {ENGINE}, and it has\n"
+              f"  uncommitted changes ({len(dirty)} file(s): {paths}{more}) — refusing to update.\n"
+              f"  Commit them on a branch, or stash them:  "
+              f'git -C "{ENGINE}" stash -u', file=sys.stderr)
         sys.exit(1)
 
     before = _short()
