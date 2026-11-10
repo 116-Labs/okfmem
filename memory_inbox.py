@@ -1079,15 +1079,21 @@ def dump_records(dest, pushes):
     return records
 
 
+def _inside_store_problem(store, dest, out_dir, flag):
+    for root in dict.fromkeys((store, dest)):
+        if _inside(out_dir, root):
+            return f"{flag} {out_dir} is inside the store {root} — pick a directory outside it."
+    return None
+
+
 def dump(store, out_dir, dest=None, out=print):
     """Write every pending page to `out_dir/pending.jsonl`; the store and its refs
     are left as they are. Returns (exit code, {out, pages, pushes} or {error})."""
     dest = dest or store
-    for root in dict.fromkeys((store, dest)):
-        if _inside(out_dir, root):
-            msg = f"--out {out_dir} is inside the store {root} — pick a directory outside it."
-            out(f"okfmem inbox dump: {msg}")
-            return 2, {"error": msg}
+    msg = _inside_store_problem(store, dest, out_dir, "--out")
+    if msg:
+        out(f"okfmem inbox dump: {msg}")
+        return 2, {"error": msg}
     ok, err = fetch_inbox(store)
     if not ok:
         out(f"okfmem inbox dump: fetch failed ({err or 'offline?'}) — "
@@ -1592,32 +1598,55 @@ def apply(store, decisions_path, confirm, dest=None, out=print, today=None,
 
 
 def web_state(records, decisions):
-    covered = sorted({c for d in decisions if isinstance(d, dict)
-                      for c in d.get("covers") or [] if isinstance(c, str)})
-    return {"records": records, "decisions": decisions, "covered": covered,
+    """What the review page shows. `visible` is its default list (#167): every
+    uncovered page, or, with decisions, only the undecided and low-confidence ones."""
+    decided = {d["id"]: d for d in decisions
+               if isinstance(d, dict) and isinstance(d.get("id"), str)}
+    covered = sorted({c for d in decided.values()
+                      if isinstance(d.get("covers"), list)
+                      for c in d["covers"] if isinstance(c, str)})
+    visible = [r["id"] for r in records if r["id"] not in covered and (
+        not decisions or r["id"] not in decided
+        or decided[r["id"]].get("confidence") == "low")]
+    return {"records": [dict(r, body=page_body(r["text"])) for r in records],
+            "decisions": decisions, "covered": covered, "visible": visible,
             "has_decisions": bool(decisions)}
 
 
 def review_web(store, work_dir, confirm, dest=None, out=print, imported_by=None,
-               idle_timeout=900, open_browser=True, server=None):
+               into=None, idle_timeout=900, open_browser=True, server=None):
     """Review the pending pages in a local browser page. A decisions.json already
     in `work_dir` pre-fills the page; Done writes it and runs `apply` on it."""
     from memory_webui import PageServer
 
     dest = dest or store
-    code, result = dump(store, work_dir, dest, out=out)
-    if code != 0:
-        return code
-    records = load_dump(os.path.join(work_dir, DUMP_FILE))
-    if not records:
-        out("okfmem inbox review: nothing pending.")
-        return 0
+    dump_path = os.path.join(work_dir, DUMP_FILE)
     decisions_path = os.path.join(work_dir, "decisions.json")
+    if os.path.exists(decisions_path):
+        # Its ids name the records of the dump beside it; dumping again would
+        # renumber them onto other pages whenever the inbox changed since.
+        problem = _inside_store_problem(store, dest, work_dir, "--dir")
+        if problem is None and not os.path.exists(dump_path):
+            problem = (f"{decisions_path} has no {DUMP_FILE} beside it to match its ids — "
+                       f"run `okfmem inbox dump --out {work_dir}` and decide again")
+        if problem:
+            out(f"okfmem inbox review: {problem}")
+            return 2
+        out(f"okfmem inbox review: reviewing {dump_path}, the dump decisions.json "
+            "was written against")
+    else:
+        code, _ = dump(store, work_dir, dest, out=out)
+        if code != 0:
+            return code
     try:
+        records = load_dump(dump_path)
         decisions = load_decisions(decisions_path) if os.path.exists(decisions_path) else []
     except ApplyError as e:
         out(f"okfmem inbox review: {e}")
         return 2
+    if not records:
+        out("okfmem inbox review: nothing pending.")
+        return 0
     outcome = {"code": 1}
     lock = threading.Lock()
 
@@ -1637,11 +1666,14 @@ def review_web(store, work_dir, confirm, dest=None, out=print, imported_by=None,
             with open(decisions_path, "w", encoding="utf-8", newline="\n") as f:
                 json.dump(got, f, ensure_ascii=False, indent=2)
             lines = []
-            code = apply(store, decisions_path, confirm, dest=dest, out=lines.append,
-                         imported_by=imported_by,
-                         hint=apply_hint(store, decisions_path))
-            for line in lines:
+
+            def say(line):  # printed as it comes, so the plan precedes the [y/N]
+                lines.append(line)
                 out(line)
+
+            code = apply(store, decisions_path, confirm, dest=dest, out=say,
+                         imported_by=imported_by,
+                         hint=apply_hint(store, decisions_path, into))
         outcome["code"] = code
         if code == 0:
             srv.stop()
@@ -1782,7 +1814,8 @@ def main():
                    help="review in a local browser page instead of the terminal")
     r.add_argument("--dir", metavar="DIR",
                    help="with --web: directory for pending.jsonl, outside the store; a "
-                        "decisions.json in it pre-fills the page (default: a temp dir)")
+                        "decisions.json in it pre-fills the page, against the "
+                        "pending.jsonl beside it (default: a temp dir)")
     im = sub.add_parser("import", help="import pending pages, interactively or "
                                        "non-interactively under a policy")
     im.add_argument("--store", default=argparse.SUPPRESS)
@@ -1874,7 +1907,7 @@ def main():
                 else tempfile.mkdtemp(prefix="okfmem-review-"))
         confirm = _interactive_confirm if _isatty() else (lambda: None)
         try:
-            sys.exit(review_web(store, work, confirm, dest=dest))
+            sys.exit(review_web(store, work, confirm, dest=dest, into=args.into))
         except KeyboardInterrupt:
             sys.exit(130)
     if args.cmd == "review" and (args.dir):
