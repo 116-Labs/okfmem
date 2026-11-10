@@ -43,6 +43,11 @@ def _short(ref="HEAD"):
     return r.stdout.strip() if r.returncode == 0 else "?"
 
 
+def _count(rev_range):
+    r = _git("rev-list", "--count", rev_range)
+    return (r.stdout.strip() or "0") if r.returncode == 0 else "0"
+
+
 def _upstream():
     """The current branch's upstream (e.g. `origin/main`), or None if unset."""
     r = _git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
@@ -110,7 +115,8 @@ def cmd_check():
         if ahead != "0":
             print(f"  note: also {ahead} local commit(s) ahead — the pull will "
                   f"refuse (diverged history)")
-            print(_keep_and_reset_hint(up))
+            if branch == default:
+                print(_keep_and_reset_hint(up))
         print("  run: okfmem update")
     else:
         print(f"ahead of {up} by {ahead} commit(s); nothing to pull")
@@ -151,10 +157,10 @@ def cmd_update(store_args, yes=False):
         print("error: fast-forward pull failed (diverged history or no upstream).",
               file=sys.stderr)
         target = f"origin/{default}"
-        ahead = _git("rev-list", "--count", f"{target}..HEAD")
-        count = ahead.stdout.strip() if ahead.returncode == 0 else "0"
-        if count not in ("", "0"):
-            print(f"  '{default}' has {count} local commit(s) not on {target}.",
+        ahead, behind = _count(f"{target}..HEAD"), _count(f"HEAD..{target}")
+        # Only a diverged branch is unblocked by the reset; an ahead-only pull failed elsewhere.
+        if ahead != "0" and behind != "0":
+            print(f"  '{default}' has {ahead} local commit(s) not on {target}.",
                   file=sys.stderr)
             print(_keep_and_reset_hint(target), file=sys.stderr)
         sys.exit(1)

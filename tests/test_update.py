@@ -260,6 +260,41 @@ def test_update_pull_failure_without_local_commits_gives_no_reset_advice(
     assert "stash" not in err
 
 
+def test_update_pull_failure_ahead_only_gives_no_reset_advice(engine, monkeypatch, capsys):
+    update, clone = engine
+    (clone / "local.txt").write_text("mine\n")
+    _run(clone, "add", "local.txt")
+    _run(clone, "commit", "-m", "local work")
+    real_git = update._git
+
+    def failing_pull(*args, **kw):
+        if args[0] == "pull":
+            return subprocess.CompletedProcess(args, 1, "", "fatal: unable to access origin")
+        return real_git(*args, **kw)
+
+    monkeypatch.setattr(update, "_git", failing_pull)
+
+    assert _exit_code(update.cmd_update, [], yes=True) == 1
+
+    err = capsys.readouterr().err
+    assert "fast-forward pull failed" in err
+    assert "local commit(s) not on" not in err
+    assert "reset --keep" not in err
+
+
+def test_check_diverged_off_default_branch_gives_no_reset_advice(engine, tmp_path, capsys):
+    update, clone = engine
+    _run(clone, "switch", "-c", "some-feature", "--track", "origin/main")
+    _diverge(tmp_path, clone)
+
+    update.cmd_check()
+
+    out = capsys.readouterr().out
+    assert "note: engine checkout is on 'some-feature', not 'main'" in out
+    assert "also 1 local commit(s) ahead" in out
+    assert "reset --keep" not in out
+
+
 def test_check_diverged_default_branch_gives_same_advice(engine, tmp_path, capsys):
     update, clone = engine
     _diverge(tmp_path, clone)
