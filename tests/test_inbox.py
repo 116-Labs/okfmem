@@ -639,3 +639,37 @@ def test_render_pending_prints_per_project_counts_before_the_list(env):
     lines = mx.render_pending(mx.pending(env["store"]))
     assert lines[1] == "demo: 3 pages in 3 pushes"
     assert lines[2].endswith(":")
+
+
+def _fail_cat_file(monkeypatch):
+    real = mx._git
+    # The fixture's refs are local only; a real fetch --prune would drop them.
+    monkeypatch.setattr(mx, "fetch_inbox", lambda store: (True, ""))
+
+    def fake(store, *args, **kw):
+        if args and args[0] == "cat-file":
+            return subprocess.CompletedProcess(args, 124, b"", b"cat-file timed out")
+        return real(store, *args, **kw)
+    monkeypatch.setattr(mx, "_git", fake)
+
+
+def test_review_deletes_no_push_when_the_batch_read_fails(env, monkeypatch):
+    _bulk_inbox(env["store"], 3)
+    _fail_cat_file(monkeypatch)
+    lines = []
+    counts = mx.review(env["store"], lambda *a: pytest.fail("offered a page"),
+                       lambda repo: None, out=lines.append, do_sync=False)
+    assert counts["deleted"] == 0
+    assert any("could not read the inbox" in line for line in lines)
+    refs = subprocess.run(["git", "-C", env["store"], "for-each-ref", mx.INBOX_NS],
+                          capture_output=True, text=True, check=True).stdout
+    assert len(refs.splitlines()) == 3
+
+
+def test_pull_reports_a_failed_batch_read_instead_of_nothing_pending(env, monkeypatch):
+    _bulk_inbox(env["store"], 3)
+    _fail_cat_file(monkeypatch)
+    lines = []
+    assert mx.pull(env["store"], out=lines.append) == 1
+    assert not any("nothing pending" in line for line in lines)
+    assert any("could not read the inbox" in line for line in lines)

@@ -298,6 +298,10 @@ def resolve_repo_project(store, repo):
     return None
 
 
+class InboxReadError(RuntimeError):
+    """The pending listing could not be read; callers must not act on a partial one."""
+
+
 def _cat_file_batch(store, specs):
     """Contents of each object spec from one `git cat-file --batch` process
     (bytes, or None when missing), in order."""
@@ -305,11 +309,14 @@ def _cat_file_batch(store, specs):
         return []
     r = _git(store, "cat-file", "--batch", data=("\n".join(specs) + "\n").encode(),
              timeout=max(NET_TIMEOUT, len(specs) // 100))
+    if r.returncode != 0:
+        # An empty listing would make `review` delete every push as page-less.
+        raise InboxReadError(_err(r) or f"git cat-file exited {r.returncode}")
     out, pos = [], 0
     buf = r.stdout
     for _ in specs:
         end = buf.find(b"\n", pos)
-        if r.returncode != 0 or end < 0:
+        if end < 0:
             out.append(None)
             continue
         header = buf[pos:end].split()
@@ -421,7 +428,13 @@ def pull(store, out=print):
     if not ok:
         out(f"okfmem inbox pull: fetch failed ({err or 'offline?'}) — "
             "listing what was fetched before.")
-    for line in render_pending(pending(store)):
+    try:
+        lines = render_pending(pending(store))
+    except InboxReadError as e:
+        out(f"okfmem inbox pull: could not read the inbox ({_safe(e)}) — "
+            "nothing listed.")
+        return 1
+    for line in lines:
         out(line)
     return 0
 
@@ -687,8 +700,13 @@ def review(store, decide, ask_project, out=print, today=None, do_sync=True):
     if not ok:
         out(f"okfmem inbox review: fetch failed ({err or 'offline?'}) — "
             "reviewing what was fetched before.")
-    pushes = pending(store)
     counts = {"accepted": 0, "merged": 0, "dropped": 0, "deleted": 0}
+    try:
+        pushes = pending(store)
+    except InboxReadError as e:
+        out(f"okfmem inbox review: could not read the inbox ({_safe(e)}) — "
+            "nothing reviewed or deleted.")
+        return counts
     if not pushes:
         out("okfmem inbox: nothing pending.")
         return counts
