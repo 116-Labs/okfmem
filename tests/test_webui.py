@@ -31,10 +31,11 @@ def _call(srv, path, token=True, body=None):
 
 def _wake(srv):
     """Unblock a pending handle_request after stop(). serve may already have
-    closed the socket (it polls every 0.5s), so a refused connection is fine."""
+    closed the socket (it polls every 0.5s), so a refused or reset connection
+    is fine."""
     try:
         _call(srv, "/api/state")
-    except urllib.error.URLError:
+    except (urllib.error.URLError, OSError):
         pass
 
 
