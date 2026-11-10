@@ -20,6 +20,7 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import sys
 import tempfile
 import threading
@@ -51,6 +52,8 @@ TEAM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
 AUD_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 # The token goes into a Cookie header, so only the JWT alphabet passes.
 JWT_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$")
+_LINK_RE = re.compile(r"\]\(([^)]*)\)")
+_PAGE_LINK_RE = re.compile(r"^pages/([^/]+)\.md$")
 
 
 class ToolError(Exception):
@@ -157,8 +160,37 @@ def _repo_file(store, scope, args, parts, what):
         raise ToolError(f"no {what} for repo: {repo}") from None
 
 
+def _page_visible(store, scope, slug):
+    page = _load_page(store, slug)
+    return page is not None and scope.page_ok(page[1], page[2])
+
+
+def _scoped_index(store, scope, text):
+    """The view minus every line linking anywhere but a page the scope shows,
+    and minus any `##` heading that leaves empty (#147)."""
+    kept = []
+    for line in text.splitlines():
+        targets = _LINK_RE.findall(line)
+        if all(
+            (m := _PAGE_LINK_RE.match(t)) and _page_visible(store, scope, m.group(1))
+            for t in targets
+        ):
+            kept.append(line)
+    out = []
+    for i, line in enumerate(kept):
+        if line.startswith("## "):
+            nxt = next((x for x in kept[i + 1 :] if x.strip()), "")
+            if not nxt or nxt.startswith("#"):
+                continue
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
 def tool_read_index(store, scope, args):
-    return _repo_file(store, scope, args, ("views", "{repo}", "MEMORY.md"), "index")
+    res = _repo_file(store, scope, args, ("views", "{repo}", "MEMORY.md"), "index")
+    if not scope.unrestricted:
+        res["text"] = _scoped_index(store, scope, res["text"])
+    return res
 
 
 def tool_read_state(store, scope, args):
@@ -398,6 +430,10 @@ class Access:
         return 200, email
 
 
+class _ThreadingHTTPServerV6(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
 def make_http_server(store, scope, access, host, port):
     class Handler(BaseHTTPRequestHandler):
         timeout = REQUEST_TIMEOUT
@@ -409,17 +445,29 @@ def make_http_server(store, scope, access, host, port):
             self.end_headers()
             self.wfile.write(body)
 
+        def _refuse(self, code, body=b""):
+            # Windows resets a socket closed over unread bytes, so the client would
+            # see the reset instead of this status: drain the body first.
+            length = self._length()
+            if 0 < length <= MAX_BODY:
+                self.rfile.read(length)
+            self.close_connection = True
+            self._send(code, body)
+
+        def _length(self):
+            try:
+                return int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return -1
+
         def do_POST(self):
             if self.path != "/mcp":
-                return self._send(404)
+                return self._refuse(404)
             code, email = access.check(self.headers.get("Cf-Access-Jwt-Assertion"))
             if code != 200:
                 msg = "unauthorized" if code == 401 else "access check unavailable"
-                return self._send(code, json.dumps({"error": msg}).encode())
-            try:
-                length = int(self.headers.get("Content-Length") or 0)
-            except ValueError:
-                length = -1
+                return self._refuse(code, json.dumps({"error": msg}).encode())
+            length = self._length()
             if not 0 < length <= MAX_BODY:
                 return self._send(400, b'{"error": "bad request body"}')
             resp = handle_text(store, scope, self.rfile.read(length).decode("utf-8", "replace"), email)
@@ -433,7 +481,8 @@ def make_http_server(store, scope, access, host, port):
         def log_message(self, *args):
             pass
 
-    return ThreadingHTTPServer((host, port), Handler)
+    server_cls = _ThreadingHTTPServerV6 if ":" in host else ThreadingHTTPServer
+    return server_cls((host, port), Handler)
 
 
 # ---------------------------------------------------------------------------
@@ -512,7 +561,8 @@ def main(argv=None):
         server = make_http_server(args.store, scope, access, host, int(port))
     except OSError as e:
         return _die(f"cannot listen on {args.http}: {e}")
-    print(f"okfmem mcp serve: listening on {host}:{port}", file=sys.stderr)
+    shown = f"[{host}]" if ":" in host else host
+    print(f"okfmem mcp serve: listening on {shown}:{server.server_address[1]}", file=sys.stderr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

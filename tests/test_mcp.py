@@ -6,6 +6,7 @@ import io
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -171,6 +172,29 @@ def test_remote_index_state_scope(store):
     assert call(store, scope, "read_index", {"repo": "hive"})[0]
     assert call(store, scope, "read_state", {"repo": "hive"})[0]
     assert call(store, scope, "read_index", {"repo": "../x"})[0]
+
+
+def test_remote_read_index_drops_pointers_to_hidden_pages(store, tmp_path):
+    page(tmp_path / "pages", "acme-f", ["org:acme"], desc="org secret")
+    view = ("# MEMORY — gaal\n\n## gaal\n\n"
+            "- [gaal-a](pages/gaal-a.md) — d\n"
+            "- [me-c](pages/me-c.md) — who I am\n\n"
+            "## acme\n\n- [acme-f](pages/acme-f.md) — org secret\n\n"
+            "## Stack\n\n- [Stack Memory](MEMORY-lane-stack.md) — covers py\n")
+    (tmp_path / "views" / "gaal" / "MEMORY.md").write_text(view, encoding="utf-8")
+
+    def index(scope):
+        err, text = call(store, scope, "read_index", {"repo": "gaal"})
+        assert not err
+        return json.loads(text)["text"]
+
+    assert index(mm.LOCAL) == view
+    text = index(remote())
+    assert "pages/gaal-a.md" in text
+    for leak in ("me-c", "who I am", "acme", "org secret", "Stack"):
+        assert leak not in text
+    assert "who I am" in index(remote(user=True))
+    assert "org secret" in index(remote(("repo:gaal", "org:acme")))
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +467,43 @@ def test_http_refuses_non_loopback_without_bind_any(store, capsys):
     argv = [a.replace("127.0.0.1:0", "0.0.0.0:0") for a in BASE] + ["--store", store]
     assert mm.main(argv) == 2
     assert "--bind-any" in capsys.readouterr().err.splitlines()[0]
+
+
+def _ipv6_loopback_works():
+    if not socket.has_ipv6:
+        return False
+    try:
+        with socket.socket(socket.AF_INET6) as s:
+            s.bind(("::1", 0))
+        return True
+    except OSError:
+        return False
+
+
+IPV6 = pytest.mark.skipif(not _ipv6_loopback_works(), reason="no IPv6 loopback on this host")
+
+
+@IPV6
+def test_cli_starts_on_ipv6_loopback(store, capsys, monkeypatch):
+    served = []
+    monkeypatch.setattr(ThreadingHTTPServer, "serve_forever",
+                        lambda self, *a, **k: served.append(self.server_address))
+    argv = [a.replace("127.0.0.1:0", "[::1]:0") for a in BASE] + ["--store", store]
+    assert mm.main(argv) == 0
+    assert served and served[0][0] == "::1"
+    assert "listening on [::1]:" in capsys.readouterr().err
+
+
+@IPV6
+def test_http_serves_on_ipv6_loopback(store):
+    srv = mm.make_http_server(store, remote(), access(Fetch()), "::1", 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://[::1]:{srv.server_address[1]}/mcp"
+        assert post(url, FIND, jwt())[0] == 200
+    finally:
+        srv.shutdown()
+        srv.server_close()
 
 
 def test_needs_exactly_one_transport(store, capsys):
