@@ -302,6 +302,19 @@ In the label layout, accepting a page adds the project's repo label and writes i
 
 **Inbox text is untrusted until you review it.** Nothing in the inbox reaches a loaded page without `okfmem inbox review`: `okfmem pull`, `consolidate` and the Stop hook fetch only the store's branches, never the inbox refs. Read a page before you accept or merge it the way you would read any text from the internet.
 
+### 10. Remote access over MCP (`okfmem mcp`)
+An assistant with no local file system can read selected pages and propose new ones through an MCP server. Its tools are `find`, `read_page`, `read_index`, `read_state` and `propose_page`. The only write is `propose_page`, which pushes to the inbox above, so nothing reaches `pages/`, `state/` or `views/` until `okfmem inbox review` accepts it. It is opt-in and standard library only.
+
+```bash
+okfmem mcp serve --stdio                       # local harnesses: no port, trusted like your files
+okfmem mcp serve --http 127.0.0.1:8787 --access-team myteam --access-aud <AUD tag> \
+    --allow-email me@example.com --read-label repo:demo   # remote clients, behind Cloudflare Access
+```
+
+**stdio** has no read allowlist. **HTTP** exists only for a Cloudflare tunnel and has no unauthenticated mode (`cloudflared` connects from localhost, so the source address cannot tell local from remote). Every `POST /mcp` must carry a `Cf-Access-Jwt-Assertion` token. The server rejects it with 401 unless its `aud` and `iss` match, it has not expired, and the team's `get-identity` endpoint returns 200 with an email in `--allow-email`. An accepted token is cached until it expires, and an unreachable Cloudflare gives 503, never a pass. The server refuses to start without at least one `--read-label` (`*` allows every label), and binds only to loopback (`127.0.0.1`, `localhost` or `[::1]`) unless `--bind-any` is given. A page is readable remotely when one of its labels is allowed, so a page with no labels stays hidden even under `*`; `type: user` pages stay hidden unless `--read-type-user` is passed, and a hidden page answers exactly like a missing one. A tool's `repo` is the project name in a `repo:<name>` label: `read_index` and `read_state` answer only for a repo whose label is allowed, remotely `read_index` drops every pointer to a hidden page (and any section left empty), and remotely `propose_page` needs such a repo and records the caller's Access email as the inbox `ref` (`local` over stdio).
+
+**Cloudflare side (yours to set up).** A tunnel route to `127.0.0.1:PORT`, an Access application whose AUD tag goes in `--access-aud`, a policy for the allowed emails, and an MCP client that connects through Access OAuth. Run the server as a login service (a launchd agent, systemd user unit or Windows scheduled task running the command above). Once a client uses this, revoke its direct repository access: writes straight to the store repository bypass the sync lock, frontmatter stamping and review.
+
 ```mermaid
 flowchart TD
     subgraph Harness [AI Coding Agent]

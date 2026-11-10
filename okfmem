@@ -41,6 +41,11 @@ exists. Session search (issue #2) ships this way:
   okfmem search "<query>"          # query it (off-prompt)
   okfmem distill [--project NAME]  # propose durable pages from recurring session
                                    # signal (report only; writes nothing) — #7
+  okfmem mcp serve --stdio | --http HOST:PORT --access-team T --access-aud A
+                   --allow-email E... --read-label L...
+                                   # MCP server: stdio locally, Cloudflare
+                                   # Access-gated HTTP remotely; writes only
+                                   # to the inbox — #147
 """
 import os
 import runpy
@@ -57,7 +62,7 @@ MODULES = {"backfill": "memory_backfill.py", "init": "memory_init.py",
 # Opt-in plugin commands -> plugins/<file>. Loaded ONLY if the file is present,
 # so core install stays harness-agnostic. Several commands may share one plugin.
 PLUGINS = {"index": "memory_search.py", "search": "memory_search.py",
-           "distill": "memory_distill.py"}
+           "distill": "memory_distill.py", "mcp": "memory_mcp.py"}
 
 
 def version_line():
