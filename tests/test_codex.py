@@ -351,3 +351,41 @@ def test_codex_exec_cmd_signature(tmp_path):
         )
     )
     assert next(iter(codex.extract_file(path)))["text"] == "git status"
+
+
+def test_codex_status_skills_available_matches_shipped_skills(tmp_path, monkeypatch):
+    home, _, store = isolated(tmp_path, monkeypatch)
+    engine = Path(mc.__file__).parent / "skills"
+    shipped = sorted(p.parent.name for p in engine.glob("*/SKILL.md"))
+    dest = home / ".agents" / "skills"
+    for name in shipped:
+        (dest / name).mkdir(parents=True)
+        (dest / name / "SKILL.md").write_text("x")
+    assert "skills available" in mc.status(str(store))
+    (dest / shipped[0] / "SKILL.md").unlink()
+    assert "skills missing" in mc.status(str(store))
+
+
+def test_link_skills_retires_managed_okfmem_reindex_entries(tmp_path, monkeypatch):
+    home, _, _ = isolated(tmp_path, monkeypatch)
+    import memory_uninstall as mu
+
+    engine = Path(mi.__file__).parent / "skills"
+    dest = home / ".agents" / "skills"
+    dest.mkdir(parents=True)
+    monkeypatch.setattr(mi, "skill_dirs", lambda: {"codex": str(dest)})
+    (dest / "okfmem-reindex").symlink_to(engine / "okfmem-reindex")
+    mi.link_skills(False)
+    assert not (dest / "okfmem-reindex").is_symlink()
+
+    copy = dest / "okfmem-reindex"
+    copy.mkdir()
+    (copy / mi.MANAGED_COPY_MARKER).write_text(str(engine / "okfmem-reindex"))
+    mu.unlink_skills(False, include_codex=True)
+    assert not copy.exists()
+
+    real = dest / "okfmem-reindex"
+    real.mkdir()
+    (real / "SKILL.md").write_text("mine")
+    mi.link_skills(False)
+    assert (real / "SKILL.md").read_text() == "mine"

@@ -1603,6 +1603,36 @@ def _link_matches_target(link, target):
     return False
 
 
+RETIRED_SKILLS = ("okfmem-reindex",)
+
+
+def _retire_skill_entry(link, engine, dry_run):
+    """Remove an installed entry for a retired skill, only if okfmem made it
+    (engine-pointing symlink/junction, or a marked copy). Returns an action
+    string, or None when nothing is there or it isn't ours."""
+    if not os.path.lexists(link):
+        return None
+    engine_real = os.path.normcase(os.path.realpath(engine))
+    linked = os.path.islink(link) or _is_junction(link)
+    if linked:
+        real = os.path.normcase(os.path.realpath(link))
+        if os.path.dirname(real) != engine_real:
+            return None
+    elif _managed_copy_target(link) is None:
+        return None
+    if not dry_run:
+        try:
+            if _is_junction(link):
+                os.rmdir(link)
+            elif os.path.isdir(link) and not os.path.islink(link):
+                shutil.rmtree(link)
+            else:
+                os.remove(link)
+        except OSError:
+            return "skip (unwritable)"
+    return "retire"
+
+
 def link_skills(dry_run):
     """Link every engine skill (~/okfmem/skills/<name>/SKILL.md) into each
     detected harness skill dir, via `_make_link`'s three-tier fallback
@@ -1628,6 +1658,10 @@ def link_skills(dry_run):
             except OSError:
                 actions.append((harness, "*", "skip (unwritable directory)"))
                 continue
+        for name in RETIRED_SKILLS:
+            retired = _retire_skill_entry(os.path.join(dest, name), engine, dry_run)
+            if retired:
+                actions.append((harness, name, retired))
         for name in names:
             target = os.path.join(engine, name)
             link = os.path.join(dest, name)
@@ -3684,12 +3718,9 @@ def cmd_status(store, show_all=False, project_filter=None):
         state = "yes" if has_state else "no"
         flag = ""
         if mem_bytes > MEMORY_BUDGET_BYTES:
-            # Remedy is a lane split, not tightening hooks: hook-tightening
-            # recovers a few hundred bytes, a lane split recovers thousands
-            # (issue #53). Once split, pointers are never re-flattened back.
             flag = (
                 f"   {glyph('warn')} over {MEMORY_BUDGET_BYTES}-byte "
-                "auto-load ceiling -- split a lane index (/okfmem-reindex)"
+                "auto-load ceiling -- tighten descriptions / relabel (/okfmem-curate)"
             )
         print(
             f"  {marker} {name:20} pages:{pages:<4} "
