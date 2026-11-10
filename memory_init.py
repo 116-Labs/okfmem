@@ -387,13 +387,15 @@ _STORE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 def attached_stores(store, reg=None):
     """Read stores attached beside `store` in registry.json `stores` (#139), in
-    order, as dicts {name, path, remote}. Attaching is the trust decision."""
+    order, as dicts {name, path, remote}. Attaching is the trust decision.
+    A relative `path` is relative to the home store, never the caller's cwd."""
     if reg is None:
         reg = _load_registry(os.path.join(store, "registry.json"))
     raw = reg.get("stores") if isinstance(reg, dict) else None
     if not isinstance(raw, list):
         return []
-    home = os.path.normcase(os.path.realpath(store))
+    store_abs = os.path.abspath(store)
+    home = os.path.normcase(os.path.realpath(store_abs))
     out, seen = [], set()
     for entry in raw:
         if not isinstance(entry, dict):
@@ -402,7 +404,7 @@ def attached_stores(store, reg=None):
         if not (isinstance(name, str) and _STORE_NAME_RE.match(name)
                 and isinstance(path, str) and path.strip()):
             continue
-        path = os.path.abspath(os.path.expanduser(path.strip()))
+        path = os.path.abspath(os.path.join(store_abs, os.path.expanduser(path.strip())))
         if name.casefold() in seen or os.path.normcase(os.path.realpath(path)) == home:
             continue
         seen.add(name.casefold())

@@ -102,6 +102,23 @@ def test_attached_stores_skips_malformed_duplicate_and_home_entries(tmp_path):
     assert got[1]["remote"] is None
 
 
+def test_relative_attached_path_resolves_against_home_store_not_cwd(tmp_path, monkeypatch):
+    store = _make_store(tmp_path / "home", stores=[
+        {"name": "team", "path": "../okfmem-team"},
+        {"name": "nested", "path": "sub/inner"},
+    ])
+    elsewhere = tmp_path / "src" / "app"
+    elsewhere.mkdir(parents=True)
+
+    for cwd in (elsewhere, tmp_path / "home"):
+        monkeypatch.chdir(cwd)
+        got = mi.attached_stores(store)
+        assert [a["path"] for a in got] == [
+            os.path.abspath(str(tmp_path / "okfmem-team")),
+            os.path.abspath(str(tmp_path / "home" / "sub" / "inner")),
+        ]
+
+
 def test_attached_stores_absent_or_not_a_list_is_empty(tmp_path):
     store = _make_store(tmp_path / "home")
     assert mi.attached_stores(store) == []

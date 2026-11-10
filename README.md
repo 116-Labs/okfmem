@@ -321,7 +321,7 @@ A team can share memory without sharing anyone's personal store. Clone the team'
 { "stores": [ { "name": "team", "path": "~/okfmem-team", "remote": "<org>/team-memory" } ] }
 ```
 
-Attaching a store is the trust decision: its pages enter your compiled views with no review step, so attach only stores whose writers you trust. Each name is letters, digits, `.`, `_` or `-`.
+Attaching a store is the trust decision: its pages enter your compiled views with no review step, so attach only stores whose writers you trust. Each name is letters, digits, `.`, `_` or `-`. A `path` may be absolute, start with `~`, or be relative; a relative path is resolved against your home store (so `"../okfmem-team"` sits beside it), never against the directory a command runs in.
 
 *   **Views.** `okfmem init --resolve-project --compile` builds each repo's view from your store and every attached one, in the usual tiers: repo, then org, then stack. An attached page is linked as `stores/<name>/<slug>.md` and its entry ends with `(store: <name>)`. When both stores have a page with the same slug for this view, it appears once, from your store. The 8 KB, 200-line budget covers the merged view.
 *   **Ownership.** `STATE.md` always comes from your store. `okfmem consolidate` decays and archives only your store's pages; an attached store's owners maintain it.
