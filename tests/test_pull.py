@@ -81,7 +81,7 @@ def test_not_a_git_repo(tmp_path):
     os.makedirs(plain)
     res = mp.pull_store(plain)
     assert res == {"pulled": False, "up_to_date": False, "conflict": False,
-                   "offline": False, "reason": res["reason"]}
+                   "offline": False, "auth_failed": False, "reason": res["reason"]}
     assert "not a git repo" in res["reason"]
 
 

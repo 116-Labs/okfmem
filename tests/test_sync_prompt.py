@@ -11,7 +11,7 @@ import memory_sync as ms
 def _run_main(monkeypatch, capsys, stdin, input_fn):
     seen = {}
 
-    def fake_sync_store(store, message, do_push=True, do_pull=True):
+    def fake_sync_store(store, message, do_push=True, do_pull=True, **_kw):
         seen["message"] = message
         return {"reason": "ok", "pushed": False, "push_error": None, "conflict": False}
 

@@ -22,8 +22,13 @@ Fail-open contract (this is the part #16's SessionStart hook depends on):
     with the later date and higher count. Any other conflict on a durable page,
     or one on MEMORY.md: the half-done rebase is aborted (tree left clean) and
     reported; `okfmem pull` run manually exits 1 so a human notices and
-    resolves the store by hand. This is the ONLY non-zero exit case.
+    resolves the store by hand. Besides a failed caller-supplied token (below),
+    this is the ONLY non-zero exit case.
   - No upstream configured, or already up to date: clean no-op, exit 0.
+  - `$OKFMEM_GIT_TOKEN` (the --store store) and `$OKFMEM_GIT_TOKEN_<NAME>` (an
+    attached store) authenticate HTTPS through a one-shot credential helper
+    (#140). A fetch that fails with one exits 1 with one line naming the store;
+    the token is never printed or written to `.git/config` or a credential store.
 A caller that must never block (a SessionStart hook) can invoke this command
 as-is and either ignore its exit code entirely or treat 1 as "needs a human,
 but don't fail the session" — it never hangs and never leaves a half-done
@@ -54,13 +59,13 @@ import memory_sync as ms  # reuse _git / lock helpers — one lock, one lock fil
 DEFAULT_TIMEOUT = 30
 
 
-def _safe_git(store, *args, timeout=DEFAULT_TIMEOUT):
+def _safe_git(store, *args, timeout=DEFAULT_TIMEOUT, env=None):
     """Like memory_sync._git but never raises. Offline networks, a missing
     git binary, or a hung remote all collapse into a synthetic non-zero
     CompletedProcess so every caller here can fail open uniformly instead of
     each needing its own try/except."""
     try:
-        return ms._git(store, *args, timeout=timeout)
+        return ms._git(store, *args, timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(args, 1, stdout="",
                                            stderr="git timed out (offline?)")
@@ -84,18 +89,22 @@ def _rebase_in_progress(store):
             or os.path.isdir(os.path.join(git_dir, "rebase-apply")))
 
 
-def pull_store(store, timeout=DEFAULT_TIMEOUT):
+def pull_store(store, timeout=DEFAULT_TIMEOUT, token=None):
     """Fetch + integrate remote changes into `store`. Returns a dict:
 
         {pulled: bool, up_to_date: bool, conflict: bool, offline: bool,
-         reason: str}
+         auth_failed: bool, reason: str}
 
-    Never raises. Exactly one of pulled/up_to_date/conflict/offline is the
-    "headline" outcome; reason is always a short human-readable string.
+    Never raises. Exactly one of pulled/up_to_date/conflict/offline/auth_failed
+    is the "headline" outcome; reason is always a short human-readable string.
+    `token` authenticates the network steps (#140); with it a failed fetch is
+    auth_failed, not offline, and its reason is one redacted line naming the
+    store.
     """
     store = os.path.abspath(os.path.expanduser(store))
     res = {"pulled": False, "up_to_date": False, "conflict": False,
-           "offline": False, "reason": ""}
+           "offline": False, "auth_failed": False, "reason": ""}
+    auth_args, auth_env = ms.git_auth(token)
 
     if not os.path.isdir(os.path.join(store, ".git")):
         res["reason"] = f"{store} is not a git repo — nothing to pull."
@@ -113,7 +122,11 @@ def pull_store(store, timeout=DEFAULT_TIMEOUT):
             res["reason"] = "another okfmem sync/pull holds the lock; skipped."
             return res
 
-        fetch = _safe_git(store, "fetch", timeout=timeout)
+        fetch = _safe_git(store, *auth_args, "fetch", timeout=timeout, env=auth_env)
+        if fetch.returncode != 0 and token:
+            res["auth_failed"] = True
+            res["reason"] = f"{store}: fetch failed: {ms.error_line(fetch.stderr, token)}"
+            return res
         if fetch.returncode != 0:
             res["offline"] = True
             res["reason"] = fetch.stderr.strip() or "fetch failed (offline?)."
@@ -161,7 +174,8 @@ def pull_store(store, timeout=DEFAULT_TIMEOUT):
         clean = status.returncode == 0 and not status.stdout.strip()
 
         if clean:
-            ff = _safe_git(store, "pull", "--ff-only", timeout=timeout)
+            ff = _safe_git(store, *auth_args, "pull", "--ff-only", timeout=timeout,
+                           env=auth_env)
             if ff.returncode == 0:
                 res["pulled"] = True
                 res["reason"] = "fast-forwarded."
@@ -178,7 +192,8 @@ def pull_store(store, timeout=DEFAULT_TIMEOUT):
                              "skipped.")
             return res
 
-        rb = _safe_git(store, "pull", "--rebase", "--autostash", timeout=timeout)
+        rb = _safe_git(store, *auth_args, "pull", "--rebase", "--autostash",
+                       timeout=timeout, env=auth_env)
         if rb.returncode != 0:
             # #25, #80: a conflict confined to STATE.md snapshots, registry.json
             # or page bookkeeping is auto-resolved (prefer_local=False — a
@@ -229,7 +244,8 @@ def pull_store(store, timeout=DEFAULT_TIMEOUT):
         res["up_to_date"] = False
         res["conflict"] = False
         res["offline"] = False
-        res["reason"] = f"unexpected error; skipped ({e})."
+        res["auth_failed"] = False
+        res["reason"] = ms.redact(f"unexpected error; skipped ({e}).", token)
         return res
     finally:
         if lock is not None:
@@ -241,13 +257,15 @@ def pull_store(store, timeout=DEFAULT_TIMEOUT):
 
 def _failed(reason):
     return {"pulled": False, "up_to_date": False, "conflict": False,
-            "offline": False, "reason": reason}
+            "offline": False, "auth_failed": False, "reason": reason}
 
 
 def pull_attached(store, timeout=DEFAULT_TIMEOUT):
     """Pull every store attached beside `store` (#139), in registry order.
     Returns [(attached_store, result)]; one store's failure never stops the
-    next, and like `pull_store` this never raises."""
+    next, and like `pull_store` this never raises. Each store takes only its
+    own `$OKFMEM_GIT_TOKEN_<NAME>` (#140): a token meant for the home store
+    never goes to another store's remote."""
     try:
         engine = os.path.dirname(os.path.realpath(__file__))
         if engine not in sys.path:
@@ -266,7 +284,8 @@ def pull_attached(store, timeout=DEFAULT_TIMEOUT):
             out.append((a, _failed(f"{a['path']} is not cloned{hint}.")))
             continue
         try:
-            out.append((a, pull_store(a["path"], timeout=timeout)))
+            out.append((a, pull_store(a["path"], timeout=timeout,
+                                      token=ms.store_token(a["name"]))))
         except Exception as e:
             out.append((a, _failed(f"unexpected error; skipped ({e}).")))
     return out
@@ -455,12 +474,12 @@ def main():
                     help="session ID for writing baseline record in .okfmem/sessions/<session_id>.json")
     args = ap.parse_args()
 
-    res = pull_store(args.store)
-    if not args.quiet:
+    res = pull_store(args.store, token=ms.store_token())
+    if not args.quiet or res.get("auth_failed"):
         print(f"okfmem pull: {res['reason']}")
     attached = pull_attached(args.store)
-    if not args.quiet:
-        for a, r in attached:
+    for a, r in attached:
+        if not args.quiet or r.get("auth_failed"):
             print(f"okfmem pull [{a['name']}]: {r['reason']}")
 
     notice = unlinked_repo_notice(args.store)
@@ -482,11 +501,12 @@ def main():
             pass  # fail-open
 
     # Fail-open: non-zero ONLY on a rebase conflict a human must resolve, in
-    # the home store or an attached one. Offline / no-upstream /
-    # already-up-to-date all exit 0 so an automated caller (a SessionStart
-    # hook) never trips on this.
-    conflict = res["conflict"] or any(r["conflict"] for _, r in attached)
-    sys.exit(1 if conflict else 0)
+    # the home store or an attached one, or when a caller-supplied token
+    # failed (#140). Offline / no-upstream / already-up-to-date all exit 0 so
+    # an automated caller (a SessionStart hook) never trips on this.
+    results = [res] + [r for _, r in attached]
+    failed = any(r["conflict"] or r.get("auth_failed") for r in results)
+    sys.exit(1 if failed else 0)
 
 
 if __name__ == "__main__":
