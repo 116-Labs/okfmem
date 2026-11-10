@@ -312,6 +312,18 @@ To import into an attached team store, or without a terminal, use `okfmem inbox 
 
 **Inbox text is untrusted until you review it.** Nothing in the inbox reaches a loaded page without `okfmem inbox review`: `okfmem pull`, `consolidate` and the Stop hook fetch only the store's branches, never the inbox refs. Read a page before you accept or merge it the way you would read any text from the internet.
 
+#### Share a repo's memory (`okfmem export`)
+To hand one repo's traps, decisions and runbooks to a teammate who works on the same repo, export them as a bundle; the teammate imports it through the inbox above, with review.
+
+```bash
+okfmem export --repo demo --out ./demo-bundle [--label topic:ci]... [--archive] [--dry-run] [--json]
+okfmem inbox push ./demo-bundle --source export --repo owner/demo && okfmem inbox review   # the receiver
+```
+
+The bundle holds the live pages labelled `repo:demo` or a registry alias of it (`--label` keeps pages with any given label; with `--repo` too, a page must match both; `--archive` adds archived pages), plus a `manifest.json` with each page's sha256, the held pages and every link to a page outside the bundle. `MEMORY*.md`, `STATE.md`, `CONTEXT.md`, `state/`, `views/` and `type: user` pages are never exported. A page a secret pattern or the inbox leak scan hits is held, not redacted: it is listed with its reason so you can fix it and export again. Exported pages lose `last_accessed`, `access_count` and `pinned`, so the receiver's decay starts fresh, and gain the `repo:demo` label; their bodies are unchanged. `--out` must be a new or empty directory, `--dry-run` writes nothing, and `--json` prints the manifest on stdout. The command prints the exact import line for the receiver.
+
+**Read the bundle before you send it.** Export detects secret patterns only, not names, hostnames or private context. The receiver still accepts each page through `okfmem inbox review`.
+
 ### 10. Remote access over MCP (`okfmem mcp`)
 An assistant with no local file system can read selected pages and propose new ones through an MCP server. Its tools are `find`, `read_page`, `read_index`, `read_state` and `propose_page`. The only write is `propose_page`, which pushes to the inbox above, so nothing reaches `pages/`, `state/` or `views/` until `okfmem inbox review` accepts it. It is opt-in and standard library only.
 
