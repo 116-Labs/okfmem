@@ -97,15 +97,19 @@ _CREDENTIAL_HELPER = (
 _AUTHOR_RE = re.compile(r"^\s*([^<>]*?)\s*<([^<>\s]+)>\s*$")
 
 
+def token_env_name(name=None):
+    """`OKFMEM_GIT_TOKEN`, or `OKFMEM_GIT_TOKEN_<NAME>` for the attached store
+    <NAME> (non-alphanumerics become `_`, so distinct names can share one)."""
+    if not name:
+        return TOKEN_ENV
+    return TOKEN_ENV + "_" + re.sub(r"[^A-Za-z0-9]", "_", name).upper()
+
+
 def store_token(name=None, environ=None):
-    """The caller's token for one store (#140): `$OKFMEM_GIT_TOKEN` for the store
-    a command targets, `$OKFMEM_GIT_TOKEN_<NAME>` for the attached store <NAME>
-    (non-alphanumerics become `_`). None when unset or empty."""
+    """The caller's token for one store (#140), read from `token_env_name(name)`.
+    None when unset or empty."""
     env = os.environ if environ is None else environ
-    key = TOKEN_ENV
-    if name:
-        key += "_" + re.sub(r"[^A-Za-z0-9]", "_", name).upper()
-    return env.get(key) or None
+    return env.get(token_env_name(name)) or None
 
 
 def git_auth(token):

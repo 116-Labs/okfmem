@@ -219,6 +219,28 @@ def test_attached_store_takes_only_its_own_token(tmp_path, server, monkeypatch):
     assert Path(team, "page.md").read_text(encoding="utf-8") == "v2\n"
 
 
+def test_attached_stores_sharing_a_token_variable_get_no_token(
+        tmp_path, server, monkeypatch):
+    root, base = server
+    origin_a, team_a = _http_store(tmp_path, root, base, name="team-a")
+    _advance(tmp_path, origin_a, "v2\n")
+    _origin_b, team_b = _http_store(tmp_path, root, base, name="team.a")
+    home = tmp_path / "home"
+    home.mkdir()
+    _write(home, "registry.json", json.dumps(
+        {"map": {}, "overrides": {}, "stores": [{"name": "team-a", "path": team_a},
+                                               {"name": "team.a", "path": team_b}]}))
+    monkeypatch.setenv("OKFMEM_GIT_TOKEN_TEAM_A", TOKEN)
+
+    results = mp.pull_attached(str(home))
+
+    assert [a["name"] for a, _ in results] == ["team-a", "team.a"]
+    for _a, res in results:
+        assert res["pulled"] is False
+        assert "OKFMEM_GIT_TOKEN_TEAM_A not used" in res["reason"]
+    assert Path(team_a, "page.md").read_text(encoding="utf-8") == "v1\n"
+
+
 def test_sync_with_token_and_author_pushes_a_commit_by_that_author(
         tmp_path, server, monkeypatch, capsys):
     root, base = server

@@ -50,6 +50,7 @@ import re
 import subprocess
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timezone
 
 import memory_sync as ms  # reuse _git / lock helpers — one lock, one lock file
@@ -265,7 +266,8 @@ def pull_attached(store, timeout=DEFAULT_TIMEOUT):
     Returns [(attached_store, result)]; one store's failure never stops the
     next, and like `pull_store` this never raises. Each store takes only its
     own `$OKFMEM_GIT_TOKEN_<NAME>` (#140): a token meant for the home store
-    never goes to another store's remote."""
+    never goes to another store's remote. Stores whose names map to one
+    variable (`team-a`, `team.a`) are pulled without it, and the clash reported."""
     try:
         engine = os.path.dirname(os.path.realpath(__file__))
         if engine not in sys.path:
@@ -276,6 +278,7 @@ def pull_attached(store, timeout=DEFAULT_TIMEOUT):
     except Exception as e:
         return [({"name": "?", "path": "", "remote": None},
                  _failed(f"could not read attached stores; skipped ({e})."))]
+    var_counts = Counter(ms.token_env_name(a["name"]) for a in attached)
     out = []
     for a in attached:
         if not os.path.isdir(a["path"]):
@@ -283,9 +286,16 @@ def pull_attached(store, timeout=DEFAULT_TIMEOUT):
             hint = f" — git clone {url} {a['path']}" if url else ""
             out.append((a, _failed(f"{a['path']} is not cloned{hint}.")))
             continue
+        var = ms.token_env_name(a["name"])
+        token = ms.store_token(a["name"])
+        shared = token is not None and var_counts[var] > 1
         try:
-            out.append((a, pull_store(a["path"], timeout=timeout,
-                                      token=ms.store_token(a["name"]))))
+            res = pull_store(a["path"], timeout=timeout,
+                             token=None if shared else token)
+            if shared:
+                res["reason"] = (f"{res['reason']} ({var} not used: another "
+                                 f"attached store's name maps to it too; rename one.)")
+            out.append((a, res))
         except Exception as e:
             out.append((a, _failed(f"unexpected error; skipped ({e}).")))
     return out
