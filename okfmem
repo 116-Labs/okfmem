@@ -31,6 +31,10 @@ Usage:
                                                  # imported without review — #84
   okfmem inbox import [--into STORE] [--non-interactive --policy FILE [--json]]
                                                  # policy import into an attached store — #141
+  okfmem inbox dump --out DIR [--into STORE] [--json]
+                                                 # read-only: pending pages -> DIR/pending.jsonl
+  okfmem inbox apply DIR/decisions.json [--into STORE] [--yes]
+                                                 # validate, confirm, write, clear refs — #165
   okfmem migrate-to-labels [--dry-run] [--store PATH]
                                                  # flatten projects/ into pages/
                                                  # with injected repo labels — #100
