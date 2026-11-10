@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>okfmem inbox review</title>
+<style>
+body{font:15px/1.45 system-ui,sans-serif;margin:0;color:#1d2125;background:#f6f7f8}
+header{position:sticky;top:0;background:#fff;border-bottom:1px solid #d0d4d8;padding:10px 20px;display:flex;gap:16px;align-items:center}
+header h1{font-size:17px;margin:0;flex:1}
+main{padding:16px 20px;max-width:1200px;margin:auto}
+.card{background:#fff;border:1px solid #d0d4d8;border-radius:6px;margin-bottom:16px;padding:12px}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+pre{white-space:pre-wrap;word-break:break-word;background:#f0f2f4;padding:8px;border-radius:4px;max-height:320px;overflow:auto;margin:4px 0}
+.meta{color:#5a636b;font-size:13px}.warn{color:#a4260a;font-weight:600}
+button{padding:5px 12px;border:1px solid #8a939b;border-radius:4px;background:#fff;cursor:pointer}
+button.on{background:#1d6fd1;color:#fff;border-color:#1d6fd1}
+button.done{background:#1a7f37;color:#fff;border-color:#1a7f37}
+input,select,textarea{font:inherit;width:100%;box-sizing:border-box}
+.row{display:flex;gap:8px;margin:8px 0;align-items:center;flex-wrap:wrap}
+.row label{flex:1;min-width:140px}
+#msg{white-space:pre-wrap}
+@media(prefers-color-scheme:dark){body{background:#16181a;color:#e4e6e8}header,.card{background:#1f2225;border-color:#3a4046}pre{background:#2a2e32}button{background:#2a2e32;color:#e4e6e8}input,select,textarea{background:#2a2e32;color:#e4e6e8}}
+</style></head><body>
+<header><h1>okfmem inbox review</h1>
+<label><input type="checkbox" id="showall" style="width:auto"> show all</label>
+<span id="count" class="meta"></span>
+<button class="done" id="done">Done</button></header>
+<main><div id="list"></div><div id="msg"></div></main>
+<script>
+"use strict";
+const token = new URLSearchParams(location.search).get("t") || "";
+const api = (path, body) => fetch(path, {
+  method: body === undefined ? "GET" : "POST",
+  headers: {"X-Okfmem-Token": token, "Content-Type": "application/json"},
+  body: body === undefined ? undefined : JSON.stringify(body)}).then(r => r.json());
+let S = null;
+const dec = {};
+
+function el(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "onclick" || k === "oninput" || k === "onchange") e[k] = v; else e.setAttribute(k, v);
+  }
+  for (const c of kids) e.append(c);
+  return e;
+}
+function visible(r) {
+  if ($("showall").checked || !S.has_decisions) return true;
+  const d = dec[r.id];
+  return !d || d.confidence === "low";
+}
+function $(id) { return document.getElementById(id); }
+function set(id, patch) { dec[id] = Object.assign(dec[id] || {id: id}, patch); render(); }
+function pageOf(d) { d.page = d.page || {}; return d.page; }
+
+function card(r) {
+  const d = dec[r.id] || {};
+  const act = d.action;
+  const c = el("div", {class: "card"});
+  c.append(el("div", {}, el("b", {}, r.slug), " ",
+    el("span", {class: "meta"}, `${r.id} · project ${r.project || "(none)"} · ${(r.meta && r.meta.source) || ""}`)));
+  if (r.leaks && r.leaks.length) c.append(el("div", {class: "warn"}, "leak gate: " + r.leaks.join(", ")));
+  if (d.question) c.append(el("div", {class: "meta"}, "judge asks: " + d.question));
+  if (d.reason) c.append(el("div", {class: "meta"}, "judge says: " + d.reason));
+  const cols = el("div", {class: "cols"});
+  cols.append(el("div", {}, el("div", {class: "meta"}, "candidate"), el("pre", {}, r.text)));
+  const near = el("div", {}, el("div", {class: "meta"}, "closest existing pages"));
+  for (const n of r.near) {
+    near.append(el("div", {}, el("b", {}, n.slug), el("span", {class: "meta"}, ` ${n.why} — ${n.description}`)));
+  }
+  if (!r.near.length) near.append(el("div", {class: "meta"}, "none"));
+  cols.append(near);
+  c.append(cols);
+  const bar = el("div", {class: "row"});
+  const btn = (label, a, extra) => el("button", {class: act === a ? "on" : "", onclick: () =>
+    set(r.id, Object.assign({action: a, confidence: "high"}, extra || {}))}, label);
+  bar.append(btn("accept as new", "new"), btn("merge into…", "merge", {target: d.target || (r.near[0] || {}).slug || ""}),
+    btn("drop", "drop"));
+  c.append(bar);
+  if (act === "merge") {
+    c.append(el("div", {class: "row"}, el("label", {}, "target slug",
+      el("input", {value: d.target || "", oninput: e => { d.target = e.target.value; }}))));
+  }
+  if (act === "new") {
+    const p = pageOf(d);
+    const f = (label, key, ph) => el("label", {}, label,
+      el("input", {value: p[key] || "", placeholder: ph, oninput: e => { p[key] = e.target.value; }}));
+    c.append(el("div", {class: "row"}, f("slug", "slug", r.slug), f("name", "name", ""),
+      f("description", "description", ""), f("type", "type", "")));
+    c.append(el("label", {}, "edit body before accepting (blank = candidate body)",
+      el("textarea", {rows: "6", oninput: e => { d.add = e.target.value; }}, d.add || "")));
+  }
+  return c;
+}
+
+function render() {
+  const list = $("list");
+  list.replaceChildren();
+  let shown = 0;
+  for (const r of S.records) {
+    if (S.covered.includes(r.id) || !visible(r)) continue;
+    list.append(card(r)); shown++;
+  }
+  $("count").textContent = `${shown} of ${S.records.length} shown`;
+}
+
+$("showall").onchange = render;
+$("done").onclick = async () => {
+  const out = Object.values(dec);
+  const res = await api("/api/done", {decisions: out});
+  $("msg").textContent = res.error ? "Not done: " + res.error : (res.output || "Done.");
+  if (!res.error) $("done").disabled = true;
+};
+api("/api/state").then(s => {
+  S = s;
+  for (const d of s.decisions) dec[d.id] = d;
+  render();
+});
+</script></body></html>
