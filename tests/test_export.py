@@ -136,7 +136,16 @@ def test_secret_pages_are_held_listed_and_printed(store, tmp_path, capsys):
     assert all("secret pattern" in r for r in held.values())
     assert "  held pages/token.md: secret pattern" in printed
     assert "  held pages/apikey.md: secret pattern" in printed
-    assert GITHUB_TOKEN not in printed
+    assert "a token-shaped value on line 8" in held["token.md"]
+    assert 'secret pattern: "api_key" on line 8' in held["apikey.md"]
+    assert GITHUB_TOKEN not in printed and "abcd1234efgh5678" not in printed
+
+
+def test_prose_secret_hold_names_key_word_and_line_not_value(store):
+    body = "Intro.\n\nCheck the deploy token permissions before release.\n"
+    _write(os.path.join(store, "pages", "prose.md"), _page("Prose", ["repo:demo"], body))
+    held = {h["name"]: h["reason"] for h in mx.build_bundle(store, repo="demo")["held"]}
+    assert held["prose.md"] == 'secret pattern: "token" on line 10'
 
 
 def test_exported_page_drops_decay_fields_gains_repo_label_keeps_body(store, tmp_path):

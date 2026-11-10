@@ -47,7 +47,7 @@ from memory_init import (  # noqa: E402
     check_store_layout,
     resolve_project,
 )
-from okfmem_session import scrub  # noqa: E402
+from okfmem_session import _ASSIGN, _COMPILED, scrub  # noqa: E402
 
 DEFAULT_STORE = os.environ.get("OKFMEM_STORE", os.path.expanduser("~/okfmem-store"))
 FORMAT = 1
@@ -98,6 +98,18 @@ def rewrite(text, repo=None):
     return merge_labels(text, [f"repo:{repo}"], warn=None) if repo else text
 
 
+def secret_locations(text):
+    """Where scrub() redacts, as `"<key>" on line N` or `a token-shaped value on
+    line N`; never the matched value, so the reason itself leaks nothing."""
+
+    def line(m):
+        return text.count("\n", 0, m.start()) + 1
+
+    found = {(line(m), "a token-shaped value") for rx in _COMPILED for m in rx.finditer(text)}
+    found |= {(line(m), f'"{m.group(1)}"') for m in _ASSIGN.finditer(text)}
+    return [f"{what} on line {n}" for n, what in sorted(found)]
+
+
 def hold_reasons(name, text):
     reasons = []
     if not importable_name(name):
@@ -105,7 +117,8 @@ def hold_reasons(name, text):
     if page_fields(text) is None:
         reasons.append("no OKF frontmatter (name, description, type)")
     if scrub(text) != text:
-        reasons.append("secret pattern")
+        where = secret_locations(text)
+        reasons.append(("secret pattern: " + ", ".join(where)) if where else "secret pattern")
     hits = leak_hits(text)
     if hits:
         reasons.append("leak gate: " + ", ".join(hits))
