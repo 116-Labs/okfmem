@@ -411,6 +411,19 @@ def comment_body(verdict: str, reasons: list[str], sha: str | None) -> str:
     return "\n".join(lines) + "\n"
 
 
+def reopened_by_other(
+    api, repo: str, number: int, pr_author: str | None, action, sender
+) -> str | None:
+    """Who other than the author ever reopened the PR; raises ApiError if unreadable."""
+    if action == "reopened" and sender and sender != pr_author:
+        return sender
+    for event in paged(api, f"/repos/{repo}/issues/{number}/events"):
+        actor = (event.get("actor") or {}).get("login")
+        if event.get("event") == "reopened" and actor and actor != pr_author:
+            return actor
+    return None
+
+
 def review_pr(
     api,
     repo: str,
@@ -426,10 +439,18 @@ def review_pr(
     sha = ((pr or {}).get("head") or {}).get("sha")
     pr_author = ((pr or {}).get("user") or {}).get("login")
 
-    if verdict == "reject" and action == "reopened" and sender and sender != pr_author:
-        # Never re-close what a maintainer deliberately reopened.
-        verdict = "escalate"
-        reasons = [f"reopened by @{sender} after an automatic close", *reasons]
+    if verdict == "reject":
+        # Never re-close what a maintainer reopened, on that event or any later push.
+        try:
+            reopener = reopened_by_other(api, repo, number, pr_author, action, sender)
+        except ApiError as exc:
+            verdict = "escalate"
+            reasons = [f"could not read whether the PR was reopened: {exc}", *reasons]
+        else:
+            if reopener:
+                verdict = "escalate"
+                note = f"reopened by @{reopener} after an automatic close"
+                reasons = [note, *reasons]
 
     if verdict == "approve":
         if not sha:

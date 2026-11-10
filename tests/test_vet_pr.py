@@ -238,12 +238,15 @@ def test_comment_check_writes_the_hide_output(tmp_path):
 class FakeGitHub:
     """A canned REST API for repo o/r, PR 7; records every call."""
 
-    def __init__(self, user=None, pull=None, files=(), runs=(), comments=(), fail=()):
+    def __init__(
+        self, user=None, pull=None, files=(), runs=(), comments=(), events=(), fail=()
+    ):
         self.user = user
         self.pull = pull if pull is not None else pr()
         self.files = list(files)
         self.runs = list(runs)
         self.comments = list(comments)
+        self.events = list(events)
         self.fail = fail
         self.calls = []
 
@@ -265,6 +268,8 @@ class FakeGitHub:
             return self.files
         if route == "/repos/o/r/issues/7/comments":
             return self.comments
+        if route == "/repos/o/r/issues/7/events":
+            return self.events
         if route == "/repos/o/r/actions/runs":
             return {"workflow_runs": self.runs}
         raise AssertionError(f"unexpected {method} {path}")
@@ -339,6 +344,53 @@ def test_reject_reopened_by_a_maintainer_escalates_instead_of_closing():
     api = FakeGitHub(user=author(), pull=pr(body="crypto airdrop"), files=SMALL_DIFF)
     (verdict, _), _ = _review(api, action="reopened", sender="maintainer")
     assert verdict == "escalate"
+    assert not any(m == "PATCH" and p.endswith("/pulls/7") for m, p, _ in api.writes())
+
+
+def _closed_and_reopened_by(login):
+    return [
+        {"event": "closed", "actor": {"login": "github-actions[bot]"}},
+        {"event": "reopened", "actor": {"login": login}},
+    ]
+
+
+def test_synchronize_after_a_maintainer_reopen_escalates_instead_of_closing():
+    api = FakeGitHub(
+        user=author(),
+        pull=pr(body="Recover the account name when the cache is cold."),
+        files=SMALL_DIFF,
+        events=_closed_and_reopened_by("maintainer"),
+    )
+    (verdict, reasons), _ = _review(api, action="synchronize", sender="octo")
+    assert verdict == "escalate"
+    assert reasons[0] == "reopened by @maintainer after an automatic close"
+    writes = api.writes()
+    assert ("POST", "/repos/o/r/issues/7/labels", {"labels": ["needs-human"]}) in writes
+    assert not any(m == "PATCH" and p.endswith("/pulls/7") for m, p, _ in writes)
+
+
+def test_spam_reopened_only_by_its_author_is_closed_again():
+    api = FakeGitHub(
+        user=author(),
+        pull=pr(body="crypto airdrop"),
+        files=SMALL_DIFF,
+        events=_closed_and_reopened_by("octo"),
+    )
+    (verdict, _), _ = _review(api, action="synchronize", sender="octo")
+    assert verdict == "reject"
+    assert ("PATCH", "/repos/o/r/pulls/7", {"state": "closed"}) in api.writes()
+
+
+def test_unreadable_reopen_history_escalates_instead_of_closing():
+    api = FakeGitHub(
+        user=author(),
+        pull=pr(body="crypto airdrop"),
+        files=SMALL_DIFF,
+        fail=("/repos/o/r/issues/7/events",),
+    )
+    (verdict, reasons), _ = _review(api, action="synchronize", sender="octo")
+    assert verdict == "escalate"
+    assert reasons[0].startswith("could not read whether the PR was reopened")
     assert not any(m == "PATCH" and p.endswith("/pulls/7") for m, p, _ in api.writes())
 
 
