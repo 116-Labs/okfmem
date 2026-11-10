@@ -4112,6 +4112,14 @@ def cmd_status(store, show_all=False, project_filter=None):
             f"(leftover pre-rename clone — not deleted automatically)"
         )
 
+    try:
+        from memory_inbox import count_pending, nudge_line, DEFAULT_THRESHOLD
+        pending_cnt = count_pending(store)
+        if pending_cnt > DEFAULT_THRESHOLD:
+            print(f"\n  {nudge_line(pending_cnt)}")
+    except Exception:
+        pass
+
     nudge = update_nudge()
     if nudge:
         print(f"\n  {glyph('chg')} {nudge}")

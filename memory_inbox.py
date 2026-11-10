@@ -80,6 +80,7 @@ SKIP_NAMES = {"MEMORY.md", "STATE.md", "CONTEXT.md"}
 PAGE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.md$")
 REF_PART_RE = re.compile(r"[^A-Za-z0-9._-]+")
 SIMILARITY_THRESHOLD = 0.85
+DEFAULT_THRESHOLD = 10
 NET_TIMEOUT = 60
 
 
@@ -447,19 +448,37 @@ def render_pending(pushes):
     return lines
 
 
-def pull(store, out=print):
+def count_pending(store, dest=None):
+    """Total number of pending pages in `store` across all inbox pushes."""
+    try:
+        pushes = pending(store, dest=dest)
+        return sum(len(p.get("pages", [])) for p in pushes)
+    except InboxReadError:
+        return 0
+
+
+def nudge_line(count):
+    """Format the pending inbox nudge line for status, pull, or inbox pull."""
+    return f"okfmem inbox: {count} pending — run okfmem inbox review"
+
+
+def pull(store, out=print, threshold=DEFAULT_THRESHOLD):
     ok, err = fetch_inbox(store)
     if not ok:
         out(f"okfmem inbox pull: fetch failed ({err or 'offline?'}) — "
             "listing what was fetched before.")
     try:
-        lines = render_pending(pending(store))
+        pushes = pending(store)
+        lines = render_pending(pushes)
     except InboxReadError as e:
         out(f"okfmem inbox pull: could not read the inbox ({_safe(e)}) — "
             "nothing listed.")
         return 1
     for line in lines:
         out(line)
+    total_pages = sum(len(p.get("pages", [])) for p in pushes)
+    if total_pages > threshold:
+        out(nudge_line(total_pages))
     return 0
 
 
@@ -1751,6 +1770,20 @@ def _isatty():
         return False
 
 
+def review_walkthrough_text():
+    """Text explaining how inbox triage works and presenting the two faster choices."""
+    return (
+        "okfmem inbox review: many pages pending triage.\n\n"
+        "How triage works:\n"
+        "  - A model judges every page against your existing memory and drops, merges or keeps it.\n"
+        "  - You see only the decisions it isn't sure about.\n"
+        "  - Nothing is written until you confirm.\n\n"
+        "Faster paths:\n"
+        "  1. In your harness: run the okfmem-inbox skill (e.g. /okfmem-inbox)\n"
+        "  2. In your browser: okfmem inbox review --web\n"
+    )
+
+
 def no_terminal_hint(cmd, store, into=None):
     """What to run instead when review/import has no terminal; keeps `--into`."""
     base = f"okfmem inbox {cmd} --store {store}" + (f" --into {into}" if into else "")
@@ -1759,6 +1792,29 @@ def no_terminal_hint(cmd, store, into=None):
         hint += (" — or without a terminal: "
                  f"{base} --non-interactive --policy FILE")
     return hint
+
+
+def review_walkthrough(store, dest=None, into=None):
+    """Present the triage walkthrough and prompt for option 1 or 2."""
+    print(review_walkthrough_text())
+    while True:
+        try:
+            choice = input("Choose [1/2] (or Ctrl-C to cancel): ").strip()
+        except EOFError:
+            return 0
+        if choice == "1":
+            print("\nRun /okfmem-inbox in your agent harness (e.g. Claude Code or Antigravity).")
+            return 0
+        elif choice == "2":
+            if not git_clean(dest or store):
+                print("okfmem inbox review: store working tree is dirty — run "
+                      "`okfmem sync` first so the review's commit holds only its own pages.")
+                return 3
+            work = tempfile.mkdtemp(prefix="okfmem-review-")
+            confirm = _interactive_confirm if _isatty() else (lambda: None)
+            return review_web(store, work, confirm, dest=dest, into=into)
+        else:
+            print("Please enter 1 or 2.")
 
 
 def _run_policy_import(store, dest, args):
@@ -1810,6 +1866,10 @@ def main():
     r.add_argument("--store", default=argparse.SUPPRESS)
     r.add_argument("--into", metavar="STORE",
                    help="import into this attached store instead of the home store")
+    r.add_argument("--threshold", type=int, default=DEFAULT_THRESHOLD,
+                   help=f"pending count before walkthrough is shown (default: {DEFAULT_THRESHOLD})")
+    r.add_argument("--each", action="store_true",
+                   help="review page-by-page directly, skipping the walkthrough")
     r.add_argument("--web", action="store_true",
                    help="review in a local browser page instead of the terminal")
     r.add_argument("--dir", metavar="DIR",
@@ -1920,6 +1980,26 @@ def main():
         sys.exit(2)
     if non_interactive:
         sys.exit(_run_policy_import(store, dest, args))
+    if args.cmd == "review" and not args.web:
+        threshold = getattr(args, "threshold", DEFAULT_THRESHOLD)
+        each = getattr(args, "each", False)
+        if not each:
+            try:
+                n_pending = count_pending(store, dest=dest)
+            except Exception:
+                n_pending = 0
+            if n_pending > threshold:
+                if not _isatty():
+                    # With no TTY over threshold: print walkthrough and both options, exit 0
+                    print(review_walkthrough_text().rstrip())
+                    sys.exit(0)
+                else:
+                    try:
+                        code = review_walkthrough(store, dest=dest, into=args.into)
+                    except KeyboardInterrupt:
+                        code = 130
+                    sys.exit(code)
+
     if not _isatty():
         print(no_terminal_hint(args.cmd, store, args.into))
         sys.exit(2)
