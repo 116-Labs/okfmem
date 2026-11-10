@@ -189,6 +189,42 @@ def test_merge_registry_keeps_both_machines_and_target_wins_conflicts(tmp_path, 
     assert "target kept on map: /home/tester/code/clash" in capsys.readouterr().out
 
 
+def test_merge_unions_nested_org_and_stack_overrides(tmp_path, capsys):
+    target = make_store(tmp_path / "dst", {}, registry={
+        "map": {}, "overrides": {"org": {"x": "acme", "clash": "mine"},
+                                 "stack": {"x": "py"}},
+    })
+    source = make_store(tmp_path / "src", {}, registry={
+        "map": {}, "overrides": {"org": {"/Users/you/code/y": "globex", "clash": "theirs"},
+                                 "stack": {"y": "go"}},
+    })
+
+    assert _merge(target, source) == 0
+
+    reg = json.loads(_read(target, "registry.json"))
+    assert reg["overrides"]["org"] == {"/Users/you/code/y": "globex", "clash": "mine",
+                                       "x": "acme"}
+    assert reg["overrides"]["stack"] == {"x": "py", "y": "go"}
+    out = capsys.readouterr().out
+    assert "+2 overrides" in out
+    assert "target kept on overrides.org: clash" in out
+
+
+def test_merge_skips_a_git_file_in_the_source(tmp_path):
+    source = make_store(tmp_path / "src", {"pages/a.md": _page("a", "alpha")})
+    worktree = tmp_path / "src-wt"
+    _git(source, "worktree", "add", "-q", "--detach", str(worktree))
+    assert (worktree / ".git").is_file()
+    target = make_store(tmp_path / "dst", {})
+
+    assert _merge(target, worktree) == 0
+
+    assert (target / "pages" / "a.md").is_file()
+    assert not (target / ".git.orphan").exists()
+    assert ".git" not in mst.store_files(str(worktree))
+    assert _git(target, "status", "--porcelain") == ""
+
+
 def test_merge_refuses_a_malformed_source_registry(tmp_path):
     source = make_store(tmp_path / "src", {"registry.json": "{not json"})
     target = make_store(tmp_path / "dst", {})
@@ -322,6 +358,21 @@ def test_split_into_an_existing_store_never_overwrites(tmp_path):
     assert _split(source, ["alpha"], dest) == 0
     assert "dest copy" in _read(dest, "pages/alpha-one.md")
     assert _read(dest, "pages/alpha-one.md.orphan") == _read(source, "pages/alpha-one.md")
+
+
+def test_split_into_an_existing_store_unions_nested_org_overrides(tmp_path):
+    source = make_store(tmp_path / "src", {"pages/a.md": _page("a", "alpha")}, registry={
+        "map": {"/home/tester/alpha": "alpha"},
+        "overrides": {"org": {"/home/tester/alpha": "acme", "beta": "b"}},
+    })
+    dest = make_store(tmp_path / "work", {}, registry={
+        "map": {}, "overrides": {"org": {"gamma": "g"}},
+    })
+
+    assert _split(source, ["alpha"], dest) == 0
+
+    reg = json.loads(_read(dest, "registry.json"))
+    assert reg["overrides"]["org"] == {"/home/tester/alpha": "acme", "gamma": "g"}
 
 
 def test_split_dry_run_writes_nothing(tmp_path, capsys):

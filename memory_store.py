@@ -11,7 +11,7 @@ Both work on the flat label layout: a project is its `repo:<name>` label on page
 An import never overwrites a page: a file that differs from the target's lands
 beside it as `<path>.orphan` (`.orphan.2`, ...). A state file goes to the side
 with the newer `modified:` stamp (else its last commit time). registry.json is
-unioned, the target winning per key. `views/` is compiled, never copied: the
+unioned (`overrides.org` / `.stack` one level deeper), the target winning per key. `views/` is compiled, never copied: the
 target's views are rebuilt after a merge.
 
 Confirmation (CLAUDE.md "Confirmation discipline"): merge and a copy-only split
@@ -111,7 +111,9 @@ def store_files(store):
         rel_root = os.path.relpath(root, store)
         for name in sorted(files):
             rel = name if rel_root == "." else f"{rel_root}/{name}".replace(os.sep, "/")
-            if rel in _STORE_OWN or os.path.islink(os.path.join(root, name)):
+            # A worktree or submodule has a `.git` file holding a local gitdir path.
+            if (rel in _STORE_OWN or name == ".git"
+                    or os.path.islink(os.path.join(root, name))):
                 continue
             if any(fnmatch.fnmatch(name, p) for p in _RUNTIME_FILES):
                 continue
@@ -208,6 +210,19 @@ def read_registry(store):
     return data
 
 
+_NESTED_OVERRIDES = ("org", "stack")
+
+
+def _registry_sections(reg, nested=()):
+    """{section: entries}, each `overrides.<name>` in `nested` split out as a
+    section of its own, so its keys are counted and reported one by one."""
+    sections = {key: dict(reg.get(key, {})) for key in ("map", "overrides", "aliases")}
+    for name in nested:
+        if isinstance(sections["overrides"].get(name), dict):
+            sections[f"overrides.{name}"] = sections["overrides"].pop(name)
+    return sections
+
+
 def merge_registry(target_reg, source_reg):
     """(merged registry, ['section: key' entries where the target won])."""
     merged = mi._merge_registry(source_reg, target_reg)
@@ -219,11 +234,20 @@ def merge_registry(target_reg, source_reg):
     aliases = {**source_reg.get("aliases", {}), **target_reg.get("aliases", {})}
     if aliases:
         merged["aliases"] = dict(sorted(aliases.items()))
+    nested = []
+    for name in _NESTED_OVERRIDES:
+        src = source_reg.get("overrides", {}).get(name)
+        tgt = target_reg.get("overrides", {}).get(name)
+        if isinstance(src, dict) and isinstance(tgt, dict):
+            merged["overrides"][name] = dict(sorted({**src, **tgt}.items()))
+            nested.append(name)
+    src_sections = _registry_sections(source_reg, nested)
+    tgt_sections = _registry_sections(target_reg, nested)
     conflicts = sorted(
-        f"{key}: {k}"
-        for key in ("map", "overrides", "aliases")
-        for k, v in source_reg.get(key, {}).items()
-        if k in target_reg.get(key, {}) and target_reg[key][k] != v
+        f"{section}: {k}"
+        for section, entries in src_sections.items()
+        for k, v in entries.items()
+        if k in tgt_sections.get(section, {}) and tgt_sections[section][k] != v
     )
     return merged, conflicts
 
@@ -310,8 +334,10 @@ def _report(actions, reg_note, out):
 def _registry_note(before, merged, conflicts, exists):
     if exists and merged == before:
         return ""
-    added = {k: len(set(merged.get(k, {})) - set(before.get(k, {})))
-             for k in ("map", "overrides", "aliases")}
+    old = _registry_sections(before, _NESTED_OVERRIDES)
+    new = _registry_sections(merged, _NESTED_OVERRIDES)
+    added = {k: len(set(entries) - set(old.get(k, {}))) for k, entries in new.items()}
+    added["overrides"] = sum(n for k, n in added.items() if k.startswith("overrides"))
     note = (f"registry.json: +{added['map']} map, +{added['overrides']} overrides, "
             f"+{added['aliases']} aliases")
     if conflicts:
