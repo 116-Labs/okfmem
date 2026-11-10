@@ -15,10 +15,11 @@ the maintainer without letting them anywhere near a loaded page:
       {"ref", "pages", "created"} (or {"error"} and a non-zero exit); text goes to stderr.
   okfmem inbox pull
       Fetch `refs/okfmem/inbox/*` and list what is pending, by project then slug.
-  okfmem inbox review
+  okfmem inbox review [--into STORE]
       Interactive: walk each pending page, flag a slug match or a near-duplicate
-      name/description, then accept / merge / drop it. A push whose pages are
-      all handled has its ref deleted on the remote. Ends with `okfmem sync`.
+      name/description, then accept / merge / drop it. A page the leak gate hits
+      can only be dropped or skipped. A push whose pages are all handled has its
+      ref deleted on the remote. Ends with `okfmem sync`.
 
   okfmem inbox import [--into STORE] --non-interactive --policy FILE [--json]
       Import, without a terminal, only the candidates a written policy passes
@@ -352,9 +353,10 @@ def _parse_tree(data, raw_len):
     return entries
 
 
-def pending(store):
+def pending(store, dest=None):
     """Every pending push, oldest first: dicts with ref, sha, meta, project, pages
-    (each page: name, slug, text, fields)."""
+    (each page: name, slug, text, fields). With `dest`, a push's project is
+    resolved in that target store first, then in `store`."""
     r = _git(store, "for-each-ref", "--format=%(refname) %(objectname)", INBOX_NS)
     if r.returncode != 0:
         return []
@@ -390,7 +392,9 @@ def pending(store):
                           "fields": fields})
         repo = meta.get("repo")
         if repo not in projects:
-            projects[repo] = resolve_repo_project(store, repo)
+            in_dest = (resolve_repo_project(dest, repo)
+                       if dest and dest != store else None)
+            projects[repo] = in_dest or resolve_repo_project(store, repo)
         pushes.append({"ref": ref, "sha": sha, "meta": meta, "pages": pages,
                        "project": projects[repo]})
     pushes.sort(key=lambda p: (str(p["meta"].get("time") or ""), p["ref"]))
@@ -781,7 +785,7 @@ def policy_reasons(policy, push_, page, project, dest_pages):
     elif repo not in allowed and (project or "").lower() not in allowed:
         reasons.append(f"repo '{repo}' is not allowed")
     if not project:
-        reasons.append("repo resolves to no project in the target store")
+        reasons.append("repo resolves to no project in the target or home store")
     size = len(page["text"].encode("utf-8"))
     if size > policy["max_page_bytes"]:
         reasons.append(f"size {size} bytes exceeds cap {policy['max_page_bytes']}")
@@ -802,7 +806,7 @@ def import_policy(store, dest, policy, imported_by, out=print, do_sync=True):
         out(f"okfmem inbox import: fetch failed ({err or 'offline?'}) — "
             "importing what was fetched before.")
     try:
-        pushes = pending(store)
+        pushes = pending(store, dest)
     except InboxReadError as e:
         out(f"okfmem inbox import: could not read the inbox ({_safe(e)}) — "
             "nothing imported or deleted.")
@@ -883,9 +887,15 @@ def review_page(store, project, push_, page, all_pending, decide, counts, out, t
     others = [(f"{q['slug']} ({o['meta'].get('machine') or '?'})", q["fields"])
               for o, q in all_pending if q is not page]
     flags = flags_for(page, existing, others)
+    leaks = leak_hits(page["text"])
+    if leaks:
+        flags.append("leak gate: " + ", ".join(leaks) + " — cannot be accepted or merged")
     show_page(project, push_, page, flags, out)
     while True:
         action, arg = decide(push_, page, flags)
+        if action in ("accept", "merge") and leaks:
+            out("  leak gate: " + ", ".join(leaks) + " — drop or skip it instead")
+            continue
         if action == "accept":
             stamped = with_provenance_page(page, push_["meta"], imported_by)
             dest = accept_page(dest_store, project, stamped)
@@ -951,7 +961,7 @@ def review(store, decide, ask_project, out=print, today=None, do_sync=True,
             "reviewing what was fetched before.")
     counts = {"accepted": 0, "merged": 0, "dropped": 0, "deleted": 0}
     try:
-        pushes = pending(store)
+        pushes = pending(store, dest)
     except InboxReadError as e:
         out(f"okfmem inbox review: could not read the inbox ({_safe(e)}) — "
             "nothing reviewed or deleted.")
@@ -1036,6 +1046,16 @@ def _isatty():
         return bool(sys.stdin and sys.stdin.isatty())
     except (ValueError, OSError):
         return False
+
+
+def no_terminal_hint(cmd, store, into=None):
+    """What to run instead when review/import has no terminal; keeps `--into`."""
+    base = f"okfmem inbox {cmd} --store {store}" + (f" --into {into}" if into else "")
+    hint = f"okfmem inbox {cmd}: interactive only — run it in a terminal: {base}"
+    if cmd == "import":
+        hint += (" — or without a terminal: "
+                 f"{base} --non-interactive --policy FILE")
+    return hint
 
 
 def _run_policy_import(store, dest, args):
@@ -1134,8 +1154,7 @@ def main():
     if non_interactive:
         sys.exit(_run_policy_import(store, dest, args))
     if not _isatty():
-        print(f"okfmem inbox {args.cmd}: interactive only — run it in a terminal: "
-              f"okfmem inbox {args.cmd} --store {store}")
+        print(no_terminal_hint(args.cmd, store, args.into))
         sys.exit(2)
     if not git_clean(dest):
         print(f"okfmem inbox {args.cmd}: store working tree is dirty — run "

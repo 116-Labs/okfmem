@@ -145,6 +145,69 @@ def test_cli_json_reports_counts_and_exit_codes(env, team, monkeypatch, capsys):
     assert (payload["imported"], payload["held"], payload["skipped"]) == (1, 1, 0)
 
 
+def _review_into(env, team, decide):
+    mx.fetch_inbox(env["store"])
+    out = []
+    counts = mx.review(env["store"], decide, lambda repo: None, out=out.append,
+                       do_sync=False, dest=team, imported_by="maintainer")
+    return counts, out
+
+
+def _accept_then_skip():
+    seen = set()
+
+    def decide(push_, page, flags):
+        if page["name"] in seen:
+            return ("skip", None)
+        seen.add(page["name"])
+        return ("accept", None)
+    return decide
+
+
+def test_review_into_writes_the_accepted_page_to_dest_with_provenance(env, team):
+    _candidates(env, good=_page("Good", "Pin the runner image"))
+    _push(env)
+    counts, _ = _review_into(env, team, _accept_then_skip())
+    assert counts["accepted"] == 1
+    text = _read(os.path.join(team, "projects", "demo", "good.md"))
+    fields = parse_fields(text, find_frontmatter(text))
+    assert (fields["source"], fields["machine"], fields["ref"]) == ("gaal", "ak47", "#12")
+    assert fields["imported_by"] == "maintainer" and fields["imported_at"].endswith("Z")
+    assert not os.path.exists(os.path.join(env["store"], "projects", "demo", "good.md"))
+
+
+def test_review_into_refuses_to_accept_a_page_the_leak_gate_hits(env, team):
+    _candidates(env, leaky=_page("Leaky", "Has a key",
+                                 body="-----BEGIN RSA PRIVATE KEY-----\nabc\n"))
+    _push(env)
+    counts, out = _review_into(env, team, _accept_then_skip())
+    assert counts["accepted"] == 0
+    assert not os.path.exists(os.path.join(team, "projects", "demo", "leaky.md"))
+    assert any("leak gate: private key" in line for line in out)
+    assert [p["name"] for push_ in mx.pending(env["store"]) for p in push_["pages"]] == [
+        "leaky.md"]
+
+
+def test_project_known_only_to_the_target_store_is_imported_there(env, team):
+    _write(os.path.join(team, "projects", "widgets", "MEMORY.md"), "# MEMORY — widgets\n")
+    _git(team, "add", "-A")
+    _git(team, "commit", "-qm", "widgets")
+    _candidates(env, good=_page("Good", "Pin the runner image"))
+    code, _ = mx.push(env["worker"], env["cand"], "gaal", repo="acme/widgets",
+                      ref="#12", machine="ak47", out=[].append)
+    assert code == 0
+    result, _ = _run(env, team, POLICY.replace("acme/demo", "acme/widgets"))
+    assert result["imported"] == 1, result["held_pages"]
+    assert os.path.isfile(os.path.join(team, "projects", "widgets", "good.md"))
+
+
+@pytest.mark.parametrize("cmd", ["review", "import"])
+def test_no_terminal_hint_keeps_into(cmd):
+    hint = mx.no_terminal_hint(cmd, "/stores/home", "team")
+    assert f"okfmem inbox {cmd} --store /stores/home --into team" in hint
+    assert ("--non-interactive --policy FILE" in hint) == (cmd == "import")
+
+
 def test_cli_refuses_unknown_store_and_policy_without_non_interactive(env, team, monkeypatch):
     for argv in (["import", "--into", "nope", "--non-interactive", "--policy", "x"],
                  ["import", "--policy", "x"]):
