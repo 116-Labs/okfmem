@@ -237,8 +237,32 @@ def test_attached_stores_sharing_a_token_variable_get_no_token(
     assert [a["name"] for a, _ in results] == ["team-a", "team.a"]
     for _a, res in results:
         assert res["pulled"] is False
+        assert res["token_clash"] is True
         assert "OKFMEM_GIT_TOKEN_TEAM_A not used" in res["reason"]
     assert Path(team_a, "page.md").read_text(encoding="utf-8") == "v1\n"
+
+
+def test_quiet_pull_prints_a_token_clash_and_exits_1(
+        tmp_path, server, monkeypatch, capsys):
+    root, base = server
+    _origin_a, team_a = _http_store(tmp_path, root, base, name="team-a")
+    _origin_b, team_b = _http_store(tmp_path, root, base, name="team.a")
+    home = tmp_path / "home"
+    home.mkdir()
+    _write(home, "registry.json", json.dumps(
+        {"map": {}, "overrides": {}, "stores": [{"name": "team-a", "path": team_a},
+                                               {"name": "team.a", "path": team_b}]}))
+    monkeypatch.setenv("OKFMEM_GIT_TOKEN_TEAM_A", TOKEN)
+
+    code, out = _run(mp.main, ["okfmem", "--quiet", "--store", str(home)],
+                     monkeypatch, capsys)
+
+    assert code == 1
+    for name in ("team-a", "team.a"):
+        line = next(ln for ln in out.splitlines()
+                    if ln.startswith(f"okfmem pull [{name}]: "))
+        assert "OKFMEM_GIT_TOKEN_TEAM_A not used" in line
+    assert TOKEN not in out
 
 
 def test_sync_with_token_and_author_pushes_a_commit_by_that_author(

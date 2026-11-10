@@ -28,7 +28,8 @@ Fail-open contract (this is the part #16's SessionStart hook depends on):
   - `$OKFMEM_GIT_TOKEN` (the --store store) and `$OKFMEM_GIT_TOKEN_<NAME>` (an
     attached store) authenticate HTTPS through a one-shot credential helper
     (#140). A fetch that fails with one exits 1 with one line naming the store;
-    the token is never printed or written to `.git/config` or a credential store.
+    so does a token withheld because two attached names map to its variable.
+    The token is never printed or written to `.git/config` or a credential store.
 A caller that must never block (a SessionStart hook) can invoke this command
 as-is and either ignore its exit code entirely or treat 1 as "needs a human,
 but don't fail the session" — it never hangs and never leaves a half-done
@@ -267,7 +268,8 @@ def pull_attached(store, timeout=DEFAULT_TIMEOUT):
     next, and like `pull_store` this never raises. Each store takes only its
     own `$OKFMEM_GIT_TOKEN_<NAME>` (#140): a token meant for the home store
     never goes to another store's remote. Stores whose names map to one
-    variable (`team-a`, `team.a`) are pulled without it, and the clash reported."""
+    variable (`team-a`, `team.a`) are pulled without it, and their results carry
+    `token_clash: True`."""
     try:
         engine = os.path.dirname(os.path.realpath(__file__))
         if engine not in sys.path:
@@ -293,6 +295,7 @@ def pull_attached(store, timeout=DEFAULT_TIMEOUT):
             res = pull_store(a["path"], timeout=timeout,
                              token=None if shared else token)
             if shared:
+                res["token_clash"] = True
                 res["reason"] = (f"{res['reason']} ({var} not used: another "
                                  f"attached store's name maps to it too; rename one.)")
             out.append((a, res))
@@ -489,7 +492,7 @@ def main():
         print(f"okfmem pull: {res['reason']}")
     attached = pull_attached(args.store)
     for a, r in attached:
-        if not args.quiet or r.get("auth_failed"):
+        if not args.quiet or r.get("auth_failed") or r.get("token_clash"):
             print(f"okfmem pull [{a['name']}]: {r['reason']}")
 
     notice = unlinked_repo_notice(args.store)
@@ -512,10 +515,11 @@ def main():
 
     # Fail-open: non-zero ONLY on a rebase conflict a human must resolve, in
     # the home store or an attached one, or when a caller-supplied token
-    # failed (#140). Offline / no-upstream / already-up-to-date all exit 0 so
-    # an automated caller (a SessionStart hook) never trips on this.
+    # failed or was withheld for a name clash (#140). Offline / no-upstream /
+    # already-up-to-date all exit 0 so an automated caller never trips on this.
     results = [res] + [r for _, r in attached]
-    failed = any(r["conflict"] or r.get("auth_failed") for r in results)
+    failed = any(r["conflict"] or r.get("auth_failed") or r.get("token_clash")
+                 for r in results)
     sys.exit(1 if failed else 0)
 
 
