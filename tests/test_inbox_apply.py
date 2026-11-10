@@ -365,3 +365,176 @@ def test_dispatcher_usage_names_dump_and_apply():
     from conftest import ROOT
     usage = _read(os.path.join(ROOT, "okfmem"))
     assert "okfmem inbox dump" in usage and "okfmem inbox apply" in usage
+
+
+# --------------------------------------------------------------------------
+# okfmem-inbox skill + BRIEF.md (#166)
+# --------------------------------------------------------------------------
+
+def test_okfmem_inbox_brief_lives_in_repo_and_has_no_store_specific_paths():
+    from conftest import ROOT
+    brief_path = os.path.join(ROOT, "skills", "okfmem-inbox", "BRIEF.md")
+    assert os.path.isfile(brief_path)
+    brief = _read(brief_path)
+    assert mx.leak_hits(brief) == []
+    for forbidden in ("okfmem-store", "OKFMEM_STORE", "STORE_PATH", "/Users/",
+                      "/home/", "C:\\", "~/"):
+        assert forbidden not in brief
+    for required in ("pending.jsonl", "decisions.json", "covers", "replace",
+                     "confidence", '"high"', '"low"', "question", "merge",
+                     "drop", "new", "okfmem inbox apply"):
+        assert required in brief
+
+
+def test_okfmem_inbox_skill_writes_only_through_inbox_apply():
+    from conftest import ROOT
+    skill_path = os.path.join(ROOT, "skills", "okfmem-inbox", "SKILL.md")
+    assert os.path.isfile(skill_path)
+    skill = _read(skill_path)
+    fields = parse_fields(skill, find_frontmatter(skill))
+    assert fields["name"] == "okfmem-inbox"
+    for required in ("BRIEF.md", "okfmem inbox dump --store", "30",
+                     "confidence", "okfmem inbox apply", "okfmem inbox review --web",
+                     "Write", "decisions.json"):
+        assert required in skill
+    assert "write only through `okfmem inbox apply`" in skill.lower()
+    assert "never write, edit, or delete files under `pages/`" in skill.lower()
+    assert "refs/okfmem/inbox/*" in skill
+
+
+def test_init_links_okfmem_inbox_into_each_supported_harness_and_update_adds_it(
+        tmp_path, monkeypatch):
+    from conftest import ROOT
+    import memory_codex as mc
+    import memory_init as mi
+    import memory_update as mu_upd
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".gemini").mkdir(parents=True)
+    codex_dir = home / ".codex"
+    codex_dir.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
+    monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+    monkeypatch.setattr(mi.shutil, "which",
+                        lambda name: f"/bin/{name}" if name in ("codex", "agy") else None)
+    monkeypatch.setattr(mc, "supported", lambda: True)
+
+    store = tmp_path / "store"
+    (store / "pages").mkdir(parents=True)
+    (store / "layout.yml").write_text("layout: labels\n", encoding="utf-8")
+
+    dirs = mi.skill_dirs()
+    assert set(dirs) == {"claude_code", "codex", "codex_legacy", "antigravity"}
+
+    engine_skills = os.path.join(ROOT, "skills")
+    for dest in dirs.values():
+        os.makedirs(dest, exist_ok=True)
+        for prior in ("okfmem", "okfmem-curate", "okfmem-save"):
+            os.symlink(os.path.join(engine_skills, prior), os.path.join(dest, prior),
+                       target_is_directory=True)
+    assert "skills missing" in mc.status(str(store))
+
+    monkeypatch.setattr(mu_upd, "_ensure_git_repo", lambda: None)
+    monkeypatch.setattr(mu_upd, "_short", lambda ref="HEAD": "abc1234")
+    monkeypatch.setattr(mu_upd, "_engine_branch_state", lambda: ("main", "main"))
+    monkeypatch.setattr(mu_upd, "_git",
+                        lambda *a, **kw: mx.subprocess.CompletedProcess(a, 0, "", ""))
+
+    real_run = mu_upd.subprocess.run
+    init_calls = []
+
+    def run_init(args, **kw):
+        if args[0] == "git":
+            return real_run(args, **kw)
+        init_calls.append(args)
+        actions = mi.link_skills(dry_run=False)
+        for harness in dirs:
+            assert (harness, "okfmem-inbox", "link") in actions
+        return mx.subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(mu_upd.subprocess, "run", run_init)
+    with pytest.raises(SystemExit) as exc:
+        mu_upd.cmd_update(["--store", str(store)], yes=True)
+    assert exc.value.code == 0
+    assert len(init_calls) == 1 and init_calls[0][1].endswith("memory_init.py")
+
+    for harness, dest in dirs.items():
+        skill_dir = os.path.join(dest, "okfmem-inbox")
+        assert os.path.isfile(os.path.join(skill_dir, "SKILL.md")), harness
+        assert os.path.isfile(os.path.join(skill_dir, "BRIEF.md")), harness
+    assert "skills available" in mc.status(str(store))
+    second = mi.link_skills(dry_run=False)
+    for harness in dirs:
+        assert (harness, "okfmem-inbox", "ok") in second
+
+
+def test_tier3_copy_repoints_when_brief_md_changes(tmp_path):
+    from conftest import ROOT
+    import memory_init as mi
+
+    target = os.path.join(ROOT, "skills", "okfmem-inbox")
+    copy_dir = str(tmp_path / "okfmem-inbox")
+    shutil.copytree(target, copy_dir)
+    _write(os.path.join(copy_dir, mi.MANAGED_COPY_MARKER), target + "\n")
+    assert mi._link_matches_target(copy_dir, target) is True
+
+    _write(os.path.join(copy_dir, "BRIEF.md"), "stale brief\n")
+    assert mi._link_matches_target(copy_dir, target) is False
+
+
+def test_mostly_duplicate_inbox_asks_no_more_questions_than_low_confidence_decisions(env):
+    cand = env["cand"]
+    for i in range(1, 4):
+        _write(os.path.join(cand, f"dup-{i}.md"),
+               _page(f"Existing rule dup {i}",
+                     "Always run the leak gate before committing",
+                     body="Run python3 scripts/check-leaks.py before every commit."))
+    _write(os.path.join(cand, "narration.md"),
+           _page("PR 42 merged", "Merged PR 42 after CI passed",
+                 body="PR #42 merged at sha 1234567."))
+    _write(os.path.join(cand, "ambiguous-pref.md"),
+           _page(" Weekly digest cadence ", "Send digest on Fridays or Mondays",
+                 typ="feedback",
+                 body="Prefer sending the weekly digest on Friday afternoon."))
+    _push(env)
+
+    before = _store_state(env)
+    out_dir, recs = _dump(env)
+    assert _store_state(env) == before
+
+    dup_ids = sorted(recs[k]["id"] for k in ("existing", "leak-gate", "dup-1", "dup-2", "dup-3"))
+    drop_ids = sorted(recs[k]["id"] for k in ("fresh-lesson", "narration"))
+    low_id = recs["ambiguous-pref"]["id"]
+
+    decisions = [
+        {"id": dup_ids[0], "covers": dup_ids[1:], "action": "merge",
+         "target": "existing", "add": "Run python3 scripts/check-leaks.py before every commit.",
+         "confidence": "high", "reason": "folds five duplicate leak-gate pages"},
+        {"id": drop_ids[0], "covers": drop_ids[1:], "action": "drop",
+         "confidence": "high", "reason": "run narration"},
+        {"id": low_id, "action": "new",
+         "page": {"slug": "digest-cadence", "name": "Weekly digest cadence",
+                  "description": "Send the weekly digest on Friday afternoon",
+                  "type": "feedback"},
+         "confidence": "low",
+         "question": "Keep Friday afternoon as a standing digest preference, or drop it?",
+         "reason": "team preference needs human choice"},
+    ]
+
+    remote = mx.remote_inbox_refs(env["store"])
+    plan, problems = mx.plan_apply(env["store"], list(recs.values()), decisions,
+                                   remote, TODAY, "tester")
+    assert problems == []
+    assert len(plan["low"]) == 1
+    assert low_id in plan["low"][0]
+
+    decisions[-1]["confidence"] = "high"
+    code, text = _apply(env, _decisions(out_dir, decisions))
+    assert code == 0, text
+    assert "low confidence" not in text
+    assert "2 drop / 5 merge into 1 page(s) / 1 new" in text
+    assert os.path.isfile(os.path.join(env["store"], "projects", "demo", "digest-cadence.md"))
+    assert _remote_refs(env["origin"]) == ""

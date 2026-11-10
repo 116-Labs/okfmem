@@ -24,7 +24,7 @@ anything. Two modes:
   mechanism does, when it fires, and which skill/command to reach for.
 
 Everything here is read-only. Never write, commit, archive, or curate from this
-skill — point the user at `/okfmem-save` or `/okfmem-curate` for those.
+skill — point the user at `/okfmem-save`, `/okfmem-inbox`, or `/okfmem-curate` for those.
 
 ## The system in one screen
 
@@ -146,6 +146,7 @@ Print this orientation instead of the dashboard:
 **When to reach for what**
 - `/okfmem` — this overview / status.
 - `/okfmem-save` (`/primer`) — session close-out (capture + STATE + push).
+- `/okfmem-inbox` — model triage of pending inbox candidates (`inbox dump` → judge with `BRIEF.md` → ask only low-confidence items → `inbox apply`).
 - `/okfmem-curate` (`/memory-curate`) — **rare**; judgment-driven purge/merge
   the automatic decay pass won't do. Routine hygiene is already automatic.
 - `okfmem sync --store "$STORE_PATH" -m "…"` — commit+push the store by hand (pull-rebase + lock).
