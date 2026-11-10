@@ -473,6 +473,41 @@ def _read_stdin_session_payload():
         return {}
 
 
+def check_inbox_nudge(store, quiet=False):
+    """Check pending inbox count and print nudge if over threshold.
+    For quiet pulls, at most once per day per store, persisted in <store>/.okfmem/nudge_inbox."""
+    try:
+        from memory_inbox import count_pending, nudge_line, DEFAULT_THRESHOLD
+        count = count_pending(store)
+        if count <= DEFAULT_THRESHOLD:
+            return
+        if not quiet:
+            print(nudge_line(count))
+            return
+
+        # Quiet mode: once per day per store
+        okfmem_dir = os.path.join(store, ".okfmem")
+        nudge_file = os.path.join(okfmem_dir, "nudge_inbox")
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if os.path.exists(nudge_file):
+            try:
+                with open(nudge_file, "r", encoding="utf-8") as f:
+                    last_day = f.read().strip()
+                if last_day == today:
+                    return
+            except OSError:
+                pass
+        try:
+            os.makedirs(okfmem_dir, exist_ok=True)
+            with open(nudge_file, "w", encoding="utf-8") as f:
+                f.write(today)
+        except OSError:
+            pass
+        print(nudge_line(count))
+    except Exception:
+        pass
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Fetch + integrate remote changes into the okfmem store "
@@ -498,6 +533,8 @@ def main():
     notice = unlinked_repo_notice(args.store)
     if notice:
         print(notice)
+
+    check_inbox_nudge(args.store, quiet=args.quiet)
 
     try:
         prune_sessions(args.store, max_age_days=7)
