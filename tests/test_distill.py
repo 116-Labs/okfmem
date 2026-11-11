@@ -10,6 +10,7 @@ Plus the candidate-detection contract: cross-session recurrence floor, dedup
 against existing pages, document-frequency (boilerplate) ceiling, role
 filtering, bigram-subsumes-unigram, project scoping, and determinism.
 """
+import json
 import os
 import sys
 
@@ -178,6 +179,20 @@ def test_store_project_for_colliding_dirs_without_mapping_is_no_project(tmp_path
              for i in range(4)]
     assert md.collect_candidates(turns, {"a.b": [], "a-b": []}, {},
                                  min_sessions=3, all_projects=True) == {}
+
+
+def test_claude_turn_with_cwd_keeps_encoded_project_and_maps_to_store(tmp_path):
+    repo = tmp_path / "demoproj"
+    repo.mkdir()
+    token = encode_root(str(repo))
+    transcript = tmp_path / "projects" / token / "s1.jsonl"
+    transcript.parent.mkdir(parents=True)
+    record = {"type": "user", "sessionId": "s1", "cwd": str(repo),
+              "message": {"role": "user", "content": "hello there"}}
+    transcript.write_text(json.dumps(record) + "\n")
+    turns = list(md.claude_code.extract_file(str(transcript)))
+    assert [t["project"] for t in turns] == [token]
+    assert md.store_project_for("claude-code", turns[0]["project"], {}) == "demoproj"
 
 
 # ---------------------------------------------------------------------------
