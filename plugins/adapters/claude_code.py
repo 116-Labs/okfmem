@@ -29,7 +29,11 @@ def _project_from_path(path):
 
 def extract_file(path):
     """Yield normalized turns for one .jsonl transcript."""
-    yield from _extract_file(HARNESS, path)
+    # Search and distill key Claude turns by the encoded dir name, not the cwd
+    # core carries (`store_project_for` decodes it; an absolute path maps to None).
+    project = _project_from_path(path)
+    for turn in _extract_file(HARNESS, path):
+        yield {**turn, "project": project}
 
 
 def iter_turns(root=DEFAULT_ROOT, project=None):
