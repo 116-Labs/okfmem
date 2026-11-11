@@ -3,9 +3,10 @@
 Source: ~/.claude/projects/<project>/<uuid>.jsonl  (one JSON object per line).
 v1 target per issue #2 — the easy, clean harness.
 
-Coupling to Claude's on-disk format lives HERE and nowhere else. Emits the
-harness-neutral turn schema from okfmem_session. Drops every tool_result body;
-scrubs every text; keeps tool_name + a short signature off the tool_use side.
+Parsing of Claude's on-disk format lives in core `memory_transcript`
+(`_claude_turns`); this adapter only finds the files and delegates. Emits the
+harness-neutral turn schema: drops every tool_result body, scrubs every text,
+keeps tool_name + a short signature off the tool_use side.
 """
 from __future__ import annotations
 

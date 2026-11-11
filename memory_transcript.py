@@ -209,8 +209,13 @@ def render_slice(turns):
     return "\n".join(lines)
 
 
+_PREFIX = {"user": "USER: ", "assistant": "ASSISTANT: ", "tool": "TOOL: "}
+# Smallest per-turn share that still holds a role prefix and a truncation marker.
+_MIN_TURN_BYTES = 64
+
+
 def _truncate_turn(turn, cap, source_bytes=None):
-    prefix = {"user": "USER: ", "assistant": "ASSISTANT: ", "tool": "TOOL: "}.get(turn["role"], "")
+    prefix = _PREFIX.get(turn["role"], "")
     encoded = (prefix + turn["text"]).encode()
     if len(encoded) <= cap:
         return turn
@@ -218,6 +223,27 @@ def _truncate_turn(turn, cap, source_bytes=None):
     room = max(0, cap - len((prefix + marker).encode()))
     text = turn["text"].encode()[:room].decode(errors="ignore") + marker
     return {**turn, "text": text}
+
+
+def _fair_shares(sizes, budget):
+    shares, left = [0] * len(sizes), budget
+    for n, i in enumerate(sorted(range(len(sizes)), key=sizes.__getitem__)):
+        shares[i] = min(sizes[i], left // (len(sizes) - n))
+        left -= shares[i]
+    return shares
+
+
+def _truncate_record(turns, cap):
+    # The record is consumed whole, so every turn keeps a fair share of `cap` (#183).
+    shown = [turn for turn in turns if turn["role"] in _PREFIX]
+    most = max(1, (cap + 1) // (_MIN_TURN_BYTES + 1))
+    if len(shown) > most:
+        tail = shown[most - 1:]
+        folded = "\n".join([tail[0]["text"]] + [render_slice([turn]) for turn in tail[1:]])
+        shown = shown[:most - 1] + [{**tail[0], "text": folded}]
+    sizes = [len(render_slice([turn]).encode()) for turn in shown]
+    shares = _fair_shares(sizes, cap - (len(shown) - 1))
+    return [_truncate_turn(turn, share) for turn, share in zip(shown, shares)]
 
 
 def read_since(harness, path, offset, cap_bytes):
@@ -239,19 +265,18 @@ def read_since(harness, path, offset, cap_bytes):
                 continue
             parsed = _parse(harness, record, identity, len(turns))
             rendered = render_slice(parsed).encode()
-            if parsed and total + len(rendered) > cap_bytes:
+            separator = 1 if total and rendered else 0
+            if parsed and total + separator + len(rendered) > cap_bytes:
                 if not turns and rendered and len(rendered) > cap_bytes:
-                    first = next(turn for turn in parsed if turn["role"] in {"user", "assistant", "tool"})
-                    parsed = [_truncate_turn(first, cap_bytes, len(rendered))]
                     stats["truncated_records"] += 1
-                    turns.extend(parsed); end = fh.tell()
+                    turns.extend(_truncate_record(parsed, cap_bytes)); end = fh.tell()
                     total = cap_bytes
                     continue
                 else:
                     fh.seek(before)
                 break
             turns.extend(parsed)
-            total += len(rendered) + (1 if total and rendered else 0)
+            total += separator + len(rendered)
             end = fh.tell()
     return turns, end, stats
 
@@ -288,10 +313,15 @@ def _load_ledger(store):
         return data
     except (OSError, ValueError, json.JSONDecodeError):
         corrupt = path.with_name(f"ledger.json.corrupt-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}")
-        try: path.replace(corrupt)
-        except OSError: pass
+        fresh = {"catchup_floor": _utc(), "entries": {}}
+        try:
+            path.replace(corrupt)
+        except OSError:
+            logging.warning("corrupt capture ledger could not be moved aside: %s", path)
+            return fresh
         logging.warning("corrupt capture ledger moved aside: %s", corrupt)
-        return {"catchup_floor": _utc(), "entries": {}}
+        _write_ledger(store, fresh)
+        return fresh
 
 
 def _write_ledger(store, data):

@@ -53,6 +53,42 @@ def test_five_megabyte_transcript_is_covered_by_bounded_chunks(tmp_path):
     assert seen == ["x" * 2400 for _ in range(2100)]
 
 
+def test_chunk_that_fits_only_without_separator_stops_before_the_record(tmp_path):
+    path = tmp_path / "exact.jsonl"
+    write_jsonl(path, [claude("aaaa"), claude("bbbb")])
+    turns, end, _ = mt.read_since("claude-code", path, 0, 20)
+    assert len(mt.render_slice(turns).encode()) <= 20
+    assert [turn["text"] for turn in turns] == ["aaaa"]
+    turns, end, _ = mt.read_since("claude-code", path, end, 20)
+    assert [turn["text"] for turn in turns] == ["bbbb"] and end == path.stat().st_size
+
+
+def multi_block(texts):
+    return {"type": "assistant", "sessionId": "s1", "timestamp": "now", "message": {
+        "role": "assistant", "content": [{"type": "text", "text": t} for t in texts]}}
+
+
+def test_oversized_multi_turn_record_keeps_every_turn_within_cap(tmp_path):
+    path = tmp_path / "multi.jsonl"
+    write_jsonl(path, [multi_block(["a" * 1000, "b" * 10, "c" * 1000])])
+    turns, end, stats = mt.read_since("claude-code", path, 0, 300)
+    rendered = mt.render_slice(turns)
+    assert end == path.stat().st_size and stats["truncated_records"] == 1
+    assert len(rendered.encode()) <= 300
+    assert [turn["text"][0] for turn in turns] == ["a", "b", "c"]
+    assert turns[1]["text"] == "b" * 10 and rendered.count("truncated") == 2
+
+
+def test_oversized_record_with_more_turns_than_fit_folds_the_tail_within_cap(tmp_path):
+    path = tmp_path / "many.jsonl"
+    write_jsonl(path, [multi_block([f"t{i}-" + "x" * 200 for i in range(50)])])
+    turns, end, stats = mt.read_since("claude-code", path, 0, 300)
+    rendered = mt.render_slice(turns)
+    assert end == path.stat().st_size and stats["truncated_records"] == 1
+    assert len(rendered.encode()) <= 300 and len(turns) > 1
+    assert "truncated" in turns[-1]["text"]
+
+
 def test_core_memory_modules_do_not_import_plugins():
     root = Path(mt.__file__).parent
     imports = re.compile(r"^\s*(?:from\s+plugins(?:\.|\s)|import\s+plugins(?:\.|,|\s|$))")
@@ -119,3 +155,5 @@ def test_ledger_round_trip_corruption_and_uncaptured_filters(tmp_path):
     ledger.write_text("not json")
     assert mt.ledger_get(store, key) is None
     assert list(ledger.parent.glob("ledger.json.corrupt-*"))
+    replacement = json.loads(ledger.read_text())
+    assert replacement["entries"] == {} and replacement["catchup_floor"]
