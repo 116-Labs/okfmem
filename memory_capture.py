@@ -771,7 +771,7 @@ def handle_chunk(store, cfg, owner, job, turns, start, end, budget):
     candidates = gather_candidates(store, job["project"], (focus or "") + "\n" + chunk,
                                    cfg["pages_cap_bytes"])
     state = read_state(store, job["project"])
-    text = _capture_input(job, opener, focus, chunk, state, candidates)
+    text = _capture_input(store, job, opener, focus, chunk, state, candidates)
     reply = _call(store, job, cfg["capture_model"], "capture.md", text, CAPTURE_SCHEMA, budget)
     validate_capture(store, reply, job["project"], candidates)
     heartbeat(store, owner)
@@ -830,7 +830,7 @@ def _triage_input(job, opener, chunk):
             f"## Transcript slice\n{chunk}\n")
 
 
-def _capture_input(job, opener, focus, chunk, state, candidates):
+def _capture_input(store, job, opener, focus, chunk, state, candidates):
     parts = [f"Project: {job['project']}", f"Today: {datetime.now(timezone.utc).date().isoformat()}",
              "", "## Session opener", opener or "(none)", ""]
     if focus:
@@ -842,8 +842,20 @@ def _capture_input(job, opener, focus, chunk, state, candidates):
     for c in candidates:
         mark = "excerpt_only: first 40 lines, never update it" if c["excerpt_only"] else "full"
         parts += [f"### {c['slug']} ({mark})", c["text"], ""]
-    parts += ["", "## Transcript slice", chunk, ""]
+    seen = {c["slug"] for c in candidates}
+    others = [s for s in existing_slugs(store) if s not in seen]
+    parts += ["", "## Other existing page slugs (never `create` one of these)",
+              "\n".join(others) or "(none)", "", "## Transcript slice", chunk, ""]
     return "\n".join(parts)
+
+
+def existing_slugs(store):
+    """Slugs `validate_capture` refuses to `create`: the `pages/*.md` names, sorted."""
+    try:
+        names = os.listdir(os.path.join(store, "pages"))
+    except OSError:
+        return []
+    return sorted(n[:-3] for n in names if n.endswith(".md"))
 
 
 _WORD = re.compile(r"[a-z][a-z0-9_-]{3,}")

@@ -168,7 +168,7 @@ def test_now_returns_at_once_and_the_detached_worker_calls_the_stub_internally(c
     assert [j["status"] for j in cap.jobs()] == ["captured"]
 
 
-def test_internal_flag_makes_trigger_consolidate_and_pull_exit_without_model_or_git(cap, monkeypatch):
+def test_internal_flag_makes_trigger_consolidate_pull_and_codex_exit_without_model_or_git(cap, monkeypatch):
     _install_stub(cap.bindir, "git", GIT_STUB)
     git_log = cap.tmp / "git.log"
     env = {**os.environ, "OKFMEM_INTERNAL": "1", "GIT_STUB_LOG": str(git_log)}
@@ -177,6 +177,7 @@ def test_internal_flag_makes_trigger_consolidate_and_pull_exit_without_model_or_
         [sys.executable, OKFMEM, "capture", "--stdin-hook", "--store", str(cap.store)],
         [sys.executable, str(ROOT / "memory_consolidate.py"), "--stdin-hook", "--store", str(cap.store)],
         [sys.executable, OKFMEM, "pull", "--store", str(cap.store)],
+        [sys.executable, str(ROOT / "memory_codex.py"), "--event", "Stop", "--store", str(cap.store)],
     ]
     for argv in runs:
         r = subprocess.run(argv, input=payload, capture_output=True, text=True, env=env, timeout=60)
@@ -370,6 +371,24 @@ def test_invalid_capture_reply_is_rejected_whole_and_nothing_is_written(cap, bad
     assert cap.ledger_offset() is None
     if bad == "excerpt":
         assert "excerpt" in job["error"]
+
+
+def test_capture_input_lists_non_candidate_slugs_and_create_of_one_is_rejected(cap):
+    unrelated = ("---\nname: Zebra notes\ndescription: zebra\ntype: project\n"
+                 "labels: [repo:other]\n---\n\n# Zebra notes\n\nzebra\n")
+    (cap.store / "pages" / "runner-image-pin.md").write_text(unrelated)
+    path = cap.transcript([user("we decided to drop the cache", cap.repo)])
+    cap.job(path, focus="drop the cache")
+    cap.respond([{"reply": reply(page(slug="runner-image-pin")), "cost": 0.1}])
+    mc.run_worker(str(cap.store))
+    [call] = cap.calls()
+    candidates, others = call["stdin"].split("## Candidate pages", 1)[1].split(
+        "## Other existing page slugs", 1)
+    assert "runner-image-pin" not in candidates
+    assert "runner-image-pin" in others.split("## Transcript slice", 1)[0]
+    [job] = cap.jobs()
+    assert job["status"] == "queued" and "overwrite an existing page" in job["error"]
+    assert (cap.store / "pages" / "runner-image-pin.md").read_text() == unrelated
 
 
 def test_update_of_a_candidate_given_in_full_is_accepted_with_its_hash(cap):
