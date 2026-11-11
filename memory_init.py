@@ -4047,6 +4047,14 @@ def cmd_status(store, show_all=False, project_filter=None):
             pull_hook = "settings.json unreadable"
     print(f"  pull hook: {pull_hook}")
 
+    try:
+        from memory_capture import status_lines
+
+        for line in status_lines(store):
+            print(f"  {line}")
+    except Exception as e:  # status is read-only: a capture read error never hides the rest
+        print(f"  capture   unreadable ({type(e).__name__})")
+
     # Store sync state — the "is my memory actually backed up?" half of
     # status. Wiring can be perfectly green while the store itself sits
     # dirty, unpushed, or delinked from its remote (exactly what an

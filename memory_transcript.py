@@ -246,7 +246,8 @@ def _truncate_record(turns, cap):
     return [_truncate_turn(turn, share) for turn, share in zip(shown, shares)]
 
 
-def read_since(harness, path, offset, cap_bytes):
+def read_since(harness, path, offset, cap_bytes, upto=None):
+    """`upto` bounds the slice: no record starting at or after it is read."""
     if harness not in {"claude-code", "codex"}:
         raise ValueError(f"unsupported harness: {harness}")
     identity = transcript_identity(harness, path)
@@ -255,6 +256,8 @@ def read_since(harness, path, offset, cap_bytes):
         fh.seek(offset)
         while True:
             before = fh.tell()
+            if upto is not None and before >= upto:
+                break
             raw = fh.readline()
             if not raw or not raw.endswith(b"\n"):
                 break
