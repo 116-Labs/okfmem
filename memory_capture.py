@@ -606,7 +606,7 @@ def release_lock(store, owner):
 def iter_jobs(store):
     out = []
     for name in _listdir(jobs_dir(store)):
-        if not name.endswith(".json") or name.endswith(".result.json"):
+        if not name.endswith(".json") or name.endswith((".result.json", ".apply.json")):
             continue
         path = os.path.join(jobs_dir(store), name)
         try:
@@ -657,6 +657,9 @@ def run_worker(store):
 
 
 def drain(store, cfg, owner, seen, spent):
+    for _, job in iter_jobs(store):
+        if job.get("status") == "captured" and heartbeat(store, owner):
+            apply_result(store, job)
     jobs = iter_jobs(store)
     awaiting = {j.get("ledger_key") for _, j in jobs if j.get("status") == "captured"}
     for path, job in jobs:
@@ -677,6 +680,8 @@ def drain(store, cfg, owner, seen, spent):
             break
         seen.add(rid)
         spent += process_job(store, cfg, owner, path, job, cfg["run_budget_usd"] - spent)
+        if job.get("status") == "captured":
+            apply_result(store, job)
         if job.get("status") == "captured":
             awaiting.add(job.get("ledger_key"))
     return spent
@@ -739,7 +744,10 @@ def _run_job(store, cfg, owner, job, budget):
         _advance_ledger(store, job, end, f"skipped ({skip})")
         outcome, start = f"skipped ({skip})", end
     if start >= upto:
-        job.update(status="skipped", outcome=outcome or "skipped (nothing new)")
+        if job.get("saves"):
+            job.update(status="saved")
+        else:
+            job.update(status="skipped", outcome=outcome or "skipped (nothing new)")
         log(store, f"{job['request_id']}: {job['outcome']}")
     else:
         job["status"] = "queued"
@@ -990,6 +998,326 @@ def validate_capture(store, reply, project, candidates):
         raise Rejected("reply rejected: " + "; ".join(problems[:6]))
 
 
+# --- apply --------------------------------------------------------------------
+
+
+class ApplyDeferred(Exception):
+    """The store was busy or in mid-merge; the journal stays and the job is retried."""
+
+
+def _sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def _read_bytes(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
+
+
+def _confined(store, rel):
+    """Why `rel` may not be written (symlink or escape), else None."""
+    target = os.path.join(store, rel)
+    parent = os.path.realpath(os.path.dirname(target))
+    root = os.path.realpath(store)
+    if not parent.startswith(root + os.sep):
+        return "directory is outside the store"
+    if os.path.islink(target):
+        return "target is a symlink"
+    if not os.path.realpath(target).startswith(parent + os.sep):
+        return "target resolves outside its directory"
+    return None
+
+
+def _yaml_value(value):
+    plain = re.fullmatch(r"[A-Za-z0-9_(][^:#\[\]{}&*!|>'\"%@`,\\]*", value)
+    return value if plain and not value.endswith(" ") else json.dumps(value, ensure_ascii=False)
+
+
+def _new_page_text(page, today):
+    labels = ", ".join(page["labels"])
+    return (f"---\nname: {_yaml_value(page['name'])}\ndescription: {_yaml_value(page['description'])}\n"
+            f"type: {page['type']}\nlabels: [{labels}]\ncreated: {today}\nlast_accessed: {today}\n"
+            f"access_count: 0\n---\n\n{page['body'].strip()}\n")
+
+
+def _updated_page_text(old, page):
+    """Existing frontmatter lines kept, the three model fields and labels merged, body replaced."""
+    import memory_frontmatter as fm
+
+    found = fm.find_frontmatter(old)
+    if not found:
+        raise ValueError("page has no frontmatter")
+    eol, start, end = found
+    lines = old[start:end].split(eol)
+    for key, value in (("name", _yaml_value(page["name"])),
+                       ("description", _yaml_value(page["description"])), ("type", page["type"])):
+        row = f"{key}: {value}"
+        idx = next((i for i, ln in enumerate(lines) if ln.startswith(f"{key}:")), None)
+        if idx is None:
+            lines.insert(0, row)
+        else:
+            lines[idx] = row
+    head = fm.merge_labels(old[:start] + eol.join(lines) + old[end:], page["labels"], warn=None)
+    closing = fm.CLOSE_RE.search(head, start - len(eol))
+    return head[:closing.end()].rstrip("\r\n") + eol + eol + page["body"].strip() + "\n"
+
+
+def _state_text(state, project, today_iso):
+    parts = [f"---\ntype: state\nproject: {project}\nmodified: {today_iso}\n"
+             f"machine: {HOST.split('.')[0]}\n---\n\n# STATE — {project}\n"]
+    for key, title in (("summary", "Summary"), ("left_off", "Left off"), ("next_steps", "Next steps"),
+                       ("decisions", "Decisions"), ("blockers", "Blockers"), ("goal", "Goal")):
+        parts.append(f"\n## {title}\n{state[key].strip()}\n")
+    return "".join(parts)
+
+
+def _journal_path(store, rid):
+    return os.path.join(jobs_dir(store), f"{rid}.apply.json")
+
+
+def _plan_apply(store, job):
+    """The journal: every write with its exact new content and expected pre-hash."""
+    rid = job["request_id"]
+    with open(os.path.join(jobs_dir(store), f"{rid}.result.json"), encoding="utf-8") as f:
+        result = json.load(f)
+    if result.get("request_id") != rid or result.get("project") != job["project"]:
+        raise ValueError("result file does not belong to this job")
+    reply, inputs = result["reply"], result["inputs"]
+    now = datetime.now(timezone.utc)
+    files, conflicts = [], []
+    for page in reply["pages"]:
+        slug, rel = page["slug"], f"pages/{page['slug']}.md"
+        entry = {"kind": "page", "slug": slug, "path": rel, "action": page["action"]}
+        bad = _confined(store, rel)
+        current = _read_bytes(os.path.join(store, rel))
+        if bad:
+            entry.update(outcome="rejected", reason=bad)
+        elif page["action"] == "create":
+            entry.update(pre_sha=None, content=_new_page_text(page, now.date().isoformat()))
+        elif current is None or _sha(current) != (inputs["pages"].get(slug) or {}).get("sha256"):
+            entry.update(outcome="conflict", reason="page changed since the model read it")
+        else:
+            try:
+                new = _updated_page_text(current.decode("utf-8"), page)
+            except (ValueError, UnicodeDecodeError) as e:
+                entry.update(outcome="conflict", reason=str(e))
+            else:
+                entry.update(pre_sha=_sha(current), content=new)
+        if entry.get("outcome"):
+            conflicts.append(slug)
+        files.append(entry)
+    state = reply.get("state")
+    journal = {"schema_version": 1, "request_id": rid, "project": job["project"], "phase": "planned",
+               "end": int(result["end"]), "ledger_key": job["ledger_key"], "files": files,
+               "transcript_ended": os.path.getmtime(job["transcript"]), "state": None, "sha": None}
+    if state is not None:
+        rel = inputs["state"]["path"]
+        text = _state_text(state, job["project"], now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        entry = {"kind": "state", "path": rel, "pre_sha": inputs["state"]["sha256"], "content": text}
+        bad = _confined(store, rel)
+        if bad:
+            entry.update(outcome="rejected", reason=bad)
+        elif len(text.encode("utf-8")) > _state_budget():
+            entry.update(outcome="conflict", reason="new state is over the size budget")
+        files.append(entry)
+    return journal
+
+
+def _state_budget():
+    import memory_reindex
+
+    return memory_reindex.STATE_BUDGET_BYTES
+
+
+def _parse_ts(value):
+    try:
+        ts = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)).timestamp()
+
+
+def _state_gate(entry, current, journal):
+    """None when the state may be written, else (outcome, reason)."""
+    if current is not None and entry["pre_sha"] != _sha(current):
+        return "conflict", "state changed since the model read it"
+    if current is None and entry["pre_sha"] is not None:
+        return "conflict", "state file vanished since the model read it"
+    if current is not None:
+        import memory_state
+
+        modified = memory_state._extract_state_modified(current.decode("utf-8", errors="replace"))
+        if modified is not None:
+            stamp = _parse_ts(modified)
+            if stamp is None or stamp >= journal["transcript_ended"]:
+                return "superseded", f"state was modified at {modified}, after this session ended"
+    return None
+
+
+def _write_files(store, journal):
+    """Under the sync lock, after the pull: write what still applies, record each outcome."""
+    for entry in journal["files"]:
+        if entry.get("outcome") in ("rejected", "conflict", "superseded"):
+            continue
+        path = os.path.join(store, entry["path"])
+        current = _read_bytes(path)
+        want = entry["content"].encode("utf-8")
+        entry.pop("outcome", None), entry.pop("reason", None)
+        if current is not None and _sha(current) == _sha(want):
+            entry["outcome"] = "written"
+            continue
+        bad = _confined(store, entry["path"])
+        if bad:
+            entry.update(outcome="rejected", reason=bad)
+        elif entry["kind"] == "state" and (gate := _state_gate(entry, current, journal)):
+            entry.update(outcome=gate[0], reason=gate[1])
+        elif entry["kind"] == "page" and (current is not None if entry["pre_sha"] is None
+                                         else current is None or _sha(current) != entry["pre_sha"]):
+            entry.update(outcome="conflict", reason="page changed since the model read it")
+        else:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = f"{path}.{os.getpid()}.tmp"
+            with open(tmp, "wb") as f:
+                f.write(want)
+            os.replace(tmp, path)
+            entry["outcome"] = "written"
+
+
+def _count(journal, kind):
+    return sum(e["kind"] == kind and e.get("outcome") == "written" for e in journal["files"])
+
+
+def _commit_message(journal):
+    pages, state = _count(journal, "page"), _count(journal, "state")
+    parts = ([f"{pages} page{'s' if pages != 1 else ''}"] if pages else []) + (["STATE"] if state else [])
+    return (f"capture({journal['project']}): {', '.join(parts)}\n\n"
+            f"okfmem-capture: {journal['request_id']}\n")
+
+
+def _find_commit(store, rid):
+    import memory_sync as ms
+
+    out = ms._git(store, "log", "-n", "1", "--format=%h", "--fixed-strings",
+                  f"--grep=okfmem-capture: {rid}")
+    return out.stdout.strip() or None if out.returncode == 0 else None
+
+
+def _save_journal(store, journal, phase=None):
+    if phase:
+        journal["phase"] = phase
+    _write_json(_journal_path(store, journal["request_id"]), journal)
+
+
+def _ahead_of_upstream(store):
+    import memory_sync as ms
+
+    out = ms._git(store, "rev-list", "--count", "@{u}..HEAD")
+    return int(out.stdout.strip() or 0) if out.returncode == 0 else 0
+
+
+def _commit_phase(store, job, journal):
+    import memory_sync as ms
+
+    if (sha := _find_commit(store, journal["request_id"])):
+        journal["sha"] = sha
+        return
+    writes = [e["path"] for e in journal["files"] if "content" in e]
+
+    prepared = []
+
+    def prepare(_):
+        prepared.append(True)
+        _write_files(store, journal)
+        _save_journal(store, journal, "written")
+        if job.get("cwd") and os.path.isdir(job["cwd"]):
+            try:
+                import memory_init as mi
+
+                mi.resolve_project(store, cwd=job["cwd"], compile=True)
+            except Exception as e:  # the projection is derived; a failure never loses the capture
+                log(store, f"{journal['request_id']}: view compile failed: {type(e).__name__}: {e}")
+        return []
+
+    res = ms.sync_store(store, lambda: _commit_message(journal), token=ms.store_token(),
+                        paths=writes, prepare=prepare)
+    if not prepared:
+        raise ApplyDeferred(res.get("reason") or "store sync did not run")
+    journal["sha"] = res["sha"] if res["committed"] else None
+    journal["pushed"] = bool(res["pushed"])
+    if res.get("push_error"):
+        log(store, f"{journal['request_id']}: saved locally, push failed: {res['push_error']}")
+
+
+def _record(store, job, journal):
+    """Advance the ledger and the job; the only step that moves the transcript offset."""
+    outcomes = journal["files"]
+    state = next((e for e in outcomes if e["kind"] == "state"), None)
+    state_outcome = (state.get("outcome") or "conflict") if state else None
+    pages = _count(journal, "page")
+    held = [f"{e['slug']}: {e['reason']}" for e in outcomes
+            if e["kind"] == "page" and e.get("outcome") in ("rejected", "conflict")]
+    parts = []
+    if journal["sha"]:
+        parts.append(f"saved {journal['sha']}: {pages} page(s)" + (", state" if state_outcome == "written" else ""))
+    else:
+        parts.append("skipped (nothing to write)")
+    if state_outcome and state_outcome != "written":
+        parts.append(f"state {state_outcome}: {state.get('reason')}")
+    if held:
+        parts.append("pages held: " + "; ".join(held))
+    outcome = "; ".join(parts)
+    _advance_ledger(store, job, journal["end"], outcome)
+    if state_outcome == "written" and job.get("session"):
+        import memory_state
+
+        memory_state.refresh_session_baseline(store, job["project"], job["session"])
+    if journal["sha"]:
+        job["saves"] = int(job.get("saves") or 0) + 1
+    job.pop("error", None)
+    job.update(outcome=outcome, state=state_outcome, cursor=journal["end"], updated=_utc(),
+               unpushed=_ahead_of_upstream(store) > 0)
+    done = journal["end"] >= int(job["upto"])
+    job["status"] = ("saved" if job.get("saves") else "skipped") if done else "queued"
+    _write_json(os.path.join(jobs_dir(store), f"{job['request_id']}.json"), job)
+    log(store, f"{job['request_id']}: {outcome}")
+
+
+def apply_result(store, job):
+    """Apply a job's validated result to the store; resumes from the journal after a crash."""
+    path = os.path.join(jobs_dir(store), f"{job['request_id']}.json")
+    try:
+        jpath = _journal_path(store, job["request_id"])
+        if os.path.exists(jpath):
+            with open(jpath, encoding="utf-8") as f:
+                journal = json.load(f)
+        else:
+            journal = _plan_apply(store, job)
+            _save_journal(store, journal)
+        if journal["phase"] in ("planned", "written"):
+            if any("content" in e for e in journal["files"]):
+                _commit_phase(store, job, journal)
+            else:
+                _write_files(store, journal)
+            _save_journal(store, journal, "committed")
+        _record(store, job, journal)
+        _save_journal(store, journal, "recorded")
+    except ApplyDeferred as e:
+        job["apply_attempts"] = int(job.get("apply_attempts") or 0) + 1
+        job["error"] = f"apply deferred: {e}"
+        job["status"] = "failed" if job["apply_attempts"] >= MAX_ATTEMPTS else "captured"
+        log(store, f"{job['request_id']}: {job['error']}")
+    except (CaptureError, OSError, ValueError, KeyError, TypeError) as e:
+        job.update(status="failed", error=f"apply failed: {type(e).__name__}: {e}")
+        log(store, f"{job['request_id']}: {job['error']}")
+    else:
+        return
+    job["updated"] = _utc()
+    _write_json(path, job)
+
+
 # --- runners ------------------------------------------------------------------
 
 
@@ -1066,6 +1394,9 @@ def status_lines(store):
             detail = last.get("error") if last.get("status") == "failed" else last.get("outcome")
             tail = f"last {last.get('status')} {last.get('updated')}" + (f" — {detail}" if detail else "")
         lines.append(f"capture   {project}: queued {queued}, failed {failed}; {tail}")
+    ahead = _ahead_of_upstream(store) if any(j.get("saves") for j in jobs) else 0
+    if ahead:
+        lines.append(f"capture   unpushed: {ahead} commit(s); `okfmem sync` pushes them")
     return lines
 
 

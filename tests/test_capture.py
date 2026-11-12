@@ -59,6 +59,10 @@ def _install_stub(bindir, name, source):
 def cap(tmp_path, monkeypatch):
     store = tmp_path / "store"
     (store / "pages").mkdir(parents=True)
+    for args in (["init", "-q"], ["config", "user.email", "t@e.st"], ["config", "user.name", "t"],
+                 ["config", "commit.gpgsign", "false"]):
+        subprocess.run(["git", "-C", str(store), *args], check=True)
+    (store / ".gitignore").write_text(".okfmem/\nviews/\n.okfmem-sync.lock\n")
     repo = tmp_path / "proj"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
@@ -75,6 +79,7 @@ def cap(tmp_path, monkeypatch):
     monkeypatch.delenv("OKFMEM_INTERNAL", raising=False)
     spawned = []
     monkeypatch.setattr(mc, "spawn_worker", lambda s: spawned.append(s))
+    monkeypatch.setattr(mc, "apply_result", lambda s, j: None)  # the engine tests stop at the result
 
     def transcript(records, sid="s1", name=None):
         path = sessions / f"{name or sid}.jsonl"
@@ -160,12 +165,12 @@ def test_now_returns_at_once_and_the_detached_worker_calls_the_stub_internally(c
     assert json.loads(r.stdout)["status"] == "queued"
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
-        if any(j["status"] not in mc.PENDING for j in cap.jobs()):
+        if any(j["status"] not in mc.PENDING + ("captured",) for j in cap.jobs()):
             break
         time.sleep(0.2)
     calls = cap.calls()
     assert calls and all(c["internal"] == "1" for c in calls)
-    assert [j["status"] for j in cap.jobs()] == ["captured"]
+    assert [j["status"] for j in cap.jobs()] == ["saved"]
 
 
 def test_internal_flag_makes_trigger_consolidate_pull_and_codex_exit_without_model_or_git(cap, monkeypatch):

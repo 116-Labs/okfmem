@@ -704,7 +704,8 @@ def _release_lock(store, fd):
         pass
 
 
-def sync_store(store, message, do_push=True, do_pull=True, token=None, author=None):
+def sync_store(store, message, do_push=True, do_pull=True, token=None, author=None,
+               paths=None, prepare=None):
     """Stage everything, and if anything changed commit (+optionally pull-rebase
     + push). Returns a dict describing what happened:
 
@@ -719,6 +720,12 @@ def sync_store(store, message, do_push=True, do_pull=True, token=None, author=No
     before the commit and a failed fetch or push sets auth_failed, its reason
     one redacted line naming the store. `author` is a `(name, email)` pair that
     authors and commits this sync's commit only.
+
+    `prepare(store)` runs under the lock after the pull and before staging; it
+    may return more store-relative paths to stage. `paths` limits staging and
+    the commit to those paths (relative to the store), so unrelated dirty files
+    stay out. `message` may be a callable, evaluated after `prepare`. A
+    `prepare` error ends the sync with the reason set and nothing committed.
     """
     store = os.path.abspath(os.path.expanduser(store))
     res = {
@@ -821,19 +828,35 @@ def sync_store(store, message, do_push=True, do_pull=True, token=None, author=No
             # fetch failure (offline) is swallowed — fall through and commit
             # locally; the push attempt below will surface as push_error.
 
-        _git(store, "add", "-A")
-        staged = _git(store, "diff", "--cached", "--quiet")
-        has_changes = staged.returncode != 0
+        scope = None
+        if prepare is not None:
+            try:
+                extra = prepare(store)
+            except Exception as e:  # the caller's writes failed: commit nothing
+                res["reason"] = f"prepare failed: {type(e).__name__}: {e}"
+                return res
+            if paths is not None:
+                paths = list(paths) + list(extra or [])
+        if paths is not None:
+            scope = ["--", *[p for p in dict.fromkeys(paths)
+                             if os.path.lexists(os.path.join(store, p))]]
+        if scope is not None and len(scope) == 1:
+            has_changes = False
+        else:
+            _git(store, "add", "-A", *(scope or []))
+            staged = _git(store, "diff", "--cached", "--quiet", *(scope or []))
+            has_changes = staged.returncode != 0
 
         if has_changes:
-            c = _git(store, "commit", "-m", message, env=_author_env(author))
+            msg = message() if callable(message) else message
+            c = _git(store, "commit", "-m", msg, *(scope or []), env=_author_env(author))
             if c.returncode != 0:
                 res["reason"] = c.stdout.strip() or c.stderr.strip() or "commit failed."
                 return res
             res["committed"] = True
             sha = _git(store, "rev-parse", "--short", "HEAD")
             res["sha"] = sha.stdout.strip() if sha.returncode == 0 else None
-            res["reason"] = f"committed {res['sha']}: {message}"
+            res["reason"] = f"committed {res['sha']}: {msg}"
         else:
             res["reason"] = "no changes to commit."
 
