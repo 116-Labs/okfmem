@@ -45,13 +45,14 @@ Four moving parts:
 
 | Part | Trigger | What it does |
 |---|---|---|
-| **capture + STATE + push** | `/okfmem-save` (manual, end of session) | model writes pages/STATE, then `okfmem sync` commits+pushes |
+| **focus notes, background capture (foreground fallback)** | `/okfmem-save` (manual, end of session or a checkpoint) | session model writes focus notes and runs `okfmem capture --now`; a detached worker writes pages/STATE on a cheaper model and commits+pushes. With no runner (Codex, Antigravity) the skill writes them itself, runs `okfmem sync`, then `okfmem capture --record` |
 | **hygiene** (decay/archive/regen MEMORY.md) | Stop hook → `memory_consolidate.py` | deterministic; archives stale pages (reversible), never deletes |
 | **sync in** | SessionStart hook → `git pull --rebase` | freshens the store before the session |
 | **hard curation** | `/okfmem-curate` (rare, gated) | semantic merge / hard purge decay won't do |
 
-`okfmem sync` (shared git helper) backs **both** `/okfmem-save` and the Stop-hook
-consolidation, so pull-rebase + concurrency-lock behavior is identical on both.
+`okfmem sync` (shared git helper) backs the capture engine's commits, the
+`/okfmem-save` fallback and the Stop-hook consolidation, so pull-rebase +
+concurrency-lock behavior is identical on all three.
 
 ## Status dashboard (`/okfmem`)
 
@@ -139,13 +140,16 @@ Print this orientation instead of the dashboard:
   insight mid-session, write the page to `$STORE_PATH/pages/<slug>.md` with
   `labels: [repo:<name>]`, then recompile (`okfmem init --resolve-project
   --compile`). There is no index to edit: `MEMORY.md` is compiled.
-- **End of session** — run **`/okfmem-save`** (alias `/primer`): cleans up
-  worktrees, captures insights, overwrites `STATE.md`, optionally posts an
-  impl-complete issue comment, then `okfmem sync` commits+pushes the store.
+- **End of session** — run **`/okfmem-save`** (alias `/primer`): the session
+  model writes focus notes on what mattered and hands the session to
+  `okfmem capture --now`, which captures pages and `STATE.md` in the background
+  and commits+pushes the store; `okfmem status` shows the job. Without a runner
+  (Codex, Antigravity) it saves in the foreground instead. It never asks
+  whether to save.
 
 **When to reach for what**
 - `/okfmem` — this overview / status.
-- `/okfmem-save` (`/primer`) — session close-out (capture + STATE + push).
+- `/okfmem-save` (`/primer`) — session close-out (focus notes, background capture).
 - `/okfmem-inbox` — model triage of pending inbox candidates (`inbox dump` → judge with `BRIEF.md` → ask only low-confidence items → `inbox apply`).
 - `/okfmem-curate` (`/memory-curate`) — **rare**; judgment-driven purge/merge
   the automatic decay pass won't do. Routine hygiene is already automatic.
@@ -158,7 +162,8 @@ Print this orientation instead of the dashboard:
 **What's automatic vs manual**
 - Automatic: decay/archive + `MEMORY.md` regen (Stop hook), store pull
   (SessionStart hook).
-- Manual: capturing new insights and writing `STATE.md` — these need the session
-  model reading the conversation, so they live in `/okfmem-save`, not a hook.
+- Manual: `/okfmem-save`'s focus notes — only the session model knows why
+  something mattered. The capture itself then runs in the background on a
+  cheaper model.
 
 Use `okfmem init --resolve-project` for harness-neutral project identity; honor explicit `--store PATH` and `$OKFMEM_STORE` in all commands. Codex recall follows managed instructions rather than Claude native links.

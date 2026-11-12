@@ -5,6 +5,8 @@
     okfmem capture --now --harness H [--session ID] [--transcript PATH] [--cwd DIR]
                    [--focus FILE] [--trigger NAME] [--store PATH]
     okfmem capture --catch-up [--store PATH]
+    okfmem capture --record --harness H [--session ID] [--transcript PATH] --upto N
+                   [--outcome saved|skipped] [--store PATH]
     okfmem capture --worker [--store PATH]        # internal: started detached by a trigger
 
 A trigger writes an immutable job to <store>/.okfmem/capture/jobs/ and starts a
@@ -16,7 +18,8 @@ pages, state or git itself.
 Exit codes: --stdin-hook and --catch-up always exit 0 and log to
 <store>/.okfmem/capture/capture.log. --now exits 0 once the job is on disk, 3 when
 the harness has no runner (identity JSON on stdout, no job written), 4 on any other
-enqueue failure (reason on stderr).
+enqueue failure (reason on stderr). --record marks a session covered up to N after a
+foreground save, so a later job starts there; it exits 0 when recorded, 4 otherwise.
 Store location: --store, else $OKFMEM_STORE, else ~/okfmem-store.
 """
 
@@ -414,6 +417,39 @@ def trigger_now(args, store):
         print("okfmem capture: queued, but the worker did not start; the next trigger runs it",
               file=sys.stderr)
     print(json.dumps({"status": "queued", "request_id": job["request_id"], "job": path, "upto": upto}))
+    return 0
+
+
+def _ends_a_record(path, offset):
+    with open(path, "rb") as fh:
+        fh.seek(offset - 1)
+        return fh.read(1) == b"\n"
+
+
+def record_coverage(args, store):
+    """Advance the ledger after a foreground save; never moves it backwards."""
+    try:
+        if not args.harness:
+            raise EnqueueError("--record needs --harness")
+        if args.upto is None or args.upto <= 0:
+            raise EnqueueError("--record needs a positive --upto")
+        identity, end = resolve_identity(store, args.harness, args.session, args.transcript, args.cwd)
+        if args.upto > end or not _ends_a_record(identity["transcript"], args.upto):
+            raise EnqueueError(f"--upto {args.upto} is not the end of a complete record (last is {end})")
+        key = identity["ledger_key"]
+        entry = mt.ledger_get(store, key) or {}
+        offset = int(entry.get("offset") or 0)
+        if args.upto > offset:
+            mt.ledger_put(store, key, **{
+                **entry, "transcript": identity["transcript"], "fingerprint": identity["fingerprint"],
+                "offset": args.upto, "updated": _utc(), "outcome": f"{args.outcome} (foreground)"})
+            offset = args.upto
+    except (EnqueueError, OSError, ValueError) as e:
+        print(f"okfmem capture: not recorded: {e}", file=sys.stderr)
+        log(store, f"--record not recorded: {e}")
+        return 4
+    log(store, f"recorded {key} covered to {offset} ({args.outcome}, foreground)")
+    print(json.dumps({"status": "recorded", "ledger_key": key, "offset": offset}))
     return 0
 
 
@@ -1425,12 +1461,17 @@ def _parser():
     mode.add_argument("--now", action="store_true", help="queue one session now")
     mode.add_argument("--catch-up", action="store_true",
                       help="queue Claude Code sessions whose capture never ran")
+    mode.add_argument("--record", action="store_true",
+                      help="mark a session covered up to --upto after a foreground save")
     ap.add_argument("--harness", help="claude-code or codex (stdin-hook default: claude-code)")
     ap.add_argument("--session", help="session id; its transcript is looked up")
     ap.add_argument("--transcript", help="transcript .jsonl path")
     ap.add_argument("--cwd", help="fallback cwd when the transcript records none")
     ap.add_argument("--focus", help="file whose text the user asked to save; skips triage")
     ap.add_argument("--trigger", help="trigger name recorded in the job")
+    ap.add_argument("--upto", type=int, help="--record: byte offset the foreground save covered")
+    ap.add_argument("--outcome", choices=("saved", "skipped"), default="saved",
+                    help="--record: what the foreground save did (default: saved)")
     ap.add_argument("--store")
     return ap
 
@@ -1454,6 +1495,8 @@ def main(argv=None):
         return trigger_now(args, store)
     if args.catch_up:
         return trigger_catch_up(args, store)
+    if args.record:
+        return record_coverage(args, store)
     return trigger_stdin_hook(args, store)
 
 
