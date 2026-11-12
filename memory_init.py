@@ -3082,6 +3082,24 @@ def _is_managed_pull_command(cmd):
     return bool(re.search(r"\bokfmem[\"']?\s+pull\b", cmd))
 
 
+_CURRENT_PULL_RE = re.compile(r'^\s*"([^"]+)"\s+"([^"]+)"\s+pull\s+--quiet\s*$')
+
+
+def _is_current_pull_command(cmd, okfmem_cli):
+    """True if `cmd` runs this engine's dispatcher with `pull --quiet` under an
+    interpreter that still exists, whatever its path. Windows callers see
+    python.exe vs python3.exe of one install, and must not rewrite each other."""
+    m = _CURRENT_PULL_RE.match(cmd)
+    if not m:
+        return False
+    interpreter, script = m.groups()
+    if os.path.normcase(os.path.normpath(script)) != os.path.normcase(
+        os.path.normpath(okfmem_cli)
+    ):
+        return False
+    return os.path.isfile(interpreter)
+
+
 def _is_legacy_pull_command(cmd):
     """True if `cmd` is the pre-#16 hand-added managed store-pull shape that
     should heal in place. Guards two ways: a command that already invokes
@@ -3191,7 +3209,7 @@ def wire_pull_hook(dry_run):
                 continue
             cur = h.get("command", "")
             if _is_managed_pull_command(cur):
-                if cur == command:
+                if cur == command or _is_current_pull_command(cur, okfmem_cli):
                     return ("present", settings)
                 h["command"] = command  # heal: older okfmem release/path
                 if not dry_run:
