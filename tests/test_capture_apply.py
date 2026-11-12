@@ -40,7 +40,7 @@ def env(tmp_path, monkeypatch):
     for k, v in (("user.email", "t@e.st"), ("user.name", "t"), ("commit.gpgsign", "false")):
         git(store, "config", k, v)
     (store / ".gitignore").write_text(".okfmem/\nviews/\n.okfmem-sync.lock\n")
-    (store / "pages" / "runner.md").write_text(PAGE_TEXT)
+    (store / "pages" / "runner.md").write_bytes(PAGE_TEXT.encode())
     (store / "state" / "proj.md").write_text(STATE_OLD)
     git(store, "add", "-A")
     git(store, "commit", "-qm", "seed")
@@ -104,7 +104,7 @@ def test_crash_after_written_and_after_committed_replays_same_content_without_a_
     monkeypatch.setattr(ms, "sync_store", die_after_commit)
     with pytest.raises(KeyboardInterrupt):
         mc.apply_result(env.store, job)
-    journal = json.load(open(mc._journal_path(env.store, "r1")))
+    journal = json.load(open(mc._journal_path(env.store, "r1", 0, 10)))
     assert journal["phase"] == "written"
     body = env.read("pages/new-page.md")
     monkeypatch.setattr(ms, "sync_store", real)
@@ -113,12 +113,75 @@ def test_crash_after_written_and_after_committed_replays_same_content_without_a_
     assert len([c for c in env.commits() if c.startswith("capture(")]) == 1
     assert ledger_offset(env) == 10
     # a crash after `committed` only advances the ledger
-    journal = json.load(open(mc._journal_path(env.store, "r1")))
+    journal = json.load(open(mc._journal_path(env.store, "r1", 0, 10)))
     assert journal["phase"] == "recorded"
     mc._save_journal(env.store, journal, "committed")
     os.remove(os.path.join(env.store, ".okfmem", "capture", "ledger.json"))
     mc.apply_result(env.store, mc.iter_jobs(env.store)[0][1])
     assert ledger_offset(env) == 10 and len([c for c in env.commits() if c.startswith("capture(")]) == 1
+
+
+def test_second_result_for_one_job_uses_its_own_journal_and_advances_the_ledger(env):
+    job = env.make([page("first-page")])
+    job["upto"] = 20
+    mc._write_json(os.path.join(mc.jobs_dir(env.store), "r1.json"), job)
+    mc.apply_result(env.store, job)
+    result_path = os.path.join(mc.jobs_dir(env.store), "r1.result.json")
+    result = json.load(open(result_path))
+    result.update(start=10, end=20, upto=20)
+    result["reply"] = {"pages": [page("second-page")], "state": None, "summary": "second"}
+    result["inputs"]["pages"] = {}
+    mc._write_json(result_path, result)
+    job.update(status="captured", cursor=10)
+    mc._write_json(os.path.join(mc.jobs_dir(env.store), "r1.json"), job)
+    mc.apply_result(env.store, job)
+    assert "New page" in env.read("pages/second-page.md")
+    assert ledger_offset(env) == 20
+    assert len([c for c in env.commits() if c.startswith("capture(")]) == 2
+
+
+def test_apply_write_or_commit_failures_leave_the_job_visible_and_offset_unchanged(env, monkeypatch):
+    job = env.make([page()])
+    write_files = mc._write_files
+    monkeypatch.setattr(mc, "_write_files", lambda *_: (_ for _ in ()).throw(OSError("disk full")))
+    mc.apply_result(env.store, job)
+    assert job["status"] == "failed" and not os.path.exists(os.path.join(
+        env.store, ".okfmem", "capture", "ledger.json"))
+
+    job = env.make([page("retry-page")])
+
+    def no_commit(store, message, paths, prepare, **kwargs):
+        prepare(store)
+        return {"committed": False, "pushed": False, "reason": "index.lock", "push_error": None}
+
+    monkeypatch.setattr(mc, "_write_files", write_files)
+    monkeypatch.setattr(ms, "sync_store", no_commit)
+    mc.apply_result(env.store, job)
+    assert job["status"] == "captured" and not os.path.exists(os.path.join(
+        env.store, ".okfmem", "capture", "ledger.json"))
+
+
+def test_conflicted_dirty_state_is_not_staged_or_committed(env):
+    state = Path(env.store) / "state" / "proj.md"
+    state.write_text(STATE_OLD + "local edit\n")
+    job = env.make([], STATE, state_sha="0" * 64)
+    mc.apply_result(env.store, job)
+    assert env.commits() == ["seed"]
+    assert state.read_text().endswith("local edit\n")
+    assert job["status"] == "skipped" and job["state"] == "conflict"
+
+
+def test_drain_replays_a_captured_job_and_saved_jobs_stay_saved(env, monkeypatch):
+    job = env.make([page()])
+    monkeypatch.setattr(mc, "heartbeat", lambda *_: True)
+    mc.drain(env.store, {}, "owner", set(), 0.0)
+    assert mc.iter_jobs(env.store)[0][1]["status"] == "saved" and ledger_offset(env) == 10
+    resumed = {"request_id": "saved", "harness": "claude-code", "transcript": job["transcript"],
+               "fingerprint": "fp", "ledger_key": "claude-code:s1", "upto": 0,
+               "saves": 1, "outcome": "saved first chunk"}
+    monkeypatch.setattr(mc.mt, "transcript_identity", lambda *_: {"fingerprint": "fp"})
+    mc._run_job(env.store, {}, "owner", resumed, SimpleNamespace())
+    assert resumed["status"] == "saved"
 
 
 def test_update_keeps_every_unchanged_line_and_decay_frontmatter(env):

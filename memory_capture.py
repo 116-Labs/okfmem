@@ -1074,8 +1074,14 @@ def _state_text(state, project, today_iso):
     return "".join(parts)
 
 
-def _journal_path(store, rid):
-    return os.path.join(jobs_dir(store), f"{rid}.apply.json")
+def _journal_path(store, rid, start=None, end=None):
+    """Each captured slice has its own recovery journal."""
+    suffix = f".{start}-{end}" if start is not None and end is not None else ""
+    return os.path.join(jobs_dir(store), f"{rid}{suffix}.apply.json")
+
+
+def _capture_marker(journal):
+    return f"{journal['request_id']}@{journal['start']}-{journal['end']}"
 
 
 def _plan_apply(store, job):
@@ -1111,7 +1117,8 @@ def _plan_apply(store, job):
         files.append(entry)
     state = reply.get("state")
     journal = {"schema_version": 1, "request_id": rid, "project": job["project"], "phase": "planned",
-               "end": int(result["end"]), "ledger_key": job["ledger_key"], "files": files,
+               "start": int(result["start"]), "end": int(result["end"]),
+               "ledger_key": job["ledger_key"], "files": files,
                "transcript_ended": os.path.getmtime(job["transcript"]), "state": None, "sha": None}
     if state is not None:
         rel = inputs["state"]["path"]
@@ -1194,21 +1201,21 @@ def _commit_message(journal):
     pages, state = _count(journal, "page"), _count(journal, "state")
     parts = ([f"{pages} page{'s' if pages != 1 else ''}"] if pages else []) + (["STATE"] if state else [])
     return (f"capture({journal['project']}): {', '.join(parts)}\n\n"
-            f"okfmem-capture: {journal['request_id']}\n")
+            f"okfmem-capture: {_capture_marker(journal)}\n")
 
 
-def _find_commit(store, rid):
+def _find_commit(store, journal):
     import memory_sync as ms
 
     out = ms._git(store, "log", "-n", "1", "--format=%h", "--fixed-strings",
-                  f"--grep=okfmem-capture: {rid}")
+                  f"--grep=okfmem-capture: {_capture_marker(journal)}")
     return out.stdout.strip() or None if out.returncode == 0 else None
 
 
 def _save_journal(store, journal, phase=None):
     if phase:
         journal["phase"] = phase
-    _write_json(_journal_path(store, journal["request_id"]), journal)
+    _write_json(_journal_path(store, journal["request_id"], journal["start"], journal["end"]), journal)
 
 
 def _ahead_of_upstream(store):
@@ -1221,17 +1228,16 @@ def _ahead_of_upstream(store):
 def _commit_phase(store, job, journal):
     import memory_sync as ms
 
-    if (sha := _find_commit(store, journal["request_id"])):
+    if (sha := _find_commit(store, journal)):
         journal["sha"] = sha
         return
-    writes = [e["path"] for e in journal["files"] if "content" in e]
-
-    prepared = []
+    prepared = False
 
     def prepare(_):
-        prepared.append(True)
+        nonlocal prepared
         _write_files(store, journal)
         _save_journal(store, journal, "written")
+        prepared = True
         if job.get("cwd") and os.path.isdir(job["cwd"]):
             try:
                 import memory_init as mi
@@ -1239,12 +1245,17 @@ def _commit_phase(store, job, journal):
                 mi.resolve_project(store, cwd=job["cwd"], compile=True)
             except Exception as e:  # the projection is derived; a failure never loses the capture
                 log(store, f"{journal['request_id']}: view compile failed: {type(e).__name__}: {e}")
-        return []
+        return [e["path"] for e in journal["files"] if e.get("outcome") == "written"]
 
     res = ms.sync_store(store, lambda: _commit_message(journal), token=ms.store_token(),
-                        paths=writes, prepare=prepare)
+                        paths=[], prepare=prepare)
     if not prepared:
-        raise ApplyDeferred(res.get("reason") or "store sync did not run")
+        if not str(res.get("reason") or "").startswith("prepare failed:"):
+            raise ApplyDeferred(res.get("reason") or "store sync did not run")
+        raise CaptureError(res.get("reason") or "store sync did not prepare writes")
+    wrote = any(e.get("outcome") == "written" for e in journal["files"])
+    if wrote and not res["committed"]:
+        raise ApplyDeferred(res.get("reason") or "store sync did not commit capture")
     journal["sha"] = res["sha"] if res["committed"] else None
     journal["pushed"] = bool(res["pushed"])
     if res.get("push_error"):
@@ -1289,7 +1300,9 @@ def apply_result(store, job):
     """Apply a job's validated result to the store; resumes from the journal after a crash."""
     path = os.path.join(jobs_dir(store), f"{job['request_id']}.json")
     try:
-        jpath = _journal_path(store, job["request_id"])
+        with open(os.path.join(jobs_dir(store), f"{job['request_id']}.result.json"), encoding="utf-8") as f:
+            result = json.load(f)
+        jpath = _journal_path(store, job["request_id"], result["start"], result["end"])
         if os.path.exists(jpath):
             with open(jpath, encoding="utf-8") as f:
                 journal = json.load(f)
