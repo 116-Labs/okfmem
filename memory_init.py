@@ -3214,6 +3214,7 @@ def wire_capture_hooks(store, dry_run):
     ledger_path = mt._ledger_path(store)
     if not dry_run and not ledger_path.exists():
         mt._write_ledger(store, mt._load_ledger(store))
+    enabled_at = mt._utc()
     commands = {
         "SessionEnd": (capture_hook_command(store, "SessionEnd"), 5),
         "PreCompact": (capture_hook_command(store, "PreCompact"), None),
@@ -3223,6 +3224,10 @@ def wire_capture_hooks(store, dry_run):
     for event, (command, timeout) in commands.items():
         managed = lambda current: "okfmem" in current and "capture" in current
         results[event] = wire_claude_hook(event, command, managed, dry_run, timeout=timeout)
+    if not dry_run and any(action == "added" for action, _ in results.values()):
+        ledger = mt._load_ledger(store)
+        ledger["catchup_floor"] = enabled_at
+        mt._write_ledger(store, ledger)
     return results
 
 

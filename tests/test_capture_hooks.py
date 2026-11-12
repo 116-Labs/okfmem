@@ -71,6 +71,31 @@ def test_capture_hooks_are_idempotent_and_pin_store(tmp_path, monkeypatch, isola
     assert ledger["catchup_floor"]
 
 
+def test_first_capture_enable_resets_existing_ledger_floor_once(tmp_path, monkeypatch, isolated_home):
+    home = isolated_home
+    (home / ".claude").mkdir(parents=True)
+    store = tmp_path / "store"
+    ledger_path = store / ".okfmem" / "capture" / "ledger.json"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text(json.dumps({
+        "catchup_floor": "1970-01-01T00:00:00+00:00",
+        "entries": {"claude-code:old": {"outcome": "captured"}},
+    }), encoding="utf-8")
+
+    first = mi.wire_capture_hooks(str(store), dry_run=False)
+    assert {event: result[0] for event, result in first.items()} == {
+        "SessionEnd": "added", "PreCompact": "added", "SessionStart": "added"
+    }
+    enabled_floor = json.loads(ledger_path.read_text(encoding="utf-8"))["catchup_floor"]
+    assert enabled_floor != "1970-01-01T00:00:00+00:00"
+
+    second = mi.wire_capture_hooks(str(store), dry_run=False)
+    assert {event: result[0] for event, result in second.items()} == {
+        "SessionEnd": "present", "PreCompact": "present", "SessionStart": "present"
+    }
+    assert json.loads(ledger_path.read_text(encoding="utf-8"))["catchup_floor"] == enabled_floor
+
+
 def test_uninstall_removes_only_capture_hooks(tmp_path, monkeypatch, isolated_home):
     home = isolated_home
     claude = home / ".claude"
