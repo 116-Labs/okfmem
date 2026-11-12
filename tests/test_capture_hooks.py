@@ -1,0 +1,252 @@
+import hashlib
+import json
+import os
+import pytest
+
+import memory_capture as mc
+import memory_init as mi
+import memory_uninstall as mu
+
+_REAL_HOME = os.path.expanduser("~")
+
+
+def _settings(home):
+    return home / ".claude" / "settings.json"
+
+
+def _entries(path, event):
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return [hook for group in data["hooks"][event] for hook in group["hooks"]]
+
+
+def _real_settings_hash():
+    path = os.path.join(_REAL_HOME, ".claude", "settings.json")
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except FileNotFoundError:
+        return None
+
+
+@pytest.fixture(autouse=True)
+def isolated_home(monkeypatch, tmp_path):
+    before = _real_settings_hash()
+    home = tmp_path / "isolated-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    real_expanduser = os.path.expanduser
+    monkeypatch.setattr(os.path, "expanduser", lambda p: (
+        str(home) if p == "~" else str(home / p[2:]) if p.startswith("~/")
+        else real_expanduser(p)))
+    yield home
+    assert _real_settings_hash() == before
+
+
+def test_capture_hooks_are_idempotent_and_pin_store(tmp_path, monkeypatch, isolated_home):
+    home = isolated_home
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(mi.os.path, "expanduser", lambda p: str(home) if p == "~" else p)
+    monkeypatch.setattr(mi.sys, "executable", str(tmp_path / "python"))
+    store = str(tmp_path / "store")
+
+    first = mi.wire_capture_hooks(store, dry_run=False)
+    assert {event: result[0] for event, result in first.items()} == {
+        "SessionEnd": "added", "PreCompact": "added", "SessionStart": "added"
+    }
+    settings = _settings(home)
+    assert len(_entries(settings, "SessionEnd")) == 1
+    assert _entries(settings, "SessionEnd")[0]["timeout"] == 5
+    assert len(_entries(settings, "PreCompact")) == 1
+    assert len(_entries(settings, "SessionStart")) == 1
+    for event in first:
+        command = _entries(settings, event)[0]["command"]
+        assert f'--store "{store}"' in command
+    assert "--catch-up" in _entries(settings, "SessionStart")[0]["command"]
+
+    second = mi.wire_capture_hooks(store, dry_run=False)
+    assert {event: result[0] for event, result in second.items()} == {
+        "SessionEnd": "present", "PreCompact": "present", "SessionStart": "present"
+    }
+    ledger = json.loads((tmp_path / "store" / ".okfmem" / "capture" / "ledger.json").read_text())
+    assert ledger["catchup_floor"]
+
+
+def test_uninstall_removes_only_capture_hooks(tmp_path, monkeypatch, isolated_home):
+    home = isolated_home
+    claude = home / ".claude"
+    claude.mkdir(parents=True)
+    monkeypatch.setattr(mu.os.path, "expanduser", lambda p: str(home) if p == "~" else p)
+    events = ("SessionEnd", "PreCompact", "SessionStart")
+    data = {"hooks": {event: [
+        {"hooks": [
+            {"type": "command", "command": '"python" "okfmem" capture --stdin-hook'},
+            {"type": "command", "command": "user-owned-hook"},
+        ]}
+    ] for event in events}}
+    settings = claude / "settings.json"
+    settings.write_text(json.dumps(data), encoding="utf-8")
+
+    result = mu.unwire_capture_hooks(dry_run=False)
+    assert {event: action for event, (action, _) in result.items()} == {
+        event: "removed" for event in events
+    }
+    after = json.loads(settings.read_text(encoding="utf-8"))
+    for event in events:
+        assert [hook["command"] for hook in after["hooks"][event][0]["hooks"]] == [
+            "user-owned-hook"
+        ]
+
+
+def test_noninteractive_init_offers_manual_capture_command(tmp_path, monkeypatch, isolated_home, capsys):
+    home = isolated_home
+    store = tmp_path / "store"
+    (store / "pages").mkdir(parents=True)
+    monkeypatch.setattr(mi, "detect_harnesses", lambda: {
+        "claude_code": str(home / ".claude" / "CLAUDE.md"), "codex": None,
+        "antigravity": None,
+    })
+
+    mi.cmd_run(str(store), dry_run=False, apply_cleanup=False)
+
+    output = capsys.readouterr().out
+    assert "okfmem init --capture" in output
+    assert not _settings(home).exists()
+
+
+def test_init_capture_flag_wires_capture_hooks(tmp_path, monkeypatch, isolated_home):
+    home = isolated_home
+    (home / ".claude").mkdir()
+    store = tmp_path / "store"
+    (store / "pages").mkdir(parents=True)
+    monkeypatch.setattr(mi, "detect_harnesses", lambda: {
+        "claude_code": str(home / ".claude" / "CLAUDE.md"), "codex": None,
+        "antigravity": None,
+    })
+
+    mi.cmd_run(str(store), dry_run=False, apply_cleanup=False, capture=True)
+
+    settings = _settings(home)
+    assert len(_entries(settings, "SessionEnd")) == 1
+    assert len(_entries(settings, "PreCompact")) == 1
+    assert len(_entries(settings, "SessionStart")) == 2  # pull plus capture
+
+
+def test_session_end_and_start_manage_live_record(tmp_path, monkeypatch):
+    store = str(tmp_path / "store")
+    monkeypatch.setattr(mc.os, "getppid", lambda: 4321)
+    mc.update_live_record(store, "session-1")
+    marker = tmp_path / "store" / ".okfmem" / "capture" / "live" / "session-1.json"
+    record = json.loads(marker.read_text(encoding="utf-8"))
+    assert record["pid"] == 4321
+    assert record["host"] == mc.HOST
+    mc.update_live_record(store, "session-1", remove=True)
+    assert not marker.exists()
+
+
+def test_catch_up_is_bounded_and_skips_current_and_live(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".claude" / "projects").mkdir(parents=True)
+    monkeypatch.setattr(mc.os.path, "expanduser", lambda p: str(home) if p == "~" else p)
+    store = str(tmp_path / "store")
+    sessions = ["current", "live", "one", "two", "three", "four"]
+    identities = [{"session": sid, "project": "project-a", "cwd": "/repo/a"}
+                  for sid in sessions]
+    monkeypatch.setattr(mc.mt, "uncaptured", lambda *a: iter(
+        (f"claude-code:{ident['session']}", f"{ident['session']}.jsonl", ident)
+        for ident in identities))
+    monkeypatch.setattr(mc, "iter_jobs", lambda _store: [])
+    monkeypatch.setattr(mc, "resolve_identity", lambda _store, _h, transcript=None:
+                        (next(i for i in identities
+                              if i["session"] == os.path.basename(transcript).split(".")[0]), 100))
+    queued = []
+    monkeypatch.setattr(mc, "enqueue", lambda _store, identity, _upto, trigger, _focus,
+                        defer_until_existing=False:
+                        queued.append((identity["session"], trigger)))
+    monkeypatch.setattr(mc, "_spawn_or_log", lambda _store: True)
+    monkeypatch.setattr(mc.os, "getppid", lambda: os.getpid())
+    mc.update_live_record(store, "live")
+
+    mc.trigger_catch_up(object(), store, current_session="current")
+    assert queued == [("one", "catch-up"), ("two", "catch-up"), ("three", "catch-up")]
+
+
+def test_catch_up_dispatches_existing_jobs_before_new_batch(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".claude" / "projects").mkdir(parents=True)
+    monkeypatch.setattr(mc.os.path, "expanduser", lambda p: str(home) if p == "~" else p)
+    pending = {"request_id": "older", "status": "queued", "ledger_key": "existing"}
+    monkeypatch.setattr(mc, "iter_jobs", lambda _store: [("job.json", pending)])
+    identity = {"session": "new", "project": "project-a", "cwd": "/repo/a"}
+    monkeypatch.setattr(mc.mt, "uncaptured", lambda *a: iter([
+        ("claude-code:new", "new.jsonl", identity)
+    ]))
+    monkeypatch.setattr(mc, "resolve_identity", lambda *_a, **_k: (identity, 100))
+    queued = []
+    monkeypatch.setattr(mc, "enqueue", lambda _store, _identity, _upto, _trigger, _focus,
+                        defer_until_existing=False: queued.append(defer_until_existing))
+    spawned = []
+    monkeypatch.setattr(mc, "_spawn_or_log", lambda store: spawned.append(store))
+
+    mc.trigger_catch_up(object(), str(tmp_path / "store"), drain_existing=True)
+
+    assert queued == [True]
+    assert spawned == [str(tmp_path / "store")]
+
+
+def test_catch_up_keeps_transcript_project_when_started_from_another_project(
+    tmp_path, monkeypatch, isolated_home
+):
+    home = isolated_home
+    root_a = tmp_path / "repo-a"
+    root_b = tmp_path / "repo-b"
+    root_a.mkdir()
+    root_b.mkdir()
+    transcript_dir = home / ".claude" / "projects" / mi.encode_root(str(root_a))
+    transcript_dir.mkdir(parents=True)
+    transcript = transcript_dir / "session-a.jsonl"
+    transcript.write_text(json.dumps({"sessionId": "session-a", "cwd": str(root_a)}) + "\n",
+                          encoding="utf-8")
+    old = mc.time.time() - mc.CATCHUP_IDLE_S - 30
+    os.utime(transcript, (old, old))
+    store = tmp_path / "store"
+    (store / "pages").mkdir(parents=True)
+    ledger = store / ".okfmem" / "capture" / "ledger.json"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(json.dumps({
+        "catchup_floor": "1970-01-01T00:00:00+00:00", "entries": {}
+    }), encoding="utf-8")
+    monkeypatch.setattr(mc, "_project_for", lambda _store, cwd:
+                        "project-a" if cwd == str(root_a) else "project-b")
+    monkeypatch.setattr(mc, "_spawn_or_log", lambda _store: True)
+
+    mc.trigger_catch_up(object(), str(store), current_session="session-b")
+
+    [(_path, job)] = mc.iter_jobs(str(store))
+    assert job["project"] == "project-a"
+    assert job["cwd"] == str(root_a)
+
+
+def test_status_reports_hook_configuration_verification_and_backlog(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(mc.os.path, "expanduser", lambda p: str(home) if p == "~" else p)
+    settings = _settings(home)
+    settings.write_text(json.dumps({"hooks": {"SessionEnd": [{"hooks": [
+        {"command": "python okfmem capture --stdin-hook"}
+    ]}]}}), encoding="utf-8")
+    monkeypatch.setattr(mc, "iter_jobs", lambda _store: [
+        ("job", {"trigger": "SessionEnd", "status": "captured"})
+    ])
+    monkeypatch.setattr(mc.mt, "uncaptured", lambda *a: iter([("key", "path", {})]))
+    skipped = tmp_path / "store" / ".okfmem" / "capture" / "skipped-unresolvable.json"
+    skipped.parent.mkdir(parents=True)
+    skipped.write_text(json.dumps({"entries": {
+        "claude-code:old": {"project": "project-a"},
+        "claude-code:older": {"project": "project-a"},
+        "claude-code:other": {"project": "project-b"},
+    }}), encoding="utf-8")
+
+    assert mc.hook_status_lines(str(tmp_path / "store")) == [
+        "capture hooks   configured; verified active; backlog 1",
+        "capture skipped unresolved: project-a 2, project-b 1",
+    ]

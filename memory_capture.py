@@ -59,7 +59,7 @@ MAX_PAGES = 8
 MAX_BODY_BYTES = 20 * 1024
 EXCERPT_LINES = 40
 CATCHUP_IDLE_S = 600
-CATCHUP_MAX_JOBS = 20
+CATCHUP_MAX_JOBS = 3
 LOG_MAX_BYTES = 1_000_000
 SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,79}")
 SESSION_RE = re.compile(r"[A-Za-z0-9._-]{1,200}")
@@ -166,6 +166,63 @@ def capture_dir(store):
 
 def jobs_dir(store):
     return os.path.join(capture_dir(store), "jobs")
+
+
+def live_dir(store):
+    return os.path.join(capture_dir(store), "live")
+
+
+def skipped_unresolvable_path(store):
+    return os.path.join(capture_dir(store), "skipped-unresolvable.json")
+
+
+def record_unresolvable(store, key, cwd):
+    path = skipped_unresolvable_path(store)
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {"entries": {}}
+    if not isinstance(data, dict) or not isinstance(data.get("entries"), dict):
+        data = {"entries": {}}
+    entries = data.setdefault("entries", {})
+    if key in entries:
+        return
+    project = os.path.basename(os.path.normpath(cwd)) if isinstance(cwd, str) and cwd else "unknown"
+    entries[key] = {"project": project, "updated": _utc()}
+    _write_json(path, data)
+
+
+def update_live_record(store, session, remove=False):
+    if not isinstance(session, str) or not SESSION_RE.fullmatch(session):
+        return
+    path = os.path.join(live_dir(store), f"{session}.json")
+    if remove:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        return
+    os.makedirs(live_dir(store), exist_ok=True)
+    _write_json(path, {"pid": os.getppid(), "host": HOST, "started": _utc()})
+
+
+def _live_session(store, session):
+    if not isinstance(session, str) or not SESSION_RE.fullmatch(session):
+        return False
+    path = os.path.join(live_dir(store), f"{session}.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            record = json.load(f)
+    except (OSError, ValueError):
+        return False
+    if isinstance(record, dict) and record.get("host") == HOST and _pid_alive(record.get("pid")):
+        return True
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return False
 
 
 def log(store, msg):
@@ -330,7 +387,7 @@ def new_request_id():
     return f"{stamp}-{uuid.uuid4().hex[:8]}"
 
 
-def enqueue(store, identity, upto, trigger, focus):
+def enqueue(store, identity, upto, trigger, focus, defer_until_existing=False):
     if not identity.get("project"):
         raise EnqueueError(f"no project resolves for cwd {identity.get('cwd')!r}")
     os.makedirs(jobs_dir(store), exist_ok=True)
@@ -351,6 +408,7 @@ def enqueue(store, identity, upto, trigger, focus):
         "project": identity["project"],
         "cwd": identity["cwd"],
         "trigger": trigger,
+        "defer_until_existing": bool(defer_until_existing),
         "focus": focus,
         "upto": upto,
         "cursor": None,
@@ -467,37 +525,53 @@ def trigger_stdin_hook(args, store):
             log(store, f"stdin-hook: no runner for {harness}, nothing queued")
             return 0
         trigger = args.trigger or payload.get("hook_event_name") or "stdin-hook"
+        session = payload.get("session_id")
+        if trigger == "SessionStart":
+            update_live_record(store, session)
+        elif trigger == "SessionEnd":
+            update_live_record(store, session, remove=True)
         identity, upto = resolve_identity(store, harness, session=payload.get("session_id"),
                                           transcript=payload.get("transcript_path") or None,
                                           cwd=payload.get("cwd"))
-        job, _ = enqueue(store, identity, upto, str(trigger), None)
-        log(store, f"queued {job['request_id']} ({job['trigger']}) {job['ledger_key']} upto {upto}")
-        _spawn_or_log(store)
+        if trigger != "SessionStart":
+            job, _ = enqueue(store, identity, upto, str(trigger), None)
+            log(store, f"queued {job['request_id']} ({job['trigger']}) {job['ledger_key']} upto {upto}")
+            _spawn_or_log(store)
+        if getattr(args, "catch_up", False):
+            trigger_catch_up(args, store, current_session=session, drain_existing=True)
     except Exception as e:  # a hook never fails or delays the session it ends
         log(store, f"stdin-hook: not queued: {type(e).__name__}: {e}")
     return 0
 
 
-def trigger_catch_up(args, store):
+def trigger_catch_up(args, store, current_session=None, drain_existing=False):
     try:
         # A failed job is never retried automatically, so its session is not swept again.
         busy = {job.get("ledger_key") for _, job in iter_jobs(store)
                 if job.get("status") in PENDING + ("captured", "failed")}
+        pending_before_sweep = drain_existing and any(
+            job.get("status") in PENDING for _, job in iter_jobs(store))
         root = os.path.join(os.path.expanduser("~"), ".claude", "projects")
         queued = 0
-        for key, path, _ in mt.uncaptured(store, "claude-code", [root], CATCHUP_IDLE_S):
-            if key in busy or queued >= CATCHUP_MAX_JOBS:
+        for key, path, identity in mt.uncaptured(store, "claude-code", [root], CATCHUP_IDLE_S):
+            if (key in busy or queued >= CATCHUP_MAX_JOBS
+                    or identity.get("session") == current_session
+                    or _live_session(store, identity.get("session"))):
                 continue
             try:
                 identity, upto = resolve_identity(store, "claude-code", transcript=path)
-                enqueue(store, identity, upto, "catch-up", None)
+                enqueue(store, identity, upto, "catch-up", None,
+                        defer_until_existing=pending_before_sweep)
             except (EnqueueError, OSError, ValueError) as e:
                 log(store, f"catch-up: {key} not queued: {e}")
+                if isinstance(e, EnqueueError) and str(e).startswith("no project resolves for cwd"):
+                    record_unresolvable(store, key, identity.get("cwd"))
                 continue
             busy.add(key)
             queued += 1
-        if queued:
-            log(store, f"catch-up: queued {queued} session(s)")
+        if queued or pending_before_sweep:
+            if queued:
+                log(store, f"catch-up: queued {queued} session(s)")
             _spawn_or_log(store)
     except Exception as e:  # a SessionStart hook never fails the session
         log(store, f"catch-up: {type(e).__name__}: {e}")
@@ -696,7 +770,9 @@ def drain(store, cfg, owner, seen, spent):
     for _, job in iter_jobs(store):
         if job.get("status") == "captured" and heartbeat(store, owner):
             apply_result(store, job)
-    jobs = iter_jobs(store)
+    jobs = sorted(iter_jobs(store),
+                  key=lambda pair: (not pair[1].get("defer_until_existing", False),
+                                    str(pair[1].get("updated") or "")), reverse=True)
     awaiting = {j.get("ledger_key") for _, j in jobs if j.get("status") == "captured"}
     for path, job in jobs:
         rid = job["request_id"]
@@ -1449,20 +1525,63 @@ def status_lines(store):
     return lines
 
 
+def hook_status_lines(store):
+    settings = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+    configured = False
+    try:
+        with open(settings, encoding="utf-8") as f:
+            data = json.load(f)
+        hooks = data.get("hooks", {}) if isinstance(data, dict) else {}
+        configured = any(
+            isinstance(hook, dict) and "okfmem" in hook.get("command", "")
+            and "capture" in hook.get("command", "")
+            for groups in hooks.values() if isinstance(groups, list)
+            for group in groups if isinstance(group, dict)
+            for hook in group.get("hooks", []) if isinstance(group.get("hooks", []), list)
+        )
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, TypeError):
+        return ["capture hooks   settings.json unreadable"]
+    jobs = [job for _, job in iter_jobs(store)]
+    verified = any(job.get("trigger") in {"SessionEnd", "PreCompact", "catch-up"}
+                   and job.get("status") not in PENDING for job in jobs)
+    root = os.path.join(os.path.expanduser("~"), ".claude", "projects")
+    try:
+        backlog = sum(1 for _ in mt.uncaptured(store, "claude-code", [root], CATCHUP_IDLE_S))
+    except (OSError, ValueError):
+        backlog = "unavailable"
+    lines = [f"capture hooks   {'configured' if configured else 'not configured'}; "
+             f"{'verified active' if verified else 'not verified active'}; backlog {backlog}"]
+    try:
+        with open(skipped_unresolvable_path(store), encoding="utf-8") as f:
+            entries = json.load(f).get("entries", {})
+        counts = {}
+        for entry in entries.values():
+            project = str(entry.get("project") or "unknown")
+            counts[project] = counts.get(project, 0) + 1
+        if counts:
+            lines.append("capture skipped unresolved: " + ", ".join(
+                f"{project} {counts[project]}" for project in sorted(counts)))
+    except (OSError, ValueError, TypeError):
+        pass
+    return lines
+
+
 # --- CLI ----------------------------------------------------------------------
 
 
 def _parser():
     ap = argparse.ArgumentParser(prog="okfmem capture", description=__doc__.splitlines()[0])
-    mode = ap.add_mutually_exclusive_group(required=True)
+    mode = ap.add_mutually_exclusive_group(required=False)
     mode.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     mode.add_argument("--stdin-hook", action="store_true",
                       help="read a session-end hook payload from stdin and queue it (always exits 0)")
     mode.add_argument("--now", action="store_true", help="queue one session now")
-    mode.add_argument("--catch-up", action="store_true",
-                      help="queue Claude Code sessions whose capture never ran")
     mode.add_argument("--record", action="store_true",
                       help="mark a session covered up to --upto after a foreground save")
+    ap.add_argument("--catch-up", action="store_true",
+                    help="queue Claude Code sessions whose capture never ran")
     ap.add_argument("--harness", help="claude-code or codex (stdin-hook default: claude-code)")
     ap.add_argument("--session", help="session id; its transcript is looked up")
     ap.add_argument("--transcript", help="transcript .jsonl path")
@@ -1490,10 +1609,12 @@ def main(argv=None):
     if os.environ.get("OKFMEM_INTERNAL") == "1":
         return 0
     args = _parser().parse_args(argv)
+    if not (args.worker or args.stdin_hook or args.now or args.catch_up or args.record):
+        _parser().error("one of --worker, --stdin-hook, --now, --catch-up, or --record is required")
     store = resolve_store(args.store)
     if args.now:
         return trigger_now(args, store)
-    if args.catch_up:
+    if args.catch_up and not args.stdin_hook:
         return trigger_catch_up(args, store)
     if args.record:
         return record_coverage(args, store)

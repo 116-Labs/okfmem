@@ -2701,8 +2701,7 @@ def _link_memory_dir(
 def _write_settings_json(claude_dir, settings, data):
     """Write `data` to Claude Code's `settings.json`, backing up the
     immediately-prior state to `.okfmem.bak` on each write (the backup is
-    overwritten every time, not kept once). Shared by `wire_stop_hook` and
-    `wire_pull_hook` so both hooks back up/write identically."""
+    overwritten every time, not kept once)."""
     os.makedirs(claude_dir, exist_ok=True)
     if os.path.exists(settings):
         try:
@@ -2712,6 +2711,55 @@ def _write_settings_json(claude_dir, settings, data):
     with open(settings, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
+
+
+def wire_claude_hook(event, command, managed, dry_run, matcher=None, timeout=None):
+    """Add or heal one managed Claude Code hook and preserve all other settings."""
+    home = os.path.expanduser("~")
+    claude_dir = os.path.join(home, ".claude")
+    if not os.path.isdir(claude_dir):
+        return ("no-claude", None)
+    settings = os.path.join(claude_dir, "settings.json")
+    data = {}
+    if os.path.exists(settings):
+        try:
+            with open(settings, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return ("skip (settings.json unreadable — wire manually)", settings)
+    if not isinstance(data, dict):
+        return ("skip (settings.json not an object — wire manually)", settings)
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        return ("skip (hooks not an object — wire manually)", settings)
+    groups = hooks.setdefault(event, [])
+    if not isinstance(groups, list):
+        return (f"skip ({event} hook not a list — wire manually)", settings)
+    for group in groups:
+        if not isinstance(group, dict) or not isinstance(group.get("hooks", []), list):
+            continue
+        for hook in group.get("hooks", []):
+            if not isinstance(hook, dict):
+                continue
+            current = hook.get("command", "")
+            if not managed(current):
+                continue
+            same_command = current == command or (matcher and matcher(current, command))
+            if same_command and (timeout is None or hook.get("timeout") == timeout):
+                return ("present", settings)
+            hook["command"] = command
+            if timeout is not None:
+                hook["timeout"] = timeout
+            if not dry_run:
+                _write_settings_json(claude_dir, settings, data)
+            return ("healed", settings)
+    hook = {"type": "command", "command": command}
+    if timeout is not None:
+        hook["timeout"] = timeout
+    groups.append({"hooks": [hook]})
+    if not dry_run:
+        _write_settings_json(claude_dir, settings, data)
+    return ("added", settings)
 
 
 def wire_stop_hook(dry_run):
@@ -2729,44 +2777,12 @@ def wire_stop_hook(dry_run):
     existing setting and other hook is preserved — we append to hooks.Stop only
     when no entry there already invokes memory_consolidate.py.
     """
-    home = os.path.expanduser("~")
-    claude_dir = os.path.join(home, ".claude")
-    if not os.path.isdir(claude_dir):
-        return ("no-claude", None)
-    settings = os.path.join(claude_dir, "settings.json")
     engine = os.path.dirname(os.path.realpath(__file__))
     consolidate = os.path.join(engine, "memory_consolidate.py")
     # Absolute interpreter + script: robust at hook time regardless of PATH.
     command = f'"{sys.executable}" "{consolidate}" --stdin-hook'
-
-    data = {}
-    if os.path.exists(settings):
-        try:
-            with open(settings, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            return ("skip (settings.json unreadable — wire manually)", settings)
-    if not isinstance(data, dict):
-        return ("skip (settings.json not an object — wire manually)", settings)
-
-    hooks = data.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
-        return ("skip (hooks not an object — wire manually)", settings)
-    stop = hooks.setdefault("Stop", [])
-    if not isinstance(stop, list):
-        return ("skip (Stop hook not a list — wire manually)", settings)
-
-    for group in stop:
-        if not isinstance(group, dict):
-            continue
-        for h in group.get("hooks", []):
-            if isinstance(h, dict) and "memory_consolidate.py" in h.get("command", ""):
-                return ("present", settings)
-
-    stop.append({"hooks": [{"type": "command", "command": command}]})
-    if not dry_run:
-        _write_settings_json(claude_dir, settings, data)
-    return ("added", settings)
+    return wire_claude_hook("Stop", command,
+                            lambda cur: "memory_consolidate.py" in cur, dry_run)
 
 
 # ---------------------------------------------------------------------------
@@ -3173,68 +3189,52 @@ def wire_pull_hook(dry_run):
       'no-claude'  — ~/.claude missing; nothing to wire
       'skip (...)' — settings.json unreadable/wrong shape; print the snippet
     """
-    home = os.path.expanduser("~")
-    claude_dir = os.path.join(home, ".claude")
-    if not os.path.isdir(claude_dir):
-        return ("no-claude", None)
-    settings = os.path.join(claude_dir, "settings.json")
     engine = os.path.dirname(os.path.realpath(__file__))
     okfmem_cli = os.path.join(engine, "okfmem")
     # Absolute interpreter + script: robust at hook time regardless of PATH,
     # cross-platform (os.path.join uses the right separator per-OS).
     command = f'"{sys.executable}" "{okfmem_cli}" pull --quiet'
-
-    data = {}
-    if os.path.exists(settings):
-        try:
-            with open(settings, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            return ("skip (settings.json unreadable — wire manually)", settings)
-    if not isinstance(data, dict):
-        return ("skip (settings.json not an object — wire manually)", settings)
-
-    hooks = data.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
-        return ("skip (hooks not an object — wire manually)", settings)
-    starts = hooks.setdefault("SessionStart", [])
-    if not isinstance(starts, list):
-        return ("skip (SessionStart hook not a list — wire manually)", settings)
-
-    for group in starts:
-        if not isinstance(group, dict):
-            continue
-        for h in group.get("hooks", []):
-            if not isinstance(h, dict):
-                continue
-            cur = h.get("command", "")
-            if _is_managed_pull_command(cur):
-                if cur == command or _is_current_pull_command(cur, okfmem_cli):
-                    return ("present", settings)
-                h["command"] = command  # heal: older okfmem release/path
-                if not dry_run:
-                    _write_settings_json(claude_dir, settings, data)
-                return ("healed", settings)
-            if _is_legacy_pull_command(cur):
-                h["command"] = command  # heal: pre-#16 hand-added raw git pull
-                if not dry_run:
-                    _write_settings_json(claude_dir, settings, data)
-                return ("healed", settings)
-
-    starts.append({"hooks": [{"type": "command", "command": command}]})
-    if not dry_run:
-        _write_settings_json(claude_dir, settings, data)
-    return ("added", settings)
+    managed = lambda cur: (_is_managed_pull_command(cur) or _is_legacy_pull_command(cur))
+    equivalent = lambda cur, _new: _is_current_pull_command(cur, okfmem_cli)
+    return wire_claude_hook("SessionStart", command, managed, dry_run, equivalent)
 
 
-def _prompt_yes_no(question, *, assume_yes, non_interactive, manual_hint):
+def capture_hook_command(store, trigger, catch_up=False):
+    engine = os.path.dirname(os.path.realpath(__file__))
+    cli = os.path.join(engine, "okfmem")
+    args = f'--stdin-hook --trigger {trigger} --store "{store}"'
+    if catch_up:
+        args += " --catch-up"
+    return f'"{sys.executable}" "{cli}" capture {args}'
+
+
+def wire_capture_hooks(store, dry_run):
+    import memory_transcript as mt
+
+    ledger_path = mt._ledger_path(store)
+    if not dry_run and not ledger_path.exists():
+        mt._write_ledger(store, mt._load_ledger(store))
+    commands = {
+        "SessionEnd": (capture_hook_command(store, "SessionEnd"), 5),
+        "PreCompact": (capture_hook_command(store, "PreCompact"), None),
+        "SessionStart": (capture_hook_command(store, "SessionStart", catch_up=True), None),
+    }
+    results = {}
+    for event, (command, timeout) in commands.items():
+        managed = lambda current: "okfmem" in current and "capture" in current
+        results[event] = wire_claude_hook(event, command, managed, dry_run, timeout=timeout)
+    return results
+
+
+def _prompt_yes_no(question, *, assume_yes, non_interactive, manual_hint, default_yes=False):
     """Rung-2 confirmation gate (see CLAUDE.md 'Confirmation discipline').
 
     Returns True to proceed with a config-mutating op. `assume_yes` (the
     installer / `--yes` / CI path) short-circuits to True. A non-interactive
     run WITHOUT assume_yes takes the safe default -- skip -- and prints the
     exact manual command so an automated install never hangs on a prompt and
-    the user can still apply it later. Otherwise ask, defaulting to No.
+    the user can still apply it later. Otherwise ask, defaulting to No unless
+    `default_yes` is set.
 
     Prints its own outcome line (so the caller doesn't double-report), and
     returns the decision so the caller can skip the actual mutation."""
@@ -3244,19 +3244,20 @@ def _prompt_yes_no(question, *, assume_yes, non_interactive, manual_hint):
         print(f"{glyph('ok')} {question}\n    skipped (non-interactive). {manual_hint}")
         return False
     try:
-        ans = input(f"{question} [y/N] ").strip().lower()
+        ans = input(f"{question} [{'Y/n' if default_yes else 'y/N'}] ").strip().lower()
     except EOFError:
         # stdin closed mid-prompt -- treat as the safe default, not a crash.
         print(f"    skipped. {manual_hint}")
         return False
-    if ans in ("y", "yes"):
+    if ans in ("y", "yes") or (default_yes and ans == ""):
         return True
     print(f"    skipped. {manual_hint}")
     return False
 
 
 def cmd_run(
-    store, dry_run, apply_cleanup, verbose=False, wire_hook=True, assume_yes=False
+    store, dry_run, apply_cleanup, verbose=False, wire_hook=True, assume_yes=False,
+    capture=None,
 ):
     """Wire the store into every harness and report the result.
 
@@ -3298,13 +3299,21 @@ def cmd_run(
     if dry_run:
         apply_config = True  # preview only -- ops run in dry_run, mutate nothing
     else:
+        question = "Wire okfmem into detected harnesses (hooks, pointers, and skill/" \
+                  "memory links)?"
+        default_yes = False
+        if capture is None and harnesses.get("claude_code"):
+            question = "Capture memory in the background at session end (uses your Claude plan)?"
+            config_hint = "Apply capture later with: okfmem init --capture"
+            default_yes = True
         apply_config = _prompt_yes_no(
-            "Wire okfmem into detected harnesses (hooks, pointers, and skill/"
-            "memory links)?",
-            assume_yes=assume_yes,
+            question,
+            assume_yes=assume_yes or capture is True,
             non_interactive=non_interactive,
             manual_hint=config_hint,
+            default_yes=default_yes,
         )
+    capture_enabled = apply_config and capture is not False
 
     association_pending = False
     if apply_config and harnesses.get("claude_code"):
@@ -3583,6 +3592,22 @@ def cmd_run(
             print(f"{glyph('warn')} pull hook   {paction}")
     else:
         print(f"{glyph('ok')} pull hook   skipped (--no-hook)")
+
+    if not apply_config:
+        print(f"{glyph('ok')} capture hooks skipped (config changes declined)")
+    elif not capture_enabled:
+        print(f"{glyph('ok')} capture hooks skipped (--no-capture)")
+    elif not wire_hook:
+        print(f"{glyph('ok')} capture hooks skipped (--no-hook)")
+    elif not harnesses.get("claude_code"):
+        print(f"{glyph('ok')} capture hooks no Claude Code detected — skipped")
+    else:
+        results = wire_capture_hooks(store, dry_run)
+        for event, (action, path) in results.items():
+            if action in ("added", "healed"):
+                changes += 1
+            print(f"{glyph('chg' if action in ('added', 'healed') else 'ok')} "
+                  f"capture {event:11} {action} ({_short(path) if path else 'unavailable'})")
 
     if apply_config and wire_hook and harnesses.get("codex"):
         from memory_codex import wire_hooks
@@ -4066,8 +4091,10 @@ def cmd_status(store, show_all=False, project_filter=None):
     print(f"  pull hook: {pull_hook}")
 
     try:
-        from memory_capture import status_lines
+        from memory_capture import hook_status_lines, status_lines
 
+        for line in hook_status_lines(store):
+            print(f"  {line}")
         for line in status_lines(store):
             print(f"  {line}")
     except Exception as e:  # status is read-only: a capture read error never hides the rest
@@ -4179,6 +4206,12 @@ def main():
         "hook or the SessionStart store-pull hook into "
         "~/.claude/settings.json",
     )
+    capture_group = ap.add_mutually_exclusive_group()
+    capture_group.add_argument("--capture", dest="capture", action="store_true",
+                               help="enable Claude Code session capture hooks")
+    capture_group.add_argument("--no-capture", dest="capture", action="store_false",
+                               help="leave Claude Code session capture hooks disabled")
+    ap.set_defaults(capture=None)
     ap.add_argument(
         "-y",
         "--yes",
@@ -4316,6 +4349,7 @@ def main():
             args.verbose,
             wire_hook=not args.no_hook,
             assume_yes=args.yes,
+            capture=args.capture,
         )
 
 
