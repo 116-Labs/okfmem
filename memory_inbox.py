@@ -1280,6 +1280,8 @@ class _Planner:
         self.counts = {"drop": 0, "merge": 0, "new": 0, "replace": 0, "skip": 0}
         self.targets, self.touched, self.skipped = set(), set(), set()
         self._existing = {}
+        self._ids = {}  # where -> decision id
+        self.flagged = {}  # decision id -> [problem], for the review page
 
     def existing(self, project):
         if project not in self._existing:
@@ -1288,6 +1290,8 @@ class _Planner:
 
     def problem(self, where, msg):
         self.problems.append(f"{where}: {msg}")
+        if where in self._ids:
+            self.flagged.setdefault(self._ids[where], []).append(msg)
 
     def project_of(self, where, pages):
         projects = {p["project"] for p in pages}
@@ -1323,6 +1327,7 @@ class _Planner:
                 continue
             if isinstance(d.get("id"), str):
                 where += f" ({d['id']})"
+                self._ids[where] = d["id"]
             covers = d.get("covers", [])
             if not isinstance(d.get("id"), str):
                 self.problem(where, "needs a string `id`")
@@ -1538,7 +1543,7 @@ def plan_apply(dest, dumped, decisions, remote, today, imported_by):
             "targets": len(planner.targets), "low": planner.low,
             "touched": planner.touched, "delete": delete, "gone": gone, "moved": moved,
             "held": held, "shrink": shrink, "pending": planner.counts["skip"],
-            "decided": len(dumped) - planner.counts["skip"]}
+            "decided": len(dumped) - planner.counts["skip"], "flagged": planner.flagged}
     return plan, planner.problems
 
 
@@ -1613,10 +1618,13 @@ def write_plan(dest, plan):
 
 
 def apply(store, decisions_path, confirm, dest=None, out=print, today=None,
-          imported_by=None, do_sync=True, hint=None):
+          imported_by=None, do_sync=True, hint=None, report=None):
     """Apply `decisions_path` against the `pending.jsonl` dumped beside it.
-    `confirm()` returns True, False, or None when nobody can be asked.
+    `confirm()` returns True, False, or None when nobody can be asked. A `report`
+    dict gets the `problems`, `written` (relative to dest) and `cleared` refs.
     Returns the exit code."""
+    report = {} if report is None else report
+    report.update(problems=[], written=[], cleared=[])
     dest = dest or store
     today = today or datetime.now(timezone.utc).date().isoformat()
     imported_by = imported_by or default_importer()
@@ -1637,6 +1645,7 @@ def apply(store, decisions_path, confirm, dest=None, out=print, today=None,
         out(f"okfmem inbox apply: cannot read remote '{REMOTE}' — nothing written.")
         return 1
     plan, problems = plan_apply(dest, dumped, decisions, remote, today, imported_by)
+    report["problems"] = problems
     if problems:
         out(f"okfmem inbox apply: {len(problems)} problem(s) in {decisions_path} — "
             "nothing written:")
@@ -1669,6 +1678,8 @@ def apply(store, decisions_path, confirm, dest=None, out=print, today=None,
         if plan["touched"] and has_layout_marker(dest):
             _refresh_project_views(dest, plan["touched"], out)
     deleted, failed = delete_refs(store, plan["delete"])
+    report["written"] = [os.path.relpath(p, dest) for p in written]
+    report["cleared"] = sorted(deleted)
     code = 0
     for ref, why in sorted(failed.items()):
         out(_safe(f"  still pending: {ref} ({why})"))
@@ -1692,7 +1703,33 @@ def apply(store, decisions_path, confirm, dest=None, out=print, today=None,
     return code
 
 
-def web_state(records, decisions):
+def decision_summary(records, decisions):
+    """{decided, drop, merge, new}: how many records each action covers.
+    A `skip` leaves its records pending, so it counts toward none of them."""
+    known = {r["id"] for r in records}
+    decided_actions = tuple(a for a in ACTIONS if a != "skip")
+    summary = dict.fromkeys(("decided", *decided_actions), 0)
+    seen = set()
+    for d in decisions:
+        if not isinstance(d, dict) or d.get("action") not in decided_actions:
+            continue
+        covers = d.get("covers") if isinstance(d.get("covers"), list) else []
+        ids = {i for i in [d.get("id"), *covers] if i in known} - seen
+        seen |= ids
+        summary[d["action"]] += len(ids)
+        summary["decided"] += len(ids)
+    return summary
+
+
+def _collides(dest, record):
+    """The existing slugs that accepting `record` as new, under its own slug, hits."""
+    if not record["project"]:
+        return []
+    path = new_page_path(dest, record["project"], record["slug"])
+    return [record["slug"]] if os.path.exists(path) else []
+
+
+def web_state(records, decisions, dest=None):
     """What the review page shows. `visible` is its default list (#167): every
     uncovered page, or, with decisions, only the undecided and low-confidence ones.
     A `skip` decision counts as undecided: leaving a page pending is the page's default."""
@@ -1705,9 +1742,21 @@ def web_state(records, decisions):
     visible = [r["id"] for r in records if r["id"] not in covered and (
         not decisions or r["id"] not in decided
         or decided[r["id"]].get("confidence") == "low")]
-    return {"records": [dict(r, body=page_body(r["text"])) for r in records],
+    return {"records": [dict(r, body=page_body(r["text"]), has_project=bool(r["project"]),
+                             collides=_collides(dest, r) if dest else [])
+                        for r in records],
             "decisions": decisions, "covered": covered, "visible": visible,
-            "has_decisions": bool(decisions)}
+            "has_decisions": bool(decisions),
+            "summary": decision_summary(records, decisions)}
+
+
+def web_check(dest, records, decisions, imported_by):
+    """apply's validation of `decisions`, writing nothing: {problems, by_id, summary}.
+    `by_id` holds each decision's own problems; an undecided record is not one."""
+    plan, problems = plan_apply(dest, records, decisions, {},
+                                datetime.now(timezone.utc).date().isoformat(), imported_by)
+    return {"problems": [p for p in problems if not p.startswith("not covered by")],
+            "by_id": plan["flagged"], "summary": decision_summary(records, decisions)}
 
 
 def review_web(store, work_dir, confirm, dest=None, out=print, imported_by=None,
@@ -1746,41 +1795,73 @@ def review_web(store, work_dir, confirm, dest=None, out=print, imported_by=None,
         return 0
     outcome = {"code": 1}
     lock = threading.Lock()
+    # The page polls this while /api/done blocks: it shows the [y/N] text only
+    # once apply has validated the decisions and is waiting on the terminal.
+    status = {"phase": "idle"}
+
+    def decisions_of(payload):
+        got = payload.get("decisions") if isinstance(payload, dict) else None
+        return got if isinstance(got, list) else None
 
     def state(_):
-        return 200, web_state(records, decisions)
+        return 200, web_state(records, decisions, dest)
+
+    def check(payload):
+        got = decisions_of(payload)
+        if got is None:
+            return 400, {"error": "decisions must be a list"}
+        return 200, web_check(dest, records, got, imported_by or default_importer())
+
+    def phase(_):
+        return 200, dict(status)
+
+    def waiting_confirm():
+        status["phase"] = "confirm"
+        answer = None
+        try:
+            answer = confirm()
+            return answer
+        finally:
+            status["phase"] = "writing" if answer else "idle"
 
     def done(payload):
-        got = payload.get("decisions") if isinstance(payload, dict) else None
-        if not isinstance(got, list):
-            return 400, {"error": "decisions must be a list"}
+        got = decisions_of(payload)
+        if got is None:
+            return 400, {"error": "decisions must be a list", "problems": []}
         covered = {d.get("id") for d in got if isinstance(d, dict)}
         covered.update(c for d in got if isinstance(d, dict) for c in d.get("covers") or [])
         missing = [r["id"] for r in records if r["id"] not in covered]
         if missing:
-            return 400, {"error": "no decision yet for " + ", ".join(missing)}
+            msg = "no decision yet for " + ", ".join(missing)
+            return 400, {"error": msg, "problems": [msg]}
         with lock:
-            with open(decisions_path, "w", encoding="utf-8", newline="\n") as f:
-                json.dump(got, f, ensure_ascii=False, indent=2)
-            lines = []
+            status["phase"] = "checking"
+            try:
+                with open(decisions_path, "w", encoding="utf-8", newline="\n") as f:
+                    json.dump(got, f, ensure_ascii=False, indent=2)
+                lines, report = [], {}
 
-            def say(line):  # printed as it comes, so the plan precedes the [y/N]
-                lines.append(line)
-                out(line)
+                def say(line):  # printed as it comes, so the plan precedes the [y/N]
+                    lines.append(line)
+                    out(line)
 
-            code = apply(store, decisions_path, confirm, dest=dest, out=say,
-                         imported_by=imported_by,
-                         hint=apply_hint(store, decisions_path, into))
+                code = apply(store, decisions_path, waiting_confirm, dest=dest, out=say,
+                             imported_by=imported_by, report=report,
+                             hint=apply_hint(store, decisions_path, into))
+            finally:
+                status["phase"] = "idle"
         outcome["code"] = code
         if code == 0:
             srv.stop()
-            return 200, {"output": "\n".join(lines)}
-        return 400, {"error": "\n".join(lines)}
+            return 200, {"output": "\n".join(lines), "written": report["written"],
+                         "cleared": report["cleared"]}
+        return 400, {"error": "\n".join(lines), "problems": report["problems"]}
 
-    srv = server or PageServer({"/": "inbox_review.html"},
-                               {"/api/state": state, "/api/done": done},
+    endpoints = {"/api/state": state, "/api/check": check, "/api/status": phase,
+                 "/api/done": done}
+    srv = server or PageServer({"/": "inbox_review.html"}, endpoints,
                                idle_timeout=idle_timeout)
-    srv.api.update({"/api/state": state, "/api/done": done})
+    srv.api.update(endpoints)
     out(f"okfmem inbox review: serving {srv.url()} (Ctrl-C to stop)")
     why = srv.serve(open_browser=open_browser)
     if why != "done":

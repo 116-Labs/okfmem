@@ -10,7 +10,7 @@ import pytest
 
 import memory_inbox as mx
 import memory_webui as wu
-from test_inbox import _git, _push, env  # noqa: F401
+from test_inbox import _git, _push, _push_hand_built, env  # noqa: F401
 from test_inbox_apply import _decisions, _dump, _good_decisions, _store_state
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None,
@@ -76,8 +76,9 @@ def test_idle_timeout_ends_serve():
     assert srv.serve(open_browser=False) == "idle timeout"
 
 
-def _run_review(env, work, confirm=lambda: True, decisions_post=None, lines=None, **kw):
-    srv = _shell()
+def _run_review(env, work, confirm=lambda: True, decisions_post=None, lines=None,
+                srv=None, during=None, **kw):
+    srv = srv or _shell()
     lines, result = [] if lines is None else lines, {}
     t = threading.Thread(target=lambda: result.update(code=mx.review_web(
         env["store"], work, confirm, out=lines.append, imported_by="tester",
@@ -88,6 +89,8 @@ def _run_review(env, work, confirm=lambda: True, decisions_post=None, lines=None
             break
         threading.Event().wait(0.05)
     state = json.loads(_call(srv, "/api/state")[1])
+    if during is not None:
+        result["during"] = during(srv, state)
     post = None
     if decisions_post is not None:
         post = _call(srv, "/api/done", body={"decisions": decisions_post(state)})
@@ -233,7 +236,7 @@ def test_done_with_a_page_left_pending_applies_the_rest_and_keeps_its_push(env):
 
 
 def test_skip_decisions_read_as_undecided_on_the_page():
-    records = [{"id": f"p{i}", "text": "---\nname: x\n---\n\nBody.\n"} for i in (1, 2, 3)]
+    records = [{"id": f"p{i}", "project": "proj", "text": "---\nname: x\n---\n\nBody.\n"} for i in (1, 2, 3)]
     state = mx.web_state(records, [{"id": "p1", "action": "skip", "covers": ["p2"]},
                                    {"id": "p3", "action": "skip"}])
     assert state["decisions"] == [] and not state["has_decisions"]
@@ -262,3 +265,110 @@ def test_done_with_an_undecided_page_is_refused_and_writes_nothing(env):
         {"id": recs["existing"]["id"], "action": "drop"}])
     assert post[0] == 400 and b"no decision yet" in post[1]
     assert _store_state(env) == before
+
+
+def _push_no_project(env):
+    _push_hand_built(env, {"source": "x", "machine": "evil"}, "evil/1")
+
+
+def test_state_reports_each_records_project_and_slug_collisions(env):
+    _push(env)
+    _push_no_project(env)
+    work, recs = _dump(env, "s1")
+    state = mx.web_state(mx.load_dump(os.path.join(work, mx.DUMP_FILE)), [], env["store"])
+    got = {r["slug"]: (r["has_project"], r["collides"]) for r in state["records"]}
+    assert got == {"existing": (True, ["existing"]), "fresh-lesson": (True, []),
+                   "leak-gate": (True, []), "hand": (False, [])}
+
+
+def _bad_new_decisions(recs):
+    ds = _good_decisions(recs)
+    ds[1]["page"]["slug"] = "existing"
+    return ds + [{"id": recs["hand"]["id"], "action": "new"}]
+
+
+def test_check_refuses_new_without_a_project_and_a_colliding_slug_and_writes_nothing(env):
+    _push(env)
+    _push_no_project(env)
+    work, recs = _dump(env, "s2")
+    before = _store_state(env)
+
+    def during(srv, _):
+        bad = json.loads(_call(srv, "/api/check",
+                               body={"decisions": _bad_new_decisions(recs)})[1])
+        good = _good_decisions(recs) + [{"id": recs["hand"]["id"], "action": "drop"}]
+        return bad, json.loads(_call(srv, "/api/check", body={"decisions": good})[1])
+
+    _, _, result, _ = _run_review(env, work, during=during)
+    bad, good = result["during"]
+    assert bad["by_id"][recs["fresh-lesson"]["id"]] == [
+        "new slug 'existing' already exists in the store"]
+    assert "resolve to no project" in bad["by_id"][recs["hand"]["id"]][0]
+    assert len(bad["problems"]) == 2
+    assert good["problems"] == [] and good["by_id"] == {}
+    assert good["summary"] == {"decided": 4, "drop": 2, "merge": 1, "new": 1}
+    assert _store_state(env) == before
+
+
+def test_done_refused_answers_the_problems_and_never_reaches_the_confirm(env):
+    _push(env)
+    work, recs = _dump(env, "s3")
+    asked, before = [], _store_state(env)
+    bad = _good_decisions(recs)
+    bad[1]["page"]["slug"] = "existing"
+    srv = _shell()
+    _, post, _, _ = _run_review(env, work, confirm=lambda: asked.append(1), srv=srv,
+                                decisions_post=lambda s: bad)
+    body = json.loads(post[1])
+    assert post[0] == 400 and not asked
+    assert body["problems"] == [
+        f"decision 2 ({recs['fresh-lesson']['id']}): new slug 'existing' already exists "
+        "in the store"]
+    assert _store_state(env) == before
+
+
+def test_done_accepted_says_confirm_only_while_the_terminal_asks_and_lists_the_writes(env):
+    ref = _push(env)
+    work, recs = _dump(env, "s4")
+    srv, phases = _shell(), []
+
+    def status():
+        return json.loads(_call(srv, "/api/status")[1])["phase"]
+
+    def confirm():
+        phases.append(status())
+        return True
+
+    _, post, result, _ = _run_review(env, work, confirm=confirm, srv=srv,
+                                     during=lambda s, _: status(),
+                                     decisions_post=lambda s: _good_decisions(recs))
+    body = json.loads(post[1])
+    assert result["during"] == "idle" and phases == ["confirm"]
+    assert post[0] == 200 and result["code"] == 0
+    assert sorted(body["written"]) == [os.path.join("projects", "demo", "existing.md"),
+                                       os.path.join("projects", "demo", "runner-image.md")]
+    assert body["cleared"] == [ref]
+
+
+def test_state_summarises_a_fully_decided_inbox_the_default_view_hides(env):
+    _push(env)
+    work, recs = _dump(env, "s5")
+    _decisions(work, _good_decisions(recs))
+    state, _, _, _ = _run_review(env, work)
+    assert state["visible"] == []
+    assert state["summary"] == {"decided": 3, "drop": 1, "merge": 1, "new": 1}
+
+
+def test_decision_summary_counts_skip_as_pending():
+    records = [{"id": f"p{i}", "project": "proj", "text": "x"} for i in (1, 2, 3)]
+    summary = mx.decision_summary(records, [{"id": "p1", "action": "drop"},
+                                            {"id": "p2", "action": "skip", "covers": ["p3"]}])
+    assert summary == {"decided": 1, "drop": 1, "merge": 0, "new": 0}
+
+
+def test_review_page_checks_and_submits_the_same_payload_with_skips():
+    from conftest import ROOT
+    with open(os.path.join(ROOT, "webui", "inbox_review.html"), encoding="utf-8") as f:
+        html = f.read()
+    assert 'api("/api/check", {decisions: payload()})' in html
+    assert 'api("/api/done", {decisions: payload()})' in html
