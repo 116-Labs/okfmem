@@ -13,7 +13,7 @@ def test_inbox_pull_nudge_when_over_threshold(env, monkeypatch, capsys):
     monkeypatch.setattr(mx, "fetch_inbox", lambda store: (True, ""))
     mx.pull(env["store"])
     captured = capsys.readouterr()
-    assert "okfmem inbox: 15 pending — run okfmem inbox review" in captured.out
+    assert "okfmem inbox: 15 pending — run /okfmem-inbox in your agent" in captured.out
 
 
 def test_inbox_pull_no_nudge_at_or_below_threshold(env, monkeypatch, capsys):
@@ -21,14 +21,14 @@ def test_inbox_pull_no_nudge_at_or_below_threshold(env, monkeypatch, capsys):
     monkeypatch.setattr(mx, "fetch_inbox", lambda store: (True, ""))
     mx.pull(env["store"])
     captured = capsys.readouterr()
-    assert "run okfmem inbox review" not in captured.out
+    assert "pending — run" not in captured.out
 
 
 def test_status_nudge_when_over_threshold(env, capsys):
     _bulk_inbox(env["store"], 12)
     mi.cmd_status(env["store"])
     captured = capsys.readouterr()
-    assert "okfmem inbox: 12 pending — run okfmem inbox review" in captured.out
+    assert "okfmem inbox: 12 pending — run /okfmem-inbox in your agent" in captured.out
 
 
 def test_pull_quiet_nudge_once_per_day(env, capsys):
@@ -36,12 +36,12 @@ def test_pull_quiet_nudge_once_per_day(env, capsys):
     # First quiet pull
     mp.check_inbox_nudge(env["store"], quiet=True)
     captured = capsys.readouterr()
-    assert "okfmem inbox: 14 pending — run okfmem inbox review" in captured.out
+    assert "okfmem inbox: 14 pending — run /okfmem-inbox in your agent" in captured.out
 
     # Second quiet pull on same day -> no output
     mp.check_inbox_nudge(env["store"], quiet=True)
     captured = capsys.readouterr()
-    assert "run okfmem inbox review" not in captured.out
+    assert "pending — run" not in captured.out
 
 
 def test_inbox_review_walkthrough_non_tty_exits_0(env, monkeypatch, capsys):
@@ -112,10 +112,32 @@ def test_inbox_review_walkthrough_option_2_starts_web_review(env, monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _: "2")
     monkeypatch.setattr(mx, "git_clean", lambda d: True)
     monkeypatch.setattr(mx, "review_web",
-                        lambda store, work, confirm, dest=None, into=None:
-                        calls.append((store, dest, into)) or 0)
-    assert mx.review_walkthrough(env["store"], into="proj") == 0
-    assert calls == [(env["store"], None, "proj")]
+                        lambda store, work, confirm, dest=None, into=None, threshold=None:
+                        calls.append((store, dest, into, threshold)) or 0)
+    assert mx.review_walkthrough(env["store"], into="proj", threshold=4) == 0
+    assert calls == [(env["store"], None, "proj", 4)]
+
+
+def test_inbox_review_web_forwards_threshold_to_review_web(env, monkeypatch):
+    seen = []
+    monkeypatch.setattr(mx, "git_clean", lambda d: True)
+    monkeypatch.setattr(mx, "review_web", lambda *a, **k: seen.append(k.get("threshold")) or 0)
+    monkeypatch.setattr(sys, "argv", ["memory_inbox.py", "review", "--store", env["store"],
+                                      "--web", "--threshold", "3"])
+    with pytest.raises(SystemExit) as exc:
+        mx.main()
+    assert exc.value.code == 0
+    assert seen == [3]
+
+
+def test_walkthrough_option_2_says_the_page_starts_undecided():
+    text = mx.review_walkthrough_text()
+    assert "starts undecided unless --dir holds a decisions.json" in text
+    assert "/okfmem-inbox" in text
+
+
+def test_nudge_line_names_triage_first():
+    assert "run /okfmem-inbox in your agent" in mx.nudge_line(15)
 
 
 def test_inbox_review_walkthrough_option_2_dirty_tree_exits_3(env, monkeypatch):
