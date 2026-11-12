@@ -543,3 +543,70 @@ def test_read_since_upto_stops_before_later_records(cap):
     first_end = len(json.dumps(records[0]).encode()) + 1
     turns, end, _ = mt.read_since("claude-code", path, 0, 10_000, upto=first_end)
     assert [t["text"] for t in turns] == ["one"] and end == first_end
+
+
+def _result(cap, job):
+    return json.loads((cap.store / ".okfmem" / "capture" / "jobs" / f"{job['request_id']}.result.json").read_text())
+
+
+def test_one_turn_no_tool_session_with_a_focus_file_reaches_the_capture_call(cap, capsys):
+    cap.transcript([user("keep this: we always pin the runner image", cap.repo)])
+    focus = cap.tmp / "focus.md"
+    focus.write_text("- pin the runner image: drift broke CI twice\n", encoding="utf-8")
+    argv = ["--now", "--harness", "claude-code", "--session", "s1", "--cwd", str(cap.repo),
+            "--focus", str(focus), "--trigger", "manual", "--store", str(cap.store)]
+    assert mc.main(argv) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "queued"
+    assert cap.spawned == [str(cap.store)]
+    focus.write_text("- a later save's notes\n", encoding="utf-8")
+    cap.respond([{"reply": reply(), "cost": 0.1}])
+    mc.run_worker(str(cap.store))
+    [call] = cap.calls()
+    assert _flag(call["argv"], "--model") == "sonnet"
+    assert "drift broke CI twice" in call["stdin"] and "a later save" not in call["stdin"]
+    [job] = cap.jobs()
+    assert job["status"] == "captured" and job["trigger"] == "manual"
+
+
+def test_record_after_a_fallback_save_makes_a_later_now_start_there(cap, capsys):
+    first = [user("we decided to drop the cache because it hid stale reads", cap.repo)]
+    path = cap.transcript(first)
+    upto = path.stat().st_size
+    assert mc.main(["--record", "--harness", "claude-code", "--session", "s1", "--upto", str(upto),
+                    "--outcome", "saved", "--store", str(cap.store)]) == 0
+    assert json.loads(capsys.readouterr().out) == {"status": "recorded", "ledger_key": "claude-code:s1",
+                                                   "offset": upto}
+    assert cap.ledger_offset() == upto
+    cap.transcript(first + [user("from now on prefer tabs in the Makefile", cap.repo)])
+    assert mc.main(["--now", "--harness", "claude-code", "--session", "s1"]) == 0
+    cap.respond([TRIAGE_SAVE, {"reply": reply(), "cost": 0.1}])
+    mc.run_worker(str(cap.store))
+    slices = [c["stdin"].split("## Transcript slice", 1)[1] for c in cap.calls()]
+    assert len(slices) == 2
+    assert all("prefer tabs" in s and "drop the cache" not in s for s in slices)
+    [job] = cap.jobs()
+    assert _result(cap, job)["start"] == upto
+
+
+def test_record_refuses_an_offset_inside_a_record_and_never_moves_the_ledger_back(cap, capsys):
+    records = [user("one", cap.repo), user("two", cap.repo)]
+    path = cap.transcript(records)
+    first_end, size = len(json.dumps(records[0]).encode()) + 1, path.stat().st_size
+    record = ["--record", "--harness", "claude-code", "--session", "s1", "--upto"]
+    assert mc.main(record + [str(size)]) == 0
+    assert mc.main(record + [str(first_end)]) == 0
+    assert cap.ledger_offset() == size
+    for bad in (first_end + 2, size + 10, 0):
+        assert mc.main(record + [str(bad)]) == 4
+    assert "not recorded" in capsys.readouterr().err
+    assert mc.main(["--record", "--session", "s1", "--upto", str(size)]) == 4
+    assert cap.ledger_offset() == size
+
+
+def test_record_works_for_codex_which_has_no_runner(cap, capsys):
+    rollout = cap.tmp / "rollout.jsonl"
+    rollout.write_text(json.dumps({"type": "session_meta", "payload": {"id": "c1", "cwd": str(cap.repo)}}) + "\n")
+    assert mc.main(["--now", "--harness", "codex", "--transcript", str(rollout)]) == 3
+    upto = json.loads(capsys.readouterr().out)["upto"]
+    assert mc.main(["--record", "--harness", "codex", "--transcript", str(rollout), "--upto", str(upto)]) == 0
+    assert cap.ledger_offset("codex:c1") == upto

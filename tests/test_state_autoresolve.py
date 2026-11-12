@@ -31,8 +31,8 @@ T_NEW = "2026-07-22T10:00:00.000Z"
 
 
 def state_md(modified, body):
-    """A realistic STATE.md matching the schema `skills/okfmem-save/SKILL.md`
-    Step 5 writes today: `type`/`project`/`modified` at the TOP level of the
+    """A realistic STATE.md matching the shape `prompts/capture.md` defines
+    for both capture paths: `type`/`project`/`modified` at the TOP level of the
     frontmatter (top-level `modified:` is the shape the template stamps fresh
     on every save). Body differs enough to guarantee a content conflict on
     every line."""

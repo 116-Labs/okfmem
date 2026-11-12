@@ -73,3 +73,56 @@ Return `"state": null` when the slice has no active work to record.
 
 JSON only, matching the schema:
 `{"pages": [...], "state": {six sections} | null, "summary": "<one sentence on what you captured>"}`.
+
+## Files okfmem writes from the reply
+
+For reference only; you return JSON, never files. `/okfmem-save`'s foreground
+fallback writes these same shapes by hand when no runner exists.
+
+A page, `pages/<slug>.md`, with `created` and `last_accessed` set to today:
+
+```markdown
+---
+name: <name>
+description: <description>
+type: <type>
+labels: [repo:<project>]
+created: <YYYY-MM-DD>
+last_accessed: <YYYY-MM-DD>
+access_count: 0
+---
+
+<body>
+```
+
+The state file, `state/<project>.md`, overwritten whole, never appended. `modified`
+is the current UTC time and `machine` the short hostname:
+
+```markdown
+---
+type: state
+project: <project>
+modified: <YYYY-MM-DDTHH:MM:SSZ>
+machine: <short hostname>
+---
+
+# STATE — <project>
+
+## Summary
+<summary>
+
+## Left off
+<left_off>
+
+## Next steps
+<next_steps>
+
+## Decisions
+<decisions>
+
+## Blockers
+<blockers>
+
+## Goal
+<goal>
+```
