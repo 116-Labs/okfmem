@@ -776,6 +776,9 @@ def main(argv=None):
     ap.add_argument("--force", action="store_true",
                     help="run apply even if the store working tree is dirty")
     args = ap.parse_args(argv)
+    # A capture worker's `claude -p` child loads the user's hooks (#184).
+    if args.stdin_hook and os.environ.get("OKFMEM_INTERNAL") == "1":
+        sys.exit(0)
 
     store = os.path.abspath(os.path.expanduser(args.store))
     # Both refusals run before the badge/breadcrumb write: a refused store is

@@ -158,6 +158,9 @@ def status(store):
 
 
 def main():
+    # A capture worker's model child must never re-enter okfmem hooks (#184).
+    if os.environ.get("OKFMEM_INTERNAL") == "1":
+        return
     parser = argparse.ArgumentParser()
     parser.add_argument("--event", choices=("SessionStart", "Stop"), required=True)
     parser.add_argument("--store", required=True)

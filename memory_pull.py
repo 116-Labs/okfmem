@@ -511,6 +511,9 @@ def check_inbox_nudge(store, quiet=False):
 
 
 def main():
+    # A capture worker's `claude -p` child loads the user's hooks (#184).
+    if os.environ.get("OKFMEM_INTERNAL") == "1":
+        sys.exit(0)
     ap = argparse.ArgumentParser(
         description="Fetch + integrate remote changes into the okfmem store "
                     "(fast-forward when clean, rebase --autostash otherwise).")

@@ -24,6 +24,10 @@ Usage:
   okfmem export --repo NAME --out DIR [--label LABEL]... [--archive] [--dry-run] [--json] [--store PATH]
                                                  # one repo's pages as a bundle a
                                                  # teammate imports via the inbox — #149
+  okfmem capture --stdin-hook | --catch-up | --now --harness H [--session ID]
+                 [--transcript PATH] [--focus FILE] [--store PATH]
+                                                 # queue a session for background capture
+                                                 # on a cheap, tool-less model — #184
   okfmem --version                               # also `okfmem version`
   okfmem inbox push <dir> --source NAME [--repo R] [--ref T] [--machine M] [--json]
   okfmem inbox pull                              # candidate pages pushed from
@@ -77,7 +81,8 @@ MODULES = {"backfill": "memory_backfill.py", "init": "memory_init.py",
            "graduate": "memory_graduate.py", "reindex": "memory_reindex.py",
            "inbox": "memory_inbox.py", "migrate-to-labels": "memory_migrate.py",
            "state": "memory_state.py", "find": "memory_find.py",
-           "store": "memory_store.py", "export": "memory_export.py"}
+           "store": "memory_store.py", "export": "memory_export.py",
+           "capture": "memory_capture.py"}
 # Opt-in plugin commands -> plugins/<file>. Loaded ONLY if the file is present,
 # so core install stays harness-agnostic. Several commands may share one plugin.
 PLUGINS = {"index": "memory_search.py", "search": "memory_search.py",

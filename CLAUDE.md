@@ -86,6 +86,7 @@ okfmem store merge <source> --dry-run   # import another store; differing pages 
 okfmem store split --projects a,b --dest PATH [--delete-source]   # copy (typed SPLIT to also remove)
 okfmem inbox dump --out DIR   # read-only: every pending page -> DIR/pending.jsonl
 okfmem inbox apply DIR/decisions.json [--yes]   # validate, [y/N], write, lease-delete refs, sync
+okfmem capture --now --harness claude-code --session ID   # queue a job; a detached worker triages + captures on a tool-less `claude -p`
 
 python3 scripts/check-leaks.py   # leak gate (also runs first in CI)
 ruff check .                     # lint (advisory in CI today)
