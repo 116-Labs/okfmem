@@ -133,6 +133,102 @@ def test_second_push_of_same_pages_creates_nothing(env):
     assert _git(env["origin"], "rev-parse", ref) == before
 
 
+PAGES = [("a.md", b"one"), ("b.md", b"two")]
+
+
+def test_content_id_without_repo_is_the_pages_id():
+    assert mx.content_id(PAGES) == mx.content_id(PAGES, None) == mx.content_id(PAGES, "")
+    assert mx.content_id(PAGES) == mx.content_id(list(reversed(PAGES)))
+
+
+def test_content_id_covers_the_repo():
+    bare = mx.content_id(PAGES)
+    demo = mx.content_id(PAGES, "acme/demo")
+    assert demo != bare
+    assert demo != mx.content_id(PAGES, "acme/other")
+    assert demo == mx.content_id(PAGES, " Acme/Demo ")
+
+
+def _push_repo(env, repo, lines):
+    code, ref = mx.push(env["worker"], env["cand"], "gaal", repo=repo,
+                        machine="ak47", out=lines.append)
+    assert code == 0, lines
+    return ref
+
+
+def test_repush_adding_repo_creates_a_new_ref_and_names_the_superseded_one(env):
+    bare = _push_repo(env, None, [])
+    lines = []
+    ref = _push_repo(env, "acme/demo", lines)
+
+    assert ref != bare
+    assert sorted(_remote_refs(env["origin"]).splitlines()) == sorted([bare, ref])
+    meta = json.loads(_git(env["origin"], "show", f"{ref}:meta.json"))
+    assert meta["repo"] == "acme/demo"
+    text = "\n".join(lines)
+    assert "already in the inbox" not in text
+    assert f"superseded {bare} (same pages, no repo)" in text
+    assert "left pending" in text
+    assert _git(env["worker"], "for-each-ref", "--format=%(refname)", "refs/okfmem") == ""
+
+
+def test_repush_with_another_repo_creates_a_new_ref_without_superseding(env):
+    first = _push_repo(env, "acme/demo", [])
+    lines = []
+    second = _push_repo(env, "acme/other", lines)
+    assert second != first
+    assert sorted(_remote_refs(env["origin"]).splitlines()) == sorted([first, second])
+    assert not any("superseded" in ln for ln in lines)
+
+
+def test_repush_of_a_repo_ref_pushed_before_the_id_covered_repo_is_a_noop(env, monkeypatch):
+    real = mx.content_id
+    monkeypatch.setattr(mx, "content_id", lambda pages, repo=None: real(pages))
+    legacy = _push_repo(env, "acme/demo", [])
+    monkeypatch.setattr(mx, "content_id", real)
+    lines = []
+    assert _push_repo(env, "acme/demo", lines) == legacy
+    assert any("already in the inbox" in ln for ln in lines)
+    assert _remote_refs(env["origin"]) == legacy
+
+
+def _push_from_other_clone(env, repo, lines):
+    other = _clone(env["origin"], os.path.join(env["tmp"], "other"))
+    code, ref = mx.push(other, env["cand"], "gaal", repo=repo,
+                        machine="ak47", out=lines.append)
+    assert code == 0, lines
+    return ref
+
+
+def test_repush_names_a_bare_ref_pushed_from_another_clone_as_superseded(env):
+    bare = _push_from_other_clone(env, None, [])
+    lines = []
+    ref = _push_repo(env, "acme/demo", lines)
+
+    assert ref != bare
+    assert sorted(_remote_refs(env["origin"]).splitlines()) == sorted([bare, ref])
+    assert f"superseded {bare} (same pages, no repo)" in "\n".join(lines)
+    assert _git(env["worker"], "for-each-ref", "--format=%(refname)", "refs/okfmem") == ""
+
+
+def test_repush_of_a_legacy_repo_ref_from_another_clone_is_a_noop(env, monkeypatch):
+    real = mx.content_id
+    monkeypatch.setattr(mx, "content_id", lambda pages, repo=None: real(pages))
+    legacy = _push_from_other_clone(env, "acme/demo", [])
+    monkeypatch.setattr(mx, "content_id", real)
+    lines = []
+    assert _push_repo(env, "acme/demo", lines) == legacy
+    assert any("already in the inbox" in ln for ln in lines)
+    assert _remote_refs(env["origin"]) == legacy
+
+
+def test_confirm_on_empty_stdin_says_nothing_was_written(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert mx._interactive_confirm() is False
+    assert ("okfmem inbox apply: could not read an answer — nothing written. "
+            "Run it in a console window (not PowerShell ISE).") in capsys.readouterr().out
+
+
 def test_push_with_no_valid_pages_pushes_nothing(env, tmp_path):
     empty = str(tmp_path / "bad")
     _write(os.path.join(empty, "x.md"), "nope\n")
