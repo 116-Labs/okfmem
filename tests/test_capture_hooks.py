@@ -1,6 +1,8 @@
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 import pytest
 
 import memory_capture as mc
@@ -60,7 +62,7 @@ def test_capture_hooks_are_idempotent_and_pin_store(tmp_path, monkeypatch, isola
     assert len(_entries(settings, "SessionStart")) == 1
     for event in first:
         command = _entries(settings, event)[0]["command"]
-        assert f'--store "{store}"' in command
+        assert f"--store {mi.hook_store_arg(store)}" in command
     assert "--catch-up" in _entries(settings, "SessionStart")[0]["command"]
 
     second = mi.wire_capture_hooks(store, dry_run=False)
@@ -69,6 +71,39 @@ def test_capture_hooks_are_idempotent_and_pin_store(tmp_path, monkeypatch, isola
     }
     ledger = json.loads((tmp_path / "store" / ".okfmem" / "capture" / "ledger.json").read_text())
     assert ledger["catchup_floor"]
+
+
+@pytest.mark.skipif(os.name == "nt" or not shutil.which("sh"), reason="needs a POSIX sh")
+def test_capture_hook_passes_store_with_command_substitution_literally(tmp_path, monkeypatch):
+    marker = tmp_path / "pwned"
+    store = str(tmp_path / f"store $(touch {marker}) `touch {marker}` 'q' \"d\"")
+    echo = shutil.which("echo") or "/bin/echo"
+    monkeypatch.setattr(mi.sys, "executable", echo)
+
+    command = mi.capture_hook_command(store, "SessionEnd")
+    result = subprocess.run(["sh", "-c", command], capture_output=True, text=True, check=True)
+
+    assert not marker.exists()
+    assert result.stdout.rstrip("\n").endswith(f"--store {store}")
+
+
+def test_windows_hook_store_arg_refuses_shell_syntax():
+    assert mi.hook_store_arg(r"C:\Users\you\okfmem-store", windows=True) == (
+        r'"C:\Users\you\okfmem-store"')
+    for unsafe in ("C:\\$(calc)", "C:\\`calc`", "C:\\%PATH%", 'C:\\a"b', "C:\\a!b"):
+        assert mi.hook_store_arg(unsafe, windows=True) is None
+
+
+def test_capture_hooks_skip_store_path_no_quoting_keeps_literal(
+    tmp_path, monkeypatch, isolated_home
+):
+    (isolated_home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(mi, "hook_store_arg", lambda _store, windows=None: None)
+
+    results = mi.wire_capture_hooks(str(tmp_path / "store"), dry_run=False)
+
+    assert all(action.startswith("skip (") for action, _ in results.values())
+    assert not _settings(isolated_home).exists()
 
 
 def test_first_capture_enable_resets_existing_ledger_floor_once(tmp_path, monkeypatch, isolated_home):

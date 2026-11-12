@@ -42,6 +42,7 @@ import ntpath
 import os
 import posixpath
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -3199,10 +3200,30 @@ def wire_pull_hook(dry_run):
     return wire_claude_hook("SessionStart", command, managed, dry_run, equivalent)
 
 
+# Characters a double-quoted Windows hook argument cannot hold literally in
+# bash, cmd or PowerShell alike.
+_WINDOWS_HOOK_UNSAFE = set('"$`%!\r\n')
+
+
+def hook_store_arg(store, windows=None):
+    """`store` as one literal shell argument for a hook command, or None when
+    no quoting keeps it literal (a Windows path holding shell syntax)."""
+    if windows is None:
+        windows = os.name == "nt"
+    if not windows:
+        return shlex.quote(store)
+    if _WINDOWS_HOOK_UNSAFE.intersection(store):
+        return None
+    return f'"{store}"'
+
+
 def capture_hook_command(store, trigger, catch_up=False):
+    store_arg = hook_store_arg(store)
+    if store_arg is None:
+        return None
     engine = os.path.dirname(os.path.realpath(__file__))
     cli = os.path.join(engine, "okfmem")
-    args = f'--stdin-hook --trigger {trigger} --store "{store}"'
+    args = f"--stdin-hook --trigger {trigger} --store {store_arg}"
     if catch_up:
         args += " --catch-up"
     return f'"{sys.executable}" "{cli}" capture {args}'
@@ -3211,6 +3232,9 @@ def capture_hook_command(store, trigger, catch_up=False):
 def wire_capture_hooks(store, dry_run):
     import memory_transcript as mt
 
+    if hook_store_arg(store) is None:
+        reason = "skip (store path holds shell syntax — wire manually)"
+        return {event: (reason, None) for event in ("SessionEnd", "PreCompact", "SessionStart")}
     ledger_path = mt._ledger_path(store)
     if not dry_run and not ledger_path.exists():
         mt._write_ledger(store, mt._load_ledger(store))
