@@ -176,6 +176,22 @@ def test_update_that_changes_nothing_is_skipped_and_advances_the_ledger(env, mon
     assert ledger_offset(env) == 10 and env.commits() == ["seed"]
 
 
+def test_failed_git_add_defers_the_apply_instead_of_recording_a_skip(env, monkeypatch):
+    job = env.make([page("new-page")])
+    real_git = ms._git
+
+    def git(store, *args, **kwargs):
+        if args and args[0] == "add":
+            return SimpleNamespace(returncode=128, stdout="", stderr="index.lock exists")
+        return real_git(store, *args, **kwargs)
+
+    monkeypatch.setattr(ms, "_git", git)
+    mc.apply_result(env.store, job)
+    assert job["status"] == "captured"
+    assert not os.path.exists(os.path.join(env.store, ".okfmem", "capture", "ledger.json"))
+    assert env.commits() == ["seed"]
+
+
 def test_conflicted_dirty_state_is_not_staged_or_committed(env):
     state = Path(env.store) / "state" / "proj.md"
     state.write_text(STATE_OLD + "local edit\n")

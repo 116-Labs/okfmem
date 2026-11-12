@@ -844,7 +844,11 @@ def sync_store(store, message, do_push=True, do_pull=True, token=None, author=No
         if scope is not None and len(scope) == 1:
             has_changes = False
         else:
-            _git(store, "add", "-A", *(scope or []))
+            added = _git(store, "add", "-A", *(scope or []))
+            if added.returncode != 0:
+                err = (added.stderr or added.stdout or "").strip()
+                res["reason"] = f"stage failed: {err}" if err else "stage failed."
+                return res
             staged = _git(store, "diff", "--cached", "--quiet", *(scope or []))
             has_changes = staged.returncode != 0
 
