@@ -203,6 +203,51 @@ def test_session_end_and_start_manage_live_record(tmp_path, monkeypatch):
     assert not marker.exists()
 
 
+def _run_hook(monkeypatch, store, payload, trigger, catch_up=True):
+    import io
+    import types
+
+    monkeypatch.setattr(mc.sys, "stdin", io.StringIO(json.dumps(payload)))
+    args = types.SimpleNamespace(harness="claude-code", trigger=trigger, catch_up=catch_up)
+    rc = mc.trigger_stdin_hook(args, store)
+    log = os.path.join(store, ".okfmem", "capture", "capture.log")
+    text = open(log, encoding="utf-8").read() if os.path.exists(log) else ""
+    return rc, text
+
+
+def test_session_start_without_transcript_still_sweeps_and_writes_live_record(tmp_path, monkeypatch):
+    store = str(tmp_path / "store")
+    calls = []
+    monkeypatch.setattr(mc, "trigger_catch_up", lambda *a, **k: calls.append(k))
+    payload = {"session_id": "s1", "transcript_path": str(tmp_path / "missing.jsonl"), "cwd": str(tmp_path)}
+    rc, text = _run_hook(monkeypatch, store, payload, "SessionStart")
+    assert rc == 0
+    assert len(calls) == 1
+    assert "not queued" not in text
+    assert os.path.exists(os.path.join(store, ".okfmem", "capture", "live", "s1.json"))
+
+
+def test_session_end_without_transcript_is_still_not_queued(tmp_path, monkeypatch):
+    store = str(tmp_path / "store")
+    payload = {"session_id": "s1", "transcript_path": str(tmp_path / "missing.jsonl"), "cwd": str(tmp_path)}
+    rc, text = _run_hook(monkeypatch, store, payload, "SessionEnd", catch_up=False)
+    assert rc == 0
+    assert "stdin-hook: not queued: EnqueueError: transcript unreadable" in text
+    assert not any(n.endswith(".json") for _, _, fs in os.walk(os.path.join(store, ".okfmem", "capture", "jobs")) for n in fs)
+
+
+def test_catch_up_failure_is_logged_and_hook_returns_zero(tmp_path, monkeypatch):
+    store = str(tmp_path / "store")
+
+    def boom(*a, **k):
+        raise RuntimeError("sweep broke")
+
+    monkeypatch.setattr(mc, "trigger_catch_up", boom)
+    rc, text = _run_hook(monkeypatch, store, {"session_id": "s1"}, "SessionStart")
+    assert rc == 0
+    assert "stdin-hook: catch-up failed: RuntimeError: sweep broke" in text
+
+
 def test_catch_up_is_bounded_and_skips_current_and_live(tmp_path, monkeypatch):
     home = tmp_path / "home"
     (home / ".claude" / "projects").mkdir(parents=True)
