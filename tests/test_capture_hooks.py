@@ -248,6 +248,21 @@ def test_catch_up_failure_is_logged_and_hook_returns_zero(tmp_path, monkeypatch)
     assert "stdin-hook: catch-up failed: RuntimeError: sweep broke" in text
 
 
+def test_live_record_failure_on_session_start_still_sweeps(tmp_path, monkeypatch):
+    store = str(tmp_path / "store")
+    calls = []
+
+    def boom(*a, **k):
+        raise OSError("record locked")
+
+    monkeypatch.setattr(mc, "update_live_record", boom)
+    monkeypatch.setattr(mc, "trigger_catch_up", lambda *a, **k: calls.append(k))
+    rc, text = _run_hook(monkeypatch, store, {"session_id": "s1"}, "SessionStart")
+    assert rc == 0
+    assert len(calls) == 1
+    assert "stdin-hook: live record failed: OSError: record locked" in text
+
+
 def test_catch_up_is_bounded_and_skips_current_and_live(tmp_path, monkeypatch):
     home = tmp_path / "home"
     (home / ".claude" / "projects").mkdir(parents=True)

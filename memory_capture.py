@@ -527,7 +527,10 @@ def trigger_stdin_hook(args, store):
         trigger = args.trigger or payload.get("hook_event_name") or "stdin-hook"
         session = payload.get("session_id")
         if trigger == "SessionStart":
-            update_live_record(store, session)
+            try:  # a failed live-record write must not skip the sweep below
+                update_live_record(store, session)
+            except Exception as e:
+                log(store, f"stdin-hook: live record failed: {type(e).__name__}: {e}")
         elif trigger == "SessionEnd":
             update_live_record(store, session, remove=True)
         if trigger != "SessionStart":
