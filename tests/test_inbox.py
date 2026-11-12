@@ -192,6 +192,36 @@ def test_repush_of_a_repo_ref_pushed_before_the_id_covered_repo_is_a_noop(env, m
     assert _remote_refs(env["origin"]) == legacy
 
 
+def _push_from_other_clone(env, repo, lines):
+    other = _clone(env["origin"], os.path.join(env["tmp"], "other"))
+    code, ref = mx.push(other, env["cand"], "gaal", repo=repo,
+                        machine="ak47", out=lines.append)
+    assert code == 0, lines
+    return ref
+
+
+def test_repush_names_a_bare_ref_pushed_from_another_clone_as_superseded(env):
+    bare = _push_from_other_clone(env, None, [])
+    lines = []
+    ref = _push_repo(env, "acme/demo", lines)
+
+    assert ref != bare
+    assert sorted(_remote_refs(env["origin"]).splitlines()) == sorted([bare, ref])
+    assert f"superseded {bare} (same pages, no repo)" in "\n".join(lines)
+    assert _git(env["worker"], "for-each-ref", "--format=%(refname)", "refs/okfmem") == ""
+
+
+def test_repush_of_a_legacy_repo_ref_from_another_clone_is_a_noop(env, monkeypatch):
+    real = mx.content_id
+    monkeypatch.setattr(mx, "content_id", lambda pages, repo=None: real(pages))
+    legacy = _push_from_other_clone(env, "acme/demo", [])
+    monkeypatch.setattr(mx, "content_id", real)
+    lines = []
+    assert _push_repo(env, "acme/demo", lines) == legacy
+    assert any("already in the inbox" in ln for ln in lines)
+    assert _remote_refs(env["origin"]) == legacy
+
+
 def test_confirm_on_empty_stdin_says_nothing_was_written(monkeypatch, capsys):
     monkeypatch.setattr(sys, "stdin", io.StringIO(""))
     assert mx._interactive_confirm() is False
