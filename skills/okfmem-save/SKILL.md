@@ -89,20 +89,20 @@ Sort what this session produced:
 
 ### Step 3: Focus notes, then hand off
 
-Write the focus file with the Write tool to `$STORE_PATH/.okfmem/capture/focus.md` (git-ignored): **at most 10 bullets**, each naming one thing worth keeping and why it matters, with the page slug to update when you know it (search `$PAGES_DIR` for the topic first). Anything the user explicitly asked to keep goes first. Only the session model knows *why* something mattered; that is all this step adds. Do not draft pages or state here. With nothing to note, hand off without `--focus`: the engine's triage then decides by `prompts/capture-triage.md`.
+Write the focus file with the Write tool to `$STORE_PATH/.okfmem/capture/focus-<SESSION_ID>.md` (git-ignored), with the Step 1 SESSION_ID in the name so a session saving on the same store at the same moment cannot overwrite it before this hand-off reads it: **at most 10 bullets**, each naming one thing worth keeping and why it matters, with the page slug to update when you know it (search `$PAGES_DIR` for the topic first). Anything the user explicitly asked to keep goes first. Only the session model knows *why* something mattered; that is all this step adds. Do not draft pages or state here. With nothing to note, hand off without `--focus`: the engine's triage then decides by `prompts/capture-triage.md`.
 
 Hand off. Pass no `--transcript`: the engine resolves the transcript from the harness and session id and validates it.
 
 Claude Code:
 ```bash
 okfmem capture --now --harness claude-code --session "${CLAUDE_SESSION_ID}" --cwd "$PWD" \
-  --focus "$STORE_PATH/.okfmem/capture/focus.md" --trigger manual --store "$STORE_PATH"
+  --focus "$STORE_PATH/.okfmem/capture/focus-${CLAUDE_SESSION_ID}.md" --trigger manual --store "$STORE_PATH"
 ```
 
 Codex:
 ```bash
 okfmem capture --now --harness codex --session "$CODEX_THREAD_ID" --cwd "$PWD" \
-  --focus "$STORE_PATH/.okfmem/capture/focus.md" --trigger manual --store "$STORE_PATH"
+  --focus "$STORE_PATH/.okfmem/capture/focus-$CODEX_THREAD_ID.md" --trigger manual --store "$STORE_PATH"
 ```
 
 Antigravity has no session id and no runner: go straight to the fallback (Step 5) as for exit 3 with unknown identity.

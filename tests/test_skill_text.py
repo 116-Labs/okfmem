@@ -52,6 +52,8 @@ def test_save_hands_off_with_focus_store_and_the_harness_session_id():
     assert '--session "${CLAUDE_SESSION_ID}"' in by_harness["claude-code"]
     assert '--session "$CODEX_THREAD_ID"' in by_harness["codex"]
     assert "CLAUDE_SESSION_ID" not in by_harness["codex"]
+    assert '--focus "$STORE_PATH/.okfmem/capture/focus-${CLAUDE_SESSION_ID}.md"' in by_harness["claude-code"]
+    assert '--focus "$STORE_PATH/.okfmem/capture/focus-$CODEX_THREAD_ID.md"' in by_harness["codex"]
     for cmd in commands:
         assert "--focus " in cmd and '--store "$STORE_PATH"' in cmd and "--trigger manual" in cmd
         assert "--transcript" not in cmd
