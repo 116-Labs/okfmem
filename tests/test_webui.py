@@ -2,6 +2,7 @@
 import json
 import os
 import shutil
+import subprocess
 import threading
 import urllib.error
 import urllib.request
@@ -364,6 +365,39 @@ def test_decision_summary_counts_skip_as_pending():
     summary = mx.decision_summary(records, [{"id": "p1", "action": "drop"},
                                             {"id": "p2", "action": "skip", "covers": ["p3"]}])
     assert summary == {"decided": 1, "drop": 1, "merge": 0, "new": 0}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available to run the page")
+def test_review_page_after_a_successful_done_lists_the_writes_and_locks_every_control(env):
+    from conftest import ROOT
+    ref = _push(env)
+    work, recs = _dump(env, "s6")
+    _decisions(work, _good_decisions(recs))
+
+    def drive_page(srv, _):
+        return subprocess.run(
+            [shutil.which("node"), os.path.join(ROOT, "tests", "webui_page.cjs"),
+             os.path.join(ROOT, "webui", "inbox_review.html"),
+             f"http://127.0.0.1:{srv.port}", srv.token],
+            capture_output=True, text=True, encoding="utf-8", timeout=60)
+
+    _, _, result, _ = _run_review(env, work, during=drive_page)
+    run = result["during"]
+    if run.returncode == 3:
+        pytest.skip(run.stderr.strip())
+    assert run.returncode == 0, run.stderr
+    page = json.loads(run.stdout)
+    assert result["code"] == 0
+    assert page["banner"]["kind"] == "ok"
+    assert page["banner"]["text"] == "Done.\nYou can close this page."
+    sections = {title: sorted(items) for title, items in page["banner"]["sections"]}
+    assert sections == {
+        "Pages written": [os.path.join("projects", "demo", "existing.md"),
+                          os.path.join("projects", "demo", "runner-image.md")],
+        "Pushes cleared": [ref]}
+    # Every record is decided, so the summary card's Done is on the page too.
+    assert page["done_buttons"] == 2
+    assert page["controls"] > 2 and page["enabled"] == []
 
 
 def test_review_page_checks_and_submits_the_same_payload_with_skips():
