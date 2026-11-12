@@ -113,9 +113,21 @@ def test_inbox_review_walkthrough_option_2_starts_web_review(env, monkeypatch):
     monkeypatch.setattr(mx, "git_clean", lambda d: True)
     monkeypatch.setattr(mx, "review_web",
                         lambda store, work, confirm, dest=None, into=None, threshold=None:
-                        calls.append((store, dest, into)) or 0)
-    assert mx.review_walkthrough(env["store"], into="proj") == 0
-    assert calls == [(env["store"], None, "proj")]
+                        calls.append((store, dest, into, threshold)) or 0)
+    assert mx.review_walkthrough(env["store"], into="proj", threshold=4) == 0
+    assert calls == [(env["store"], None, "proj", 4)]
+
+
+def test_inbox_review_web_forwards_threshold_to_review_web(env, monkeypatch):
+    seen = []
+    monkeypatch.setattr(mx, "git_clean", lambda d: True)
+    monkeypatch.setattr(mx, "review_web", lambda *a, **k: seen.append(k.get("threshold")) or 0)
+    monkeypatch.setattr(sys, "argv", ["memory_inbox.py", "review", "--store", env["store"],
+                                      "--web", "--threshold", "3"])
+    with pytest.raises(SystemExit) as exc:
+        mx.main()
+    assert exc.value.code == 0
+    assert seen == [3]
 
 
 def test_walkthrough_option_2_says_the_page_starts_undecided():
