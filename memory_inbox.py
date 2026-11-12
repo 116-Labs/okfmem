@@ -1465,7 +1465,8 @@ def plan_apply(dest, dumped, decisions, remote, today, imported_by):
     refs = {}
     for rec in dumped:
         refs.setdefault(rec["ref"], rec["sha"])
-    # A push is cleared whole, so one pending page keeps its ref as it is.
+    # A push is cleared only once every page is decided; until then its ref
+    # keeps only its pending pages.
     held = sorted({rec["ref"] for rec in dumped if rec["id"] in planner.skipped})
     shrink = {}
     for ref in held:
