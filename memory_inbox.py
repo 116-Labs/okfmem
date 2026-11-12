@@ -9,7 +9,7 @@ the maintainer without letting them anywhere near a loaded page:
   okfmem inbox push <dir> --source NAME [--repo OWNER/REPO] [--ref TEXT] [--machine NAME]
       One parentless commit (the dir's valid `*.md` pages + `meta.json`) pushed
       to `refs/okfmem/inbox/<machine>/<id>` on the store remote. The id comes
-      from the pages' content, so a re-push adds nothing; a ref per push means
+      from the pages' content and --repo, so a re-push adds nothing; a ref per push means
       machines never race on a branch. The store's working tree, branches,
       MEMORY.md and STATE.md are never touched. With --json, stdout is one object
       {"ref", "pages", "created"} (or {"error"} and a non-zero exit); text goes to stderr.
@@ -184,11 +184,21 @@ def collect_pages(src_dir):
     return pages, skipped
 
 
-def content_id(pages):
+def content_id(pages, repo=None):
+    """Push id from the pages and the repo; with no repo it is the pages' id alone,
+    so refs pushed before the repo counted (#198) still match."""
     h = hashlib.sha256()
     for name, data in sorted(pages):
         h.update(name.encode("utf-8") + b"\0" + hashlib.sha256(data).digest())
+    repo_key = _repo_key(repo)
+    if repo_key:
+        h.update(b"repo\0" + repo_key.encode("utf-8"))
     return h.hexdigest()[:16]
+
+
+def _repo_key(repo):
+    # Case-blind like resolve_repo_project, so Acme/Demo and acme/demo are one push.
+    return (repo or "").strip().lower()
 
 
 def _hash_blob(store, data):
@@ -217,12 +227,36 @@ def build_commit(store, pages, meta):
     return _out(commit)
 
 
-def remote_has_ref(store, ref):
-    """True/False, or None when the remote can't be read."""
-    r = _git(store, "ls-remote", "--refs", REMOTE, ref)
+def remote_ref_shas(store, refs):
+    """{ref: sha} for those of `refs` the remote holds, or None when it can't be read."""
+    r = _git(store, "ls-remote", "--refs", REMOTE, *refs)
     if r.returncode != 0:
         return None
-    return any(line.split("\t")[-1] == ref for line in _out(r).splitlines())
+    found = {}
+    for line in _out(r).splitlines():
+        sha, _, name = line.partition("\t")
+        if name in refs:
+            found[name] = sha
+    return found
+
+
+def _remote_meta_repo(store, ref, sha):
+    """The repo in a remote push's meta.json ("" when it has none), or None when
+    it can't be read. Fetches the ref's objects only; no local ref changes."""
+    spec = f"{sha}:meta.json"
+    r = _git(store, "cat-file", "blob", spec)
+    if r.returncode != 0:
+        if _git(store, "fetch", "-q", REMOTE, ref).returncode != 0:
+            return None
+        r = _git(store, "cat-file", "blob", spec)
+        if r.returncode != 0:
+            return None
+    try:
+        meta = json.loads(r.stdout.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    repo = meta.get("repo") if isinstance(meta, dict) else None
+    return repo if isinstance(repo, str) else ""
 
 
 def push(store, src_dir, source, repo=None, ref=None, machine=None, out=print,
@@ -253,11 +287,19 @@ def push(store, src_dir, source, repo=None, ref=None, machine=None, out=print,
         return 0, None
     result["pages"] = len(pages)
     machine = _ref_part(machine) if machine else default_machine()
-    inbox_ref = f"{INBOX_NS}/{machine}/{content_id(pages)}"
-    present = remote_has_ref(store, inbox_ref)
+    inbox_ref = f"{INBOX_NS}/{machine}/{content_id(pages, repo)}"
+    bare_ref = f"{INBOX_NS}/{machine}/{content_id(pages)}"
+    present = remote_ref_shas(store, sorted({inbox_ref, bare_ref}))
     if present is None:
         return fail(1, f"cannot read remote '{REMOTE}' — nothing pushed.")
-    if present:
+    superseded = None
+    if inbox_ref not in present and bare_ref in present:
+        old_repo = _remote_meta_repo(store, bare_ref, present[bare_ref])
+        if old_repo == "":
+            superseded = bare_ref
+        elif old_repo is not None and _repo_key(old_repo) == _repo_key(repo):
+            inbox_ref = bare_ref  # pushed with this repo before the id covered it
+    if inbox_ref in present:
         out(f"okfmem inbox push: already in the inbox ({inbox_ref}) — nothing pushed.")
         return 0, inbox_ref
     meta = {"source": source, "repo": repo, "ref": ref, "machine": machine,
@@ -272,6 +314,9 @@ def push(store, src_dir, source, repo=None, ref=None, machine=None, out=print,
         return fail(1, f"push failed: {_err(p)}")
     result["created"] = True
     out(f"okfmem inbox push: {len(pages)} page(s) -> {inbox_ref}")
+    if superseded:
+        out(f"okfmem inbox push: superseded {superseded} (same pages, no repo) — "
+            "left pending; drop it in `okfmem inbox review`.")
     return 0, inbox_ref
 
 
@@ -1728,6 +1773,9 @@ def _interactive_confirm():
     try:
         ans = input("okfmem inbox apply: write these pages and clear the inbox refs? [y/N] ")
     except EOFError:
+        # PowerShell ISE is no console host: a native program reads EOF there (#198).
+        print("\nokfmem inbox apply: could not read an answer — nothing written. "
+              "Run it in a console window (not PowerShell ISE).")
         return False
     return ans.strip().lower() in ("y", "yes")
 
