@@ -16,17 +16,23 @@ button.done{background:#1a7f37;color:#fff;border-color:#1a7f37}
 input,select,textarea{font:inherit;width:100%;box-sizing:border-box}
 .row{display:flex;gap:8px;margin:8px 0;align-items:center;flex-wrap:wrap}
 .row label{flex:1;min-width:140px}
-#msg{white-space:pre-wrap}
-@media(prefers-color-scheme:dark){body{background:#16181a;color:#e4e6e8}header,.card{background:#1f2225;border-color:#3a4046}pre{background:#2a2e32}button{background:#2a2e32;color:#e4e6e8}input,select,textarea{background:#2a2e32;color:#e4e6e8}}
+button:disabled{opacity:.5;cursor:default}
+#banner{white-space:pre-wrap;border-radius:6px;padding:10px 12px;margin-bottom:16px}
+#banner:empty{display:none}
+#banner.info{background:#e8f0fb;border:1px solid #1d6fd1}
+#banner.err{background:#fbeae6;border:1px solid #a4260a}
+#banner.ok{background:#e6f4ea;border:1px solid #1a7f37}
+#banner ul{margin:6px 0 0;padding-left:20px}
+@media(prefers-color-scheme:dark){body{background:#16181a;color:#e4e6e8}header,.card{background:#1f2225;border-color:#3a4046}pre{background:#2a2e32}button{background:#2a2e32;color:#e4e6e8}input,select,textarea{background:#2a2e32;color:#e4e6e8}#banner.info{background:#1b2a3d}#banner.err{background:#3d1f1b}#banner.ok{background:#1b3324}}
 </style></head><body>
 <header><h1>okfmem inbox review</h1>
 <label><input type="checkbox" id="showall" style="width:auto"> show all</label>
 <span id="count" class="meta"></span>
 <button class="done" id="done">Done</button></header>
-<main><div class="row pager"><button id="prev">previous</button><span id="pageinfo" class="meta"></span><button id="next">next</button></div>
+<main><div id="banner"></div>
+<div class="row pager"><button id="prev">previous</button><span id="pageinfo" class="meta"></span><button id="next">next</button></div>
 <div id="list"></div>
-<div class="row pager"><button id="prev2">previous</button><span id="pageinfo2" class="meta"></span><button id="next2">next</button></div>
-<div id="msg"></div></main>
+<div class="row pager"><button id="prev2">previous</button><span id="pageinfo2" class="meta"></span><button id="next2">next</button></div></main>
 <script>
 "use strict";
 const token = new URLSearchParams(location.search).get("t") || "";
@@ -39,6 +45,9 @@ let S = null;
 let page = 0;
 // Keyed by record id, not by page, so a decision survives moving between pages.
 const dec = {};
+// The server's verdict on the current decisions: apply's own validation, run early.
+let checked = {problems: [], by_id: {}, summary: null};
+let finished = false, doing = false, checkTimer = null, checkSeq = 0;
 
 function el(tag, attrs, ...kids) {
   const e = document.createElement(tag);
@@ -50,7 +59,7 @@ function el(tag, attrs, ...kids) {
 }
 function visible(r) { return $("showall").checked || S.visible.includes(r.id); }
 function $(id) { return document.getElementById(id); }
-function set(id, patch) { dec[id] = Object.assign(dec[id] || {id: id}, patch); render(); }
+function set(id, patch) { dec[id] = Object.assign(dec[id] || {id: id}, patch); render(); scheduleCheck(); }
 function pageOf(d) { d.page = d.page || {}; return d.page; }
 
 function decidedIds() {
@@ -62,7 +71,49 @@ function decidedIds() {
   }
   return ids;
 }
-function leavePending(id) { delete dec[id]; render(); }
+function leavePending(id) { delete dec[id]; render(); scheduleCheck(); }
+// apply wants every record covered once: each one no decision covers is left pending.
+function payload() {
+  const decided = decidedIds();
+  const out = Object.values(dec).filter(d => d.action && d.action !== "skip");
+  for (const r of S.records) if (!decided.has(r.id)) out.push({id: r.id, action: "skip"});
+  return out;
+}
+function banner(kind, text, sections) {
+  const b = $("banner");
+  b.className = kind;
+  b.replaceChildren(text);
+  for (const [title, items] of sections || []) {
+    if (!items.length) continue;
+    b.append(el("div", {}, el("b", {}, title)), el("ul", {}, ...items.map(i => el("li", {}, i))));
+  }
+  window.scrollTo(0, 0);
+}
+function lockAll() {
+  for (const e of document.querySelectorAll("button, input, textarea, select")) e.disabled = true;
+}
+function scheduleCheck() { clearTimeout(checkTimer); checkTimer = setTimeout(runCheck, 200); }
+async function runCheck() {
+  if (finished) return;
+  const seq = ++checkSeq;
+  const res = await api("/api/check", {decisions: payload()}).catch(() => null);
+  if (!res || res.error || finished || seq !== checkSeq) return;
+  checked = res;
+  paintChecks();
+}
+function summaryText() {
+  const s = checked.summary || S.summary;
+  return `${s.decided} decided: ${s.drop} drop, ${s.merge} merge, ${s.new} new`;
+}
+function paintChecks() {
+  for (const r of S.records) {
+    const e = $("prob-" + r.id);
+    if (e) e.textContent = (checked.by_id[r.id] || []).map(p => "will be refused: " + p).join("; ");
+  }
+  const n = checked.problems.length;
+  $("problems").textContent = n ? ` · ${n} problem(s) Done will refuse` : "";
+  if ($("summary")) $("summary").textContent = summaryText();
+}
 
 function card(r) {
   const d = dec[r.id] || {};
@@ -71,6 +122,11 @@ function card(r) {
   c.append(el("div", {}, el("b", {}, r.slug), " ",
     el("span", {class: "meta"}, `${r.id} · project ${r.project || "(none)"} · ${(r.meta && r.meta.source) || ""}`)));
   if (r.leaks && r.leaks.length) c.append(el("div", {class: "warn"}, "leak gate: " + r.leaks.join(", ")));
+  if (!r.has_project) c.append(el("div", {class: "warn"},
+    "no project: accept as new is off — drop it, or register the repo and dump again"));
+  if (r.collides.length) c.append(el("div", {class: "meta"},
+    `an existing page already has slug ${r.collides.join(", ")} — accept as new needs another slug, or merge into it`));
+  c.append(el("div", {class: "warn", id: "prob-" + r.id}));
   if (d.question) c.append(el("div", {class: "meta"}, "judge asks: " + d.question));
   if (d.reason) c.append(el("div", {class: "meta"}, "judge says: " + d.reason));
   const cols = el("div", {class: "cols"});
@@ -87,23 +143,25 @@ function card(r) {
     set(r.id, Object.assign({action: a, confidence: "high"}, extra || {}))}, label);
   // apply appends only `add` on a merge, so the page sends the candidate body.
   const mergeWith = act === "merge" ? {} : {target: d.target || (r.near[0] || {}).slug || "", add: d.add || r.body};
+  const asNew = btn("accept as new", "new");
+  asNew.disabled = !r.has_project;
   bar.append(el("button", {class: act === "skip" ? "on" : "", onclick: () => leavePending(r.id)}, "leave pending"),
-    btn("accept as new", "new"), btn("merge into…", "merge", mergeWith), btn("drop", "drop"));
+    asNew, btn("merge into…", "merge", mergeWith), btn("drop", "drop"));
   c.append(bar);
   if (act === "merge") {
     c.append(el("div", {class: "row"}, el("label", {}, "target slug",
-      el("input", {value: d.target || "", oninput: e => { d.target = e.target.value; }}))));
+      el("input", {value: d.target || "", oninput: e => { d.target = e.target.value; scheduleCheck(); }}))));
     c.append(el("label", {}, "text appended to the target (blank = nothing appended)",
-      el("textarea", {rows: "6", oninput: e => { d.add = e.target.value; }}, d.add || "")));
+      el("textarea", {rows: "6", oninput: e => { d.add = e.target.value; scheduleCheck(); }}, d.add || "")));
   }
   if (act === "new") {
     const p = pageOf(d);
     const f = (label, key, ph) => el("label", {}, label,
-      el("input", {value: p[key] || "", placeholder: ph, oninput: e => { p[key] = e.target.value; }}));
+      el("input", {value: p[key] || "", placeholder: ph, oninput: e => { p[key] = e.target.value; scheduleCheck(); }}));
     c.append(el("div", {class: "row"}, f("slug", "slug", r.slug), f("name", "name", ""),
       f("description", "description", ""), f("type", "type", "")));
     c.append(el("label", {}, "edit body before accepting (blank = candidate body)",
-      el("textarea", {rows: "6", oninput: e => { d.add = e.target.value; }}, d.add || "")));
+      el("textarea", {rows: "6", oninput: e => { d.add = e.target.value; scheduleCheck(); }}, d.add || "")));
   }
   return c;
 }
@@ -127,26 +185,78 @@ function render() {
     $(n).disabled = page >= pages - 1;
     $(i).textContent = info;
   }
+  if (!shown.length && S.records.length) {
+    list.append(el("div", {class: "card"}, el("div", {id: "summary"}, summaryText()),
+      el("div", {class: "row"},
+        el("button", {onclick: () => { $("showall").checked = true; render(); }}, "Show all"),
+        el("button", {class: "done", onclick: done}, "Done"))));
+  }
+  $("count").append(el("span", {id: "problems"}));
+  paintChecks();
+  if (finished) lockAll();
+  else if (doing) setDoneDisabled(true);
+}
+
+function setDoneDisabled(v) {
+  for (const b of document.querySelectorAll("button.done")) b.disabled = v;
+}
+
+async function done() {
+  if (finished || doing) return;
+  doing = true;
+  setDoneDisabled(true);
+  banner("info", "Checking…");
+  let waiting = true, phase = "checking";
+  // /api/done blocks while the terminal asks [y/N]; the status says when it does.
+  const poll = setInterval(async () => {
+    const s = await api("/api/status").catch(() => null);
+    if (!waiting || !s || s.phase === phase) return;
+    phase = s.phase;
+    if (phase === "confirm") {
+      banner("info", "Waiting: confirm the write [y/N] in the terminal running okfmem.");
+    } else if (s.phase === "writing") {
+      banner("info", "Writing…");
+    }
+  }, 300);
+  let res;
+  try {
+    res = await api("/api/done", {decisions: payload()});
+  } catch (e) {
+    res = {error: "no answer from okfmem — is it still running?", problems: []};
+  } finally {
+    waiting = false;
+    clearInterval(poll);
+  }
+  if (res.error) {
+    if (res.problems && res.problems.length) {
+      banner("err", "Not done — Done refused these decisions; fix them and click Done again.",
+        [["Problems", res.problems]]);
+    } else {
+      banner("err", "Not done:\n" + res.error);
+    }
+    doing = false;
+    setDoneDisabled(false);
+    runCheck();
+    return;
+  }
+  finished = true;
+  doing = false;
+  const nothing = !res.written.length && !res.cleared.length;
+  banner("ok", (nothing ? (res.output || "Nothing to write.") : "Done.")
+    + "\nYou can close this page.",
+    [["Pages written", res.written], ["Pushes cleared", res.cleared]]);
+  lockAll();
 }
 function turn(by) { page += by; render(); window.scrollTo(0, 0); }
 
 $("showall").onchange = () => { page = 0; render(); };
 for (const id of ["prev", "prev2"]) $(id).onclick = () => turn(-1);
 for (const id of ["next", "next2"]) $(id).onclick = () => turn(1);
-$("done").onclick = async () => {
-  // apply wants every record covered once: each one no decision covers is left pending.
-  const decided = decidedIds();
-  const out = Object.values(dec).filter(d => d.action && d.action !== "skip");
-  for (const r of S.records) if (!decided.has(r.id)) out.push({id: r.id, action: "skip"});
-  $("done").disabled = true;
-  $("msg").textContent = "Waiting: confirm the write [y/N] in the terminal running okfmem.";
-  const res = await api("/api/done", {decisions: out});
-  $("msg").textContent = res.error ? "Not done: " + res.error : (res.output || "Done.");
-  if (res.error) $("done").disabled = false;
-};
+$("done").onclick = done;
 api("/api/state").then(s => {
   S = s;
-  for (const d of s.decisions) if (d && d.action !== "skip") dec[d.id] = d;
+  for (const d of s.decisions) if (d && typeof d.id === "string" && d.action !== "skip") dec[d.id] = d;
   render();
+  runCheck();
 });
 </script></body></html>
