@@ -23,7 +23,10 @@ input,select,textarea{font:inherit;width:100%;box-sizing:border-box}
 <label><input type="checkbox" id="showall" style="width:auto"> show all</label>
 <span id="count" class="meta"></span>
 <button class="done" id="done">Done</button></header>
-<main><div id="list"></div><div id="msg"></div></main>
+<main><div class="row pager"><button id="prev">previous</button><span id="pageinfo" class="meta"></span><button id="next">next</button></div>
+<div id="list"></div>
+<div class="row pager"><button id="prev2">previous</button><span id="pageinfo2" class="meta"></span><button id="next2">next</button></div>
+<div id="msg"></div></main>
 <script>
 "use strict";
 const token = new URLSearchParams(location.search).get("t") || "";
@@ -31,7 +34,10 @@ const api = (path, body) => fetch(path, {
   method: body === undefined ? "GET" : "POST",
   headers: {"X-Okfmem-Token": token, "Content-Type": "application/json"},
   body: body === undefined ? undefined : JSON.stringify(body)}).then(r => r.json());
+const PAGE_SIZE = 25;
 let S = null;
+let page = 0;
+// Keyed by record id, not by page, so a decision survives moving between pages.
 const dec = {};
 
 function el(tag, attrs, ...kids) {
@@ -47,9 +53,20 @@ function $(id) { return document.getElementById(id); }
 function set(id, patch) { dec[id] = Object.assign(dec[id] || {id: id}, patch); render(); }
 function pageOf(d) { d.page = d.page || {}; return d.page; }
 
+function decidedIds() {
+  const ids = new Set();
+  for (const d of Object.values(dec)) {
+    if (!d.action || d.action === "skip") continue;
+    ids.add(d.id);
+    for (const c of d.covers || []) ids.add(c);
+  }
+  return ids;
+}
+function leavePending(id) { delete dec[id]; render(); }
+
 function card(r) {
   const d = dec[r.id] || {};
-  const act = d.action;
+  const act = d.action || "skip";
   const c = el("div", {class: "card"});
   c.append(el("div", {}, el("b", {}, r.slug), " ",
     el("span", {class: "meta"}, `${r.id} · project ${r.project || "(none)"} · ${(r.meta && r.meta.source) || ""}`)));
@@ -70,7 +87,8 @@ function card(r) {
     set(r.id, Object.assign({action: a, confidence: "high"}, extra || {}))}, label);
   // apply appends only `add` on a merge, so the page sends the candidate body.
   const mergeWith = act === "merge" ? {} : {target: d.target || (r.near[0] || {}).slug || "", add: d.add || r.body};
-  bar.append(btn("accept as new", "new"), btn("merge into…", "merge", mergeWith), btn("drop", "drop"));
+  bar.append(el("button", {class: act === "skip" ? "on" : "", onclick: () => leavePending(r.id)}, "leave pending"),
+    btn("accept as new", "new"), btn("merge into…", "merge", mergeWith), btn("drop", "drop"));
   c.append(bar);
   if (act === "merge") {
     c.append(el("div", {class: "row"}, el("label", {}, "target slug",
@@ -93,17 +111,33 @@ function card(r) {
 function render() {
   const list = $("list");
   list.replaceChildren();
-  let shown = 0;
-  for (const r of S.records) {
-    if (S.covered.includes(r.id) || !visible(r)) continue;
-    list.append(card(r)); shown++;
+  const covered = new Set();
+  for (const d of Object.values(dec)) if (d.action && d.action !== "skip") for (const c of d.covers || []) covered.add(c);
+  const shown = S.records.filter(r => !covered.has(r.id) && visible(r));
+  const pages = Math.max(1, Math.ceil(shown.length / PAGE_SIZE));
+  page = Math.min(Math.max(page, 0), pages - 1);
+  for (const r of shown.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)) list.append(card(r));
+  const ids = decidedIds();
+  const decided = S.records.filter(r => ids.has(r.id)).length;
+  $("count").textContent = `${decided} decided · ${S.records.length - decided} pending · ` +
+    `${S.records.length} total · ${shown.length} shown`;
+  const info = `page ${page + 1} of ${pages}`;
+  for (const [p, n, i] of [["prev", "next", "pageinfo"], ["prev2", "next2", "pageinfo2"]]) {
+    $(p).disabled = page === 0;
+    $(n).disabled = page >= pages - 1;
+    $(i).textContent = info;
   }
-  $("count").textContent = `${shown} of ${S.records.length} shown`;
 }
+function turn(by) { page += by; render(); window.scrollTo(0, 0); }
 
-$("showall").onchange = render;
+$("showall").onchange = () => { page = 0; render(); };
+for (const id of ["prev", "prev2"]) $(id).onclick = () => turn(-1);
+for (const id of ["next", "next2"]) $(id).onclick = () => turn(1);
 $("done").onclick = async () => {
-  const out = Object.values(dec);
+  // apply wants every record covered once: each one no decision covers is left pending.
+  const decided = decidedIds();
+  const out = Object.values(dec).filter(d => d.action && d.action !== "skip");
+  for (const r of S.records) if (!decided.has(r.id)) out.push({id: r.id, action: "skip"});
   $("done").disabled = true;
   $("msg").textContent = "Waiting: confirm the write [y/N] in the terminal running okfmem.";
   const res = await api("/api/done", {decisions: out});
@@ -112,7 +146,7 @@ $("done").onclick = async () => {
 };
 api("/api/state").then(s => {
   S = s;
-  for (const d of s.decisions) dec[d.id] = d;
+  for (const d of s.decisions) if (d && d.action !== "skip") dec[d.id] = d;
   render();
 });
 </script></body></html>

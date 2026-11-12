@@ -239,6 +239,79 @@ def test_ref_re_pushed_after_the_dump_is_left_pending(env, tmp_path):
     assert cleared not in _remote_refs(env["origin"])
 
 
+def _two_page_push(env, tmp_path):  # noqa: F811
+    src = str(tmp_path / "pair-pages")
+    _write(os.path.join(src, "alpha.md"), _page("Alpha", "First of a pair", body="Alpha body.\n"))
+    _write(os.path.join(src, "beta.md"), _page("Beta", "Second of a pair", body="Beta body.\n"))
+    return _push(env, machine="desk", src=src)
+
+
+def test_partial_decisions_write_the_decided_pages_and_keep_the_pending_refs(env, tmp_path):
+    full = _push(env)
+    pair = _two_page_push(env, tmp_path)
+    pair_sha = _git(env["origin"], "rev-parse", pair)
+    out_dir, recs = _dump(env)
+    decisions = [*_good_decisions(recs),
+                 {"id": recs["alpha"]["id"], "action": "new"},
+                 {"id": recs["beta"]["id"], "action": "skip"}]
+
+    code, text = _apply(env, _decisions(out_dir, decisions))
+
+    assert code == 0, text
+    assert "4 decided, 1 left pending" in text
+    assert "clear 1 push(es); keep 1 holding a pending page" in text
+    proj = os.path.join(env["store"], "projects", "demo")
+    assert os.path.isfile(os.path.join(proj, "runner-image.md"))
+    assert "Alpha body." in _read(os.path.join(proj, "alpha.md"))
+    assert not os.path.exists(os.path.join(proj, "beta.md"))
+    remote = _remote_refs(env["origin"]).splitlines()
+    assert full not in remote and remote == [pair]
+    assert _git(env["origin"], "rev-parse", pair) != pair_sha
+    assert _store_state(env)[1] == ""
+
+
+def test_a_two_page_push_is_cleared_only_once_both_pages_are_decided(env, tmp_path):
+    pair = _two_page_push(env, tmp_path)
+    out_dir, recs = _dump(env)
+    code, text = _apply(env, _decisions(out_dir, [
+        {"id": recs["alpha"]["id"], "action": "drop"},
+        {"id": recs["beta"]["id"], "action": "skip"}]))
+    assert code == 0 and "1 decided, 1 left pending" in text, text
+    assert _remote_refs(env["origin"]) == pair
+
+    out_dir, recs = _dump(env, "dump2")
+    assert set(recs) == {"beta"}
+    code, text = _apply(env, _decisions(out_dir, [
+        {"id": recs["beta"]["id"], "action": "new"}]))
+    assert code == 0, text
+    assert "1 decided, 0 left pending" in text
+    assert _remote_refs(env["origin"]) == ""
+    assert os.path.isfile(os.path.join(env["store"], "projects", "demo", "beta.md"))
+
+
+def test_apply_with_every_page_skipped_writes_nothing_and_asks_nothing(env):
+    ref = _push(env)
+    out_dir, recs = _dump(env)
+    before = _store_state(env)
+    code, text = _apply(env, _decisions(out_dir, [{"id": r["id"], "action": "skip"}
+                                                   for r in recs.values()]),
+                        confirm=lambda: pytest.fail("asked to confirm"))
+    assert code == 0 and "0 decided, 3 left pending" in text, text
+    assert _store_state(env) == before and _remote_refs(env["origin"]) == ref
+
+
+def test_a_skip_still_needs_a_known_id_covered_once(env):
+    _push(env)
+    out_dir, recs = _dump(env)
+    d = _good_decisions(recs)
+    d.append({"id": recs["leak-gate"]["id"], "action": "skip"})
+    d.append({"id": "p99", "action": "skip"})
+    code, text = _apply(env, _decisions(out_dir, d))
+    assert code == 1 and "nothing written" in text
+    assert f"{recs['leak-gate']['id']} is already covered by" in text
+    assert "unknown id 'p99'" in text
+
+
 def test_delete_refs_lease_keeps_a_ref_moved_after_it_was_read(env):
     ref = _push(env)
     old = _git(env["origin"], "rev-parse", ref)

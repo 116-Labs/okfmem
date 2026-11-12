@@ -35,6 +35,7 @@ the maintainer without letting them anywhere near a loaded page:
       valid slugs, merge targets, no existing new slug, replaces found once), show
       a summary, ask [y/N], then write pages, delete the handled refs leased on
       their dumped sha in one push, rebuild views and `okfmem sync` (#165).
+      A `skip` decision leaves its pages pending: their pushes keep their refs (#196).
 
 Never automatic: `okfmem pull`, `consolidate` and the Stop hook fetch only the
 default refspec (branches), so nothing in the inbox reaches a loaded page
@@ -1106,7 +1107,7 @@ def review(store, decide, ask_project, out=print, today=None, do_sync=True,
 # validates it whole and does every write (#165)
 # ---------------------------------------------------------------------------
 DUMP_FILE = "pending.jsonl"
-ACTIONS = ("drop", "merge", "new")
+ACTIONS = ("drop", "merge", "new", "skip")
 TYPE_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
@@ -1276,8 +1277,8 @@ class _Planner:
         self.problems, self.low = [], []
         self.files = {}  # path -> {text, orig, new, project, slug, page}
         self.adds = {}  # path -> [text appended under one heading]
-        self.counts = {"drop": 0, "merge": 0, "new": 0, "replace": 0}
-        self.targets, self.touched = set(), set()
+        self.counts = {"drop": 0, "merge": 0, "new": 0, "replace": 0, "skip": 0}
+        self.targets, self.touched, self.skipped = set(), set(), set()
         self._existing = {}
 
     def existing(self, project):
@@ -1490,6 +1491,9 @@ class _Planner:
                 self.plan_merge(where, d, pages)
             elif d["action"] == "drop":
                 self.counts["drop"] += len(pages)
+            elif d["action"] == "skip":
+                self.counts["skip"] += len(pages)
+                self.skipped.update(p["id"] for p in pages)
         self.finish()
 
 
@@ -1506,8 +1510,21 @@ def plan_apply(dest, dumped, decisions, remote, today, imported_by):
     refs = {}
     for rec in dumped:
         refs.setdefault(rec["ref"], rec["sha"])
+    # A push is cleared only once every page is decided; until then its ref
+    # keeps only its pending pages.
+    held = sorted({rec["ref"] for rec in dumped if rec["id"] in planner.skipped})
+    shrink = {}
+    for ref in held:
+        recs = [rec for rec in dumped if rec["ref"] == ref]
+        rest = [rec for rec in recs if rec["id"] in planner.skipped]
+        if len(rest) < len(recs) and remote.get(ref) == refs[ref]:
+            shrink[ref] = {"ref": ref, "sha": refs[ref], "meta": recs[0]["meta"],
+                           "pages": [{"name": rec["slug"] + ".md", "text": rec["text"]}
+                                     for rec in rest]}
     delete, gone, moved = {}, [], []
     for ref, sha in sorted(refs.items()):
+        if ref in held:
+            continue
         if ref not in remote:
             gone.append(ref)
         elif remote[ref] != sha:
@@ -1519,14 +1536,20 @@ def plan_apply(dest, dumped, decisions, remote, today, imported_by):
                if not e["new"] and e["text"] != e["orig"]}
     plan = {"new": new, "changed": changed, "counts": planner.counts,
             "targets": len(planner.targets), "low": planner.low,
-            "touched": planner.touched, "delete": delete, "gone": gone, "moved": moved}
+            "touched": planner.touched, "delete": delete, "gone": gone, "moved": moved,
+            "held": held, "shrink": shrink, "pending": planner.counts["skip"],
+            "decided": len(dumped) - planner.counts["skip"]}
     return plan, planner.problems
+
+
+def _decided_line(plan):
+    return f"{plan['decided']} decided, {plan['pending']} left pending"
 
 
 def plan_lines(plan, dest):
     c = plan["counts"]
     lines = [f"okfmem inbox apply: {c['drop']} drop / {c['merge']} merge into "
-             f"{plan['targets']} page(s) / {c['new']} new"]
+             f"{plan['targets']} page(s) / {c['new']} new; {_decided_line(plan)}"]
     for path in sorted(plan["new"]):
         lines.append(f"  new      {os.path.relpath(path, dest)}")
     for path in sorted(plan["changed"]):
@@ -1536,6 +1559,7 @@ def plan_lines(plan, dest):
     for low in plan["low"]:
         lines.append(_safe(f"  low confidence — {low}"))
     lines.append(f"  inbox: clear {len(plan['delete'])} push(es)"
+                 + (f"; keep {len(plan['held'])} holding a pending page" if plan["held"] else "")
                  + (f"; {len(plan['gone'])} already cleared" if plan["gone"] else "")
                  + (f"; {len(plan['moved'])} re-pushed since the dump, left pending"
                     if plan["moved"] else ""))
@@ -1623,8 +1647,9 @@ def apply(store, decisions_path, confirm, dest=None, out=print, today=None,
         out(line)
     for ref in plan["moved"]:
         out(f"  still pending: {ref} (re-pushed since the dump)")
-    if not (plan["new"] or plan["changed"] or plan["delete"]):
-        out("okfmem inbox apply: nothing to do — already applied.")
+    if not (plan["new"] or plan["changed"] or plan["delete"] or plan["shrink"]):
+        out("okfmem inbox apply: nothing to do — "
+            + (f"{_decided_line(plan)}." if plan["pending"] else "already applied."))
         return 0
     answer = confirm()
     if answer is None:
@@ -1649,7 +1674,13 @@ def apply(store, decisions_path, confirm, dest=None, out=print, today=None,
         out(_safe(f"  still pending: {ref} ({why})"))
         if "stale info" not in why:
             code = 1
-    out(f"okfmem inbox apply: wrote {len(written)} page(s); cleared {len(deleted)} push(es)")
+    for ref, push_ in sorted(plan["shrink"].items()):
+        ok, err = shrink_push(store, push_, push_["pages"])
+        if not ok:
+            out(_safe(f"  could not keep only the pending pages of {ref}: {err}"))
+            code = 1
+    out(f"okfmem inbox apply: wrote {len(written)} page(s); cleared {len(deleted)} push(es); "
+        f"{_decided_line(plan)}")
     if do_sync and written:
         c = plan["counts"]
         res = sync_store(dest, f"okfmem inbox: applied {c['drop']} drop, {c['merge']} merge, "
@@ -1663,7 +1694,9 @@ def apply(store, decisions_path, confirm, dest=None, out=print, today=None,
 
 def web_state(records, decisions):
     """What the review page shows. `visible` is its default list (#167): every
-    uncovered page, or, with decisions, only the undecided and low-confidence ones."""
+    uncovered page, or, with decisions, only the undecided and low-confidence ones.
+    A `skip` decision counts as undecided: leaving a page pending is the page's default."""
+    decisions = [d for d in decisions if not (isinstance(d, dict) and d.get("action") == "skip")]
     decided = {d["id"]: d for d in decisions
                if isinstance(d, dict) and isinstance(d.get("id"), str)}
     covered = sorted({c for d in decided.values()

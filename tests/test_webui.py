@@ -10,7 +10,7 @@ import pytest
 
 import memory_inbox as mx
 import memory_webui as wu
-from test_inbox import _push, env  # noqa: F401
+from test_inbox import _git, _push, env  # noqa: F401
 from test_inbox_apply import _decisions, _dump, _good_decisions, _store_state
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None,
@@ -208,6 +208,50 @@ def test_done_writes_what_apply_writes_on_the_same_decisions(env, tmp_path):
     assert not _store_state(env)[1]  # apply's sync committed everything it wrote
     with open(os.path.join(work, "decisions.json"), encoding="utf-8") as f:
         assert json.load(f) == ds
+
+
+def test_done_with_a_page_left_pending_applies_the_rest_and_keeps_its_push(env):
+    ref = _push(env)
+    sha = _git(env["origin"], "rev-parse", ref)
+
+    def leave_one_pending(state):
+        recs = _by_slug(state)
+        return [*_good_decisions(recs)[:2], {"id": recs["leak-gate"]["id"], "action": "skip"}]
+
+    work = os.path.join(env["tmp"], "w10")
+    _, post, result, _ = _run_review(env, work, decisions_post=leave_one_pending)
+    assert post[0] == 200 and result["code"] == 0, post
+    assert b"2 decided, 1 left pending" in post[1]
+    assert os.path.exists(mx.new_page_path(env["store"], "demo", "runner-image"))
+    assert _git(env["origin"], "rev-parse", ref) != sha
+
+    state, _, _, _ = _run_review(env, work)
+    assert state["has_decisions"]
+    skipped = _by_slug(state)["leak-gate"]["id"]
+    assert skipped in state["visible"]
+    assert all(d.get("action") != "skip" for d in state["decisions"])
+
+
+def test_skip_decisions_read_as_undecided_on_the_page():
+    records = [{"id": f"p{i}", "text": "---\nname: x\n---\n\nBody.\n"} for i in (1, 2, 3)]
+    state = mx.web_state(records, [{"id": "p1", "action": "skip", "covers": ["p2"]},
+                                   {"id": "p3", "action": "skip"}])
+    assert state["decisions"] == [] and not state["has_decisions"]
+    assert state["covered"] == [] and state["visible"] == ["p1", "p2", "p3"]
+    state = mx.web_state(records, [{"id": "p1", "action": "drop"},
+                                   {"id": "p2", "action": "skip"},
+                                   {"id": "p3", "action": "skip"}])
+    assert state["has_decisions"] and state["visible"] == ["p2", "p3"]
+
+
+def test_review_page_leaves_undecided_pages_pending_and_pages_by_25():
+    from conftest import ROOT
+    with open(os.path.join(ROOT, "webui", "inbox_review.html"), encoding="utf-8") as f:
+        html = f.read()
+    assert "const PAGE_SIZE = 25;" in html
+    for needle in ('"leave pending"', 'id="prev"', 'id="next"', "decided ·", "pending ·",
+                   "total", 'action: "skip"', 'd.action || "skip"'):
+        assert needle in html, needle
 
 
 def test_done_with_an_undecided_page_is_refused_and_writes_nothing(env):
