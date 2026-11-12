@@ -227,6 +227,27 @@ def _strip_hooks(groups, matches):
     return new_groups, changed
 
 
+def unwire_claude_hook(event, managed, dry_run=False):
+    home = os.path.expanduser("~")
+    claude_dir = os.path.join(home, ".claude")
+    data, settings, early = _load_settings(claude_dir)
+    if early is not None:
+        return early
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return ("absent", settings)
+    groups = hooks.get(event)
+    if not isinstance(groups, list):
+        return ("absent", settings)
+    new_groups, changed = _strip_hooks(groups, managed)
+    if not changed:
+        return ("absent", settings)
+    hooks[event] = new_groups
+    if not dry_run:
+        mi._write_settings_json(claude_dir, settings, data)
+    return ("removed", settings)
+
+
 def unwire_stop_hook(dry_run):
     """Remove any Stop hook entry that invokes memory_consolidate.py.
 
@@ -238,28 +259,7 @@ def unwire_stop_hook(dry_run):
 
     Every other hook (Stop or otherwise) is preserved verbatim.
     """
-    home = os.path.expanduser("~")
-    claude_dir = os.path.join(home, ".claude")
-    data, settings, early = _load_settings(claude_dir)
-    if early is not None:
-        return early
-
-    hooks = data.get("hooks")
-    if not isinstance(hooks, dict):
-        return ("absent", settings)
-    stop = hooks.get("Stop")
-    if not isinstance(stop, list):
-        return ("absent", settings)
-
-    new_stop, changed = _strip_hooks(
-        stop, lambda cmd: "memory_consolidate.py" in cmd)
-    if not changed:
-        return ("absent", settings)
-
-    hooks["Stop"] = new_stop
-    if not dry_run:
-        mi._write_settings_json(claude_dir, settings, data)
-    return ("removed", settings)
+    return unwire_claude_hook("Stop", lambda cmd: "memory_consolidate.py" in cmd, dry_run)
 
 
 # ---------------------------------------------------------------------------
@@ -273,27 +273,15 @@ def unwire_pull_hook(dry_run):
 
     Returns (action, path) with the same shape as unwire_stop_hook.
     """
-    home = os.path.expanduser("~")
-    claude_dir = os.path.join(home, ".claude")
-    data, settings, early = _load_settings(claude_dir)
-    if early is not None:
-        return early
+    return unwire_claude_hook("SessionStart", mi._is_managed_pull_command, dry_run)
 
-    hooks = data.get("hooks")
-    if not isinstance(hooks, dict):
-        return ("absent", settings)
-    starts = hooks.get("SessionStart")
-    if not isinstance(starts, list):
-        return ("absent", settings)
 
-    new_starts, changed = _strip_hooks(starts, mi._is_managed_pull_command)
-    if not changed:
-        return ("absent", settings)
-
-    hooks["SessionStart"] = new_starts
-    if not dry_run:
-        mi._write_settings_json(claude_dir, settings, data)
-    return ("removed", settings)
+def unwire_capture_hooks(dry_run):
+    actions = {}
+    for event in ("SessionEnd", "PreCompact", "SessionStart"):
+        actions[event] = unwire_claude_hook(
+            event, lambda cmd: "okfmem" in cmd and "capture" in cmd, dry_run)
+    return actions
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +393,18 @@ def main():
         print(f"{mi.glyph('ok')} pull hook   no Claude Code dir — skipped")
     else:
         print(f"{mi.glyph('warn')} pull hook   {paction}")
+
+    for event, (action, path) in unwire_capture_hooks(dry_run).items():
+        if action == "removed":
+            changes += 1
+            print(f"{mi.glyph('chg')} capture {event:11} "
+                  f"{'would remove' if dry_run else 'removed'} ({mi._short(path)})")
+        elif action == "absent":
+            print(f"{mi.glyph('ok')} capture {event:11} not wired")
+        elif action == "no-claude":
+            print(f"{mi.glyph('ok')} capture {event:11} no Claude Code dir — skipped")
+        else:
+            print(f"{mi.glyph('warn')} capture {event:11} {action}")
 
     print()
     tail = mi._c(f"({mi._short(store)} · {mode})", "dim")
