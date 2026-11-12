@@ -161,6 +161,21 @@ def test_apply_write_or_commit_failures_leave_the_job_visible_and_offset_unchang
         env.store, ".okfmem", "capture", "ledger.json"))
 
 
+def test_update_that_changes_nothing_is_skipped_and_advances_the_ledger(env, monkeypatch):
+    job = env.make([page("runner", "update")])
+    real = ms.sync_store
+
+    def noop_sync(store, message, **kwargs):
+        kwargs["prepare"](store)
+        return {"committed": False, "pushed": False, "reason": ms.NO_CHANGES_REASON, "push_error": None}
+
+    monkeypatch.setattr(ms, "sync_store", noop_sync)
+    mc.apply_result(env.store, job)
+    monkeypatch.setattr(ms, "sync_store", real)
+    assert job["status"] == "skipped" and "nothing to write" in job["outcome"]
+    assert ledger_offset(env) == 10 and env.commits() == ["seed"]
+
+
 def test_conflicted_dirty_state_is_not_staged_or_committed(env):
     state = Path(env.store) / "state" / "proj.md"
     state.write_text(STATE_OLD + "local edit\n")

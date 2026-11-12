@@ -1254,7 +1254,7 @@ def _commit_phase(store, job, journal):
             raise ApplyDeferred(res.get("reason") or "store sync did not run")
         raise CaptureError(res.get("reason") or "store sync did not prepare writes")
     wrote = any(e.get("outcome") == "written" for e in journal["files"])
-    if wrote and not res["committed"]:
+    if wrote and not res["committed"] and res.get("reason") != ms.NO_CHANGES_REASON:
         raise ApplyDeferred(res.get("reason") or "store sync did not commit capture")
     journal["sha"] = res["sha"] if res["committed"] else None
     journal["pushed"] = bool(res["pushed"])

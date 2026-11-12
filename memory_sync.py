@@ -85,6 +85,7 @@ def _git(store, *args, env=None, timeout=120, encoding=None):
     )
 
 
+NO_CHANGES_REASON = "no changes to commit."
 TOKEN_ENV = "OKFMEM_GIT_TOKEN"
 AUTHOR_ENV = "OKFMEM_GIT_AUTHOR"
 # The token reaches the helper through this variable, so it never sits in argv.
@@ -858,7 +859,7 @@ def sync_store(store, message, do_push=True, do_pull=True, token=None, author=No
             res["sha"] = sha.stdout.strip() if sha.returncode == 0 else None
             res["reason"] = f"committed {res['sha']}: {msg}"
         else:
-            res["reason"] = "no changes to commit."
+            res["reason"] = NO_CHANGES_REASON
 
         if not do_push:
             return res
