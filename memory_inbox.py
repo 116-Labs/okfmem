@@ -505,7 +505,8 @@ def count_pending(store, dest=None):
 
 def nudge_line(count):
     """Format the pending inbox nudge line for status, pull, or inbox pull."""
-    return f"okfmem inbox: {count} pending — run okfmem inbox review"
+    return (f"okfmem inbox: {count} pending — run /okfmem-inbox in your agent "
+            "to triage first, or okfmem inbox review")
 
 
 def pull(store, out=print, threshold=DEFAULT_THRESHOLD):
@@ -1760,9 +1761,11 @@ def web_check(dest, records, decisions, imported_by):
 
 
 def review_web(store, work_dir, confirm, dest=None, out=print, imported_by=None,
-               into=None, idle_timeout=900, open_browser=True, server=None):
+               into=None, idle_timeout=900, open_browser=True, server=None,
+               threshold=DEFAULT_THRESHOLD):
     """Review the pending pages in a local browser page. A decisions.json already
-    in `work_dir` pre-fills the page; Done writes it and runs `apply` on it."""
+    in `work_dir` pre-fills the page; Done writes it and runs `apply` on it.
+    Above `threshold` pending pages with no decisions.json it warns, then opens."""
     from memory_webui import PageServer
 
     dest = dest or store
@@ -1793,6 +1796,10 @@ def review_web(store, work_dir, confirm, dest=None, out=print, imported_by=None,
     if not records:
         out("okfmem inbox review: nothing pending.")
         return 0
+    if not os.path.exists(decisions_path) and len(records) > threshold:
+        out(f"okfmem inbox review: {len(records)} pending and no decisions.json — "
+            "the page starts undecided. To have a model decide first, run "
+            "/okfmem-inbox in your agent, or pass its scratch dir with --dir.")
     outcome = {"code": 1}
     lock = threading.Lock()
     # The page polls this while /api/done blocks: it shows the [y/N] text only
@@ -1943,6 +1950,8 @@ def review_walkthrough_text():
         "Faster paths:\n"
         "  1. In your harness: run the okfmem-inbox skill (e.g. /okfmem-inbox)\n"
         "  2. In your browser: okfmem inbox review --web\n"
+        "     (the page starts undecided unless --dir holds a decisions.json "
+        "written by /okfmem-inbox)\n"
     )
 
 
@@ -1956,7 +1965,7 @@ def no_terminal_hint(cmd, store, into=None):
     return hint
 
 
-def review_walkthrough(store, dest=None, into=None):
+def review_walkthrough(store, dest=None, into=None, threshold=DEFAULT_THRESHOLD):
     """Present the triage walkthrough and prompt for option 1 or 2."""
     print(review_walkthrough_text())
     while True:
@@ -1974,7 +1983,8 @@ def review_walkthrough(store, dest=None, into=None):
                 return 3
             work = tempfile.mkdtemp(prefix="okfmem-review-")
             confirm = _interactive_confirm if _isatty() else (lambda: None)
-            return review_web(store, work, confirm, dest=dest, into=into)
+            return review_web(store, work, confirm, dest=dest, into=into,
+                              threshold=threshold)
         else:
             print("Please enter 1 or 2.")
 
@@ -2129,7 +2139,8 @@ def main():
                 else tempfile.mkdtemp(prefix="okfmem-review-"))
         confirm = _interactive_confirm if _isatty() else (lambda: None)
         try:
-            sys.exit(review_web(store, work, confirm, dest=dest, into=args.into))
+            sys.exit(review_web(store, work, confirm, dest=dest, into=args.into,
+                                threshold=getattr(args, "threshold", DEFAULT_THRESHOLD)))
         except KeyboardInterrupt:
             sys.exit(130)
     if args.cmd == "review" and (args.dir):
@@ -2157,7 +2168,8 @@ def main():
                     sys.exit(0)
                 else:
                     try:
-                        code = review_walkthrough(store, dest=dest, into=args.into)
+                        code = review_walkthrough(store, dest=dest, into=args.into,
+                                                  threshold=threshold)
                     except KeyboardInterrupt:
                         code = 130
                     sys.exit(code)

@@ -110,6 +110,28 @@ def test_without_decisions_the_page_lists_every_pending_page(env):
     assert state["visible"] == [r["id"] for r in state["records"]]
 
 
+def test_web_review_above_threshold_without_decisions_warns_then_opens(env):
+    _push(env)
+    state, _, _, lines = _run_review(env, os.path.join(env["tmp"], "w1w"), threshold=2)
+    text = "\n".join(lines)
+    assert "3 pending and no decisions.json" in text and "/okfmem-inbox" in text
+    assert len(state["records"]) == 3
+
+
+def test_web_review_at_threshold_does_not_warn(env):
+    _push(env)
+    _, _, _, lines = _run_review(env, os.path.join(env["tmp"], "w1x"), threshold=3)
+    assert "no decisions.json" not in "\n".join(lines)
+
+
+def test_web_review_above_threshold_with_decisions_does_not_warn(env):
+    _push(env)
+    work, recs = _dump(env, "w1y")
+    _decisions(work, _good_decisions(recs))
+    _, _, _, lines = _run_review(env, work, threshold=2)
+    assert "no decisions.json" not in "\n".join(lines)
+
+
 def test_with_decisions_json_only_low_and_undecided_pages_are_visible_by_default(env):
     _push(env)
     work, recs = _dump(env, "w2")
