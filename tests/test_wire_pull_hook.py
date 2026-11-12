@@ -70,6 +70,62 @@ def test_present_when_already_correctly_wired(tmp_path, monkeypatch):
     assert action == "present"
 
 
+def _engine_cli():
+    return os.path.join(os.path.dirname(os.path.realpath(mi.__file__)), "okfmem")
+
+
+def _setup_two_interpreters(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+    (tmp_path / ".claude").mkdir()
+    py3 = tmp_path / "python3"
+    py = tmp_path / "python"
+    py3.write_text("")
+    py.write_text("")
+    return str(py3), str(py), tmp_path / ".claude" / "settings.json"
+
+
+def test_present_when_interpreter_differs_but_exists(tmp_path, monkeypatch):
+    py3, py, settings = _setup_two_interpreters(tmp_path, monkeypatch)
+    monkeypatch.setattr(mi.sys, "executable", py3)
+    assert mi.wire_pull_hook(dry_run=False)[0] == "added"
+    before = settings.read_bytes()
+    mtime = settings.stat().st_mtime_ns
+
+    monkeypatch.setattr(mi.sys, "executable", py)
+    assert mi.wire_pull_hook(dry_run=False)[0] == "present"
+    assert settings.read_bytes() == before
+    assert settings.stat().st_mtime_ns == mtime
+
+
+def test_heals_managed_command_for_moved_engine(tmp_path, monkeypatch):
+    py3, _py, settings = _setup_two_interpreters(tmp_path, monkeypatch)
+    monkeypatch.setattr(mi.sys, "executable", py3)
+    old = f'"{py3}" "{tmp_path / "old-engine" / "okfmem"}" pull --quiet'
+    settings.write_text(json.dumps({
+        "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": old}]}]}
+    }))
+
+    assert mi.wire_pull_hook(dry_run=False)[0] == "healed"
+    data = json.loads(settings.read_text())
+    assert data["hooks"]["SessionStart"][0]["hooks"][0]["command"] == (
+        f'"{py3}" "{_engine_cli()}" pull --quiet')
+
+
+def test_heals_when_interpreter_missing_on_disk(tmp_path, monkeypatch):
+    py3, _py, settings = _setup_two_interpreters(tmp_path, monkeypatch)
+    monkeypatch.setattr(mi.sys, "executable", py3)
+    gone = str(tmp_path / "gone" / "python.exe")
+    stale = f'"{gone}" "{_engine_cli()}" pull --quiet'
+    settings.write_text(json.dumps({
+        "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": stale}]}]}
+    }))
+
+    assert mi.wire_pull_hook(dry_run=False)[0] == "healed"
+    data = json.loads(settings.read_text())
+    assert data["hooks"]["SessionStart"][0]["hooks"][0]["command"] == (
+        f'"{py3}" "{_engine_cli()}" pull --quiet')
+
+
 def test_heals_legacy_raw_git_pull_hook(tmp_path, monkeypatch):
     _patch_home(monkeypatch, tmp_path)
     claude_dir = tmp_path / ".claude"
