@@ -527,18 +527,25 @@ def trigger_stdin_hook(args, store):
         trigger = args.trigger or payload.get("hook_event_name") or "stdin-hook"
         session = payload.get("session_id")
         if trigger == "SessionStart":
-            update_live_record(store, session)
+            try:  # a failed live-record write must not skip the sweep below
+                update_live_record(store, session)
+            except Exception as e:
+                log(store, f"stdin-hook: live record failed: {type(e).__name__}: {e}")
         elif trigger == "SessionEnd":
             update_live_record(store, session, remove=True)
-        identity, upto = resolve_identity(store, harness, session=payload.get("session_id"),
-                                          transcript=payload.get("transcript_path") or None,
-                                          cwd=payload.get("cwd"))
         if trigger != "SessionStart":
+            identity, upto = resolve_identity(store, harness, session=payload.get("session_id"),
+                                              transcript=payload.get("transcript_path") or None,
+                                              cwd=payload.get("cwd"))
             job, _ = enqueue(store, identity, upto, str(trigger), None)
             log(store, f"queued {job['request_id']} ({job['trigger']}) {job['ledger_key']} upto {upto}")
             _spawn_or_log(store)
         if getattr(args, "catch_up", False):
-            trigger_catch_up(args, store, current_session=session, drain_existing=True)
+            # Its own try: a fresh session has no transcript yet, and that must not skip the sweep.
+            try:
+                trigger_catch_up(args, store, current_session=session, drain_existing=True)
+            except Exception as e:
+                log(store, f"stdin-hook: catch-up failed: {type(e).__name__}: {e}")
     except Exception as e:  # a hook never fails or delays the session it ends
         log(store, f"stdin-hook: not queued: {type(e).__name__}: {e}")
     return 0
