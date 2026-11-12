@@ -841,16 +841,21 @@ def sync_store(store, message, do_push=True, do_pull=True, token=None, author=No
         if paths is not None:
             scope = ["--", *[p for p in dict.fromkeys(paths)
                              if os.path.lexists(os.path.join(store, p))]]
+        stage_error = None
         if scope is not None and len(scope) == 1:
             has_changes = False
         else:
             added = _git(store, "add", "-A", *(scope or []))
             if added.returncode != 0:
+                # Commit nothing, but still fall through to push-when-ahead so
+                # an earlier unpushed commit is not stranded by an unstageable
+                # file. The reason stays "stage failed", never NO_CHANGES_REASON.
                 err = (added.stderr or added.stdout or "").strip()
-                res["reason"] = f"stage failed: {err}" if err else "stage failed."
-                return res
-            staged = _git(store, "diff", "--cached", "--quiet", *(scope or []))
-            has_changes = staged.returncode != 0
+                stage_error = f"stage failed: {err}" if err else "stage failed."
+                has_changes = False
+            else:
+                staged = _git(store, "diff", "--cached", "--quiet", *(scope or []))
+                has_changes = staged.returncode != 0
 
         if has_changes:
             msg = message() if callable(message) else message
@@ -863,7 +868,7 @@ def sync_store(store, message, do_push=True, do_pull=True, token=None, author=No
             res["sha"] = sha.stdout.strip() if sha.returncode == 0 else None
             res["reason"] = f"committed {res['sha']}: {msg}"
         else:
-            res["reason"] = NO_CHANGES_REASON
+            res["reason"] = stage_error or NO_CHANGES_REASON
 
         if not do_push:
             return res
@@ -884,7 +889,8 @@ def sync_store(store, message, do_push=True, do_pull=True, token=None, author=No
                 or head.stdout.strip() == upstream.stdout.strip()
             ):
                 return res
-            res["reason"] = "no new changes; pushing existing unpushed local commit(s)."
+            if stage_error is None:
+                res["reason"] = "no new changes; pushing existing unpushed local commit(s)."
 
         p = _git(store, *auth_args, "push", env=auth_env)
         if p.returncode == 0:
