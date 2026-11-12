@@ -223,7 +223,7 @@ def test_done_with_a_page_left_pending_applies_the_rest_and_keeps_its_push(env):
     assert post[0] == 200 and result["code"] == 0, post
     assert b"2 decided, 1 left pending" in post[1]
     assert os.path.exists(mx.new_page_path(env["store"], "demo", "runner-image"))
-    assert _git(env["origin"], "rev-parse", ref) == sha
+    assert _git(env["origin"], "rev-parse", ref) != sha
 
     state, _, _, _ = _run_review(env, work)
     assert state["has_decisions"]

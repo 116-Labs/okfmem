@@ -1467,6 +1467,14 @@ def plan_apply(dest, dumped, decisions, remote, today, imported_by):
         refs.setdefault(rec["ref"], rec["sha"])
     # A push is cleared whole, so one pending page keeps its ref as it is.
     held = sorted({rec["ref"] for rec in dumped if rec["id"] in planner.skipped})
+    shrink = {}
+    for ref in held:
+        recs = [rec for rec in dumped if rec["ref"] == ref]
+        rest = [rec for rec in recs if rec["id"] in planner.skipped]
+        if len(rest) < len(recs) and remote.get(ref) == refs[ref]:
+            shrink[ref] = {"ref": ref, "sha": refs[ref], "meta": recs[0]["meta"],
+                           "pages": [{"name": rec["slug"] + ".md", "text": rec["text"]}
+                                     for rec in rest]}
     delete, gone, moved = {}, [], []
     for ref, sha in sorted(refs.items()):
         if ref in held:
@@ -1483,7 +1491,7 @@ def plan_apply(dest, dumped, decisions, remote, today, imported_by):
     plan = {"new": new, "changed": changed, "counts": planner.counts,
             "targets": len(planner.targets), "low": planner.low,
             "touched": planner.touched, "delete": delete, "gone": gone, "moved": moved,
-            "held": held, "pending": planner.counts["skip"],
+            "held": held, "shrink": shrink, "pending": planner.counts["skip"],
             "decided": len(dumped) - planner.counts["skip"]}
     return plan, planner.problems
 
@@ -1593,7 +1601,7 @@ def apply(store, decisions_path, confirm, dest=None, out=print, today=None,
         out(line)
     for ref in plan["moved"]:
         out(f"  still pending: {ref} (re-pushed since the dump)")
-    if not (plan["new"] or plan["changed"] or plan["delete"]):
+    if not (plan["new"] or plan["changed"] or plan["delete"] or plan["shrink"]):
         out("okfmem inbox apply: nothing to do — "
             + (f"{_decided_line(plan)}." if plan["pending"] else "already applied."))
         return 0
@@ -1619,6 +1627,11 @@ def apply(store, decisions_path, confirm, dest=None, out=print, today=None,
     for ref, why in sorted(failed.items()):
         out(_safe(f"  still pending: {ref} ({why})"))
         if "stale info" not in why:
+            code = 1
+    for ref, push_ in sorted(plan["shrink"].items()):
+        ok, err = shrink_push(store, push_, push_["pages"])
+        if not ok:
+            out(_safe(f"  could not keep only the pending pages of {ref}: {err}"))
             code = 1
     out(f"okfmem inbox apply: wrote {len(written)} page(s); cleared {len(deleted)} push(es); "
         f"{_decided_line(plan)}")

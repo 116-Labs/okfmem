@@ -266,7 +266,7 @@ def test_partial_decisions_write_the_decided_pages_and_keep_the_pending_refs(env
     assert not os.path.exists(os.path.join(proj, "beta.md"))
     remote = _remote_refs(env["origin"]).splitlines()
     assert full not in remote and remote == [pair]
-    assert _git(env["origin"], "rev-parse", pair) == pair_sha
+    assert _git(env["origin"], "rev-parse", pair) != pair_sha
     assert _store_state(env)[1] == ""
 
 
@@ -276,15 +276,15 @@ def test_a_two_page_push_is_cleared_only_once_both_pages_are_decided(env, tmp_pa
     code, text = _apply(env, _decisions(out_dir, [
         {"id": recs["alpha"]["id"], "action": "drop"},
         {"id": recs["beta"]["id"], "action": "skip"}]))
-    assert code == 0 and "nothing to do — 1 decided, 1 left pending." in text, text
+    assert code == 0 and "1 decided, 1 left pending" in text, text
     assert _remote_refs(env["origin"]) == pair
 
     out_dir, recs = _dump(env, "dump2")
+    assert set(recs) == {"beta"}
     code, text = _apply(env, _decisions(out_dir, [
-        {"id": recs["alpha"]["id"], "action": "drop"},
         {"id": recs["beta"]["id"], "action": "new"}]))
     assert code == 0, text
-    assert "2 decided, 0 left pending" in text
+    assert "1 decided, 0 left pending" in text
     assert _remote_refs(env["origin"]) == ""
     assert os.path.isfile(os.path.join(env["store"], "projects", "demo", "beta.md"))
 
