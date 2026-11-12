@@ -259,6 +259,26 @@ def test_sync_rebase_conflict_incoming_newer_local_commit_dropped(tmp_path):
     _clean(store)
 
 
+def test_sync_failed_add_still_pushes_an_earlier_unpushed_commit(tmp_path, monkeypatch):
+    origin, store = _seed(tmp_path)
+    _write(store, STATE_REL, state_md(T_NEW, "LOCAL"))
+    ms.sync_store(store, "offline save", do_push=False)  # committed, unpushed
+    real_git = ms._git
+
+    def git(cwd, *args, **kwargs):
+        if args and args[0] == "add":
+            return subprocess.CompletedProcess(args, 128, "", "fatal: probe")
+        return real_git(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(ms, "_git", git)
+    res = ms.sync_store(store, "next save")
+    assert res["committed"] is False
+    assert res["reason"] == "stage failed: fatal: probe"
+    assert res["pushed"] is True
+    assert "LOCAL" in _origin_head_file(tmp_path, origin, STATE_REL, "addfail")
+    _clean(store)
+
+
 # --------------------------------------------------------------------------
 # the abort-safety guard: any non-STATE unmerged path must abort as before
 # --------------------------------------------------------------------------
