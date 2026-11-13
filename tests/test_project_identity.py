@@ -231,7 +231,7 @@ def _decline_move(env, tmp_path, monkeypatch):
     _associate(env)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
-    answers = iter([True, False])
+    answers = iter([True, False, False])
     monkeypatch.setattr(mi, "_prompt_yes_no", lambda *a, **kw: next(answers))
     monkeypatch.setattr(
         mi, "detect_harnesses", lambda: {

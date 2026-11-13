@@ -279,8 +279,7 @@ def unwire_pull_hook(dry_run):
 def unwire_capture_hooks(dry_run):
     actions = {}
     for event in ("SessionEnd", "PreCompact", "SessionStart"):
-        actions[event] = unwire_claude_hook(
-            event, lambda cmd: "okfmem" in cmd and "capture" in cmd, dry_run)
+        actions[event] = unwire_claude_hook(event, mi._is_capture_command, dry_run)
     return actions
 
 

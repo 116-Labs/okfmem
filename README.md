@@ -437,7 +437,10 @@ initialization, save, curate, reindex, or Codex session indexing.
 Run `okfmem init --store PATH` from each project. The additive project seed and
 registry write need no configuration consent. Global instructions, skills and
 hooks require `[y/N]`; non-interactive runs skip them and print
-`okfmem init --yes`. `--dry-run` writes nothing. Repeat init safely after upgrades.
+`okfmem init --yes`. Background capture has its own `[y/N]` confirmation
+because it uses your Claude plan: `--yes` does not enable it. Use
+`okfmem init --capture` to turn it on, or `okfmem init --no-capture` to turn it
+off. `--dry-run` writes nothing. Repeat init safely after upgrades.
 Store selection is `--store`, then `$OKFMEM_STORE`, then `~/okfmem-store`.
 `okfmem init --resolve-project --store PATH` reports read-only JSON with the
 project, main checkout root (including worktrees), readiness, and memory directory.

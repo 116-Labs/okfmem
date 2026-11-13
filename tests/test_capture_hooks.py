@@ -170,7 +170,159 @@ def test_noninteractive_init_offers_manual_capture_command(tmp_path, monkeypatch
 
     output = capsys.readouterr().out
     assert "okfmem init --capture" in output
+    assert "okfmem init --yes" in output
     assert not _settings(home).exists()
+
+
+def test_yes_wires_general_config_but_not_capture(tmp_path, monkeypatch, isolated_home):
+    home = isolated_home
+    (home / ".claude").mkdir()
+    store = tmp_path / "store"
+    (store / "pages").mkdir(parents=True)
+    linked = []
+    monkeypatch.setattr(mi, "detect_harnesses", lambda: {
+        "claude_code": str(home / ".claude" / "CLAUDE.md"), "codex": None,
+        "antigravity": None,
+    })
+    monkeypatch.setattr(mi, "link_skills", lambda _dry_run: linked.append(True) or [])
+
+    mi.cmd_run(str(store), dry_run=False, apply_cleanup=False, assume_yes=True)
+
+    settings = _settings(home)
+    assert "SessionEnd" not in json.loads(settings.read_text(encoding="utf-8"))["hooks"]
+    assert "PreCompact" not in json.loads(settings.read_text(encoding="utf-8"))["hooks"]
+    assert len(_entries(settings, "SessionStart")) == 1
+    assert linked == [True]
+
+
+def test_capture_decision_prompts_separately_and_defaults_to_skip(tmp_path, monkeypatch):
+    prompts = []
+    monkeypatch.setattr(mi, "capture_hooks_wired", lambda _store: False)
+    monkeypatch.setattr(mi, "_prompt_yes_no", lambda question, **kw:
+                        prompts.append((question, kw)) or False)
+
+    decision = mi._capture_decision(
+        None, True, {"claude_code": "present"}, str(tmp_path), True, False
+    )
+
+    assert decision == "skip"
+    assert prompts == [(
+        "Capture memory in the background at session end (uses your Claude plan)?",
+        {"assume_yes": False, "non_interactive": False,
+         "manual_hint": "Turn on capture later with: okfmem init --capture"},
+    )]
+
+
+def test_capture_decision_keeps_existing_hooks_without_prompt(tmp_path, monkeypatch):
+    monkeypatch.setattr(mi, "capture_hooks_wired", lambda _store: True)
+    monkeypatch.setattr(mi, "_prompt_yes_no", lambda *a, **kw: pytest.fail("prompted"))
+
+    assert mi._capture_decision(
+        None, True, {"claude_code": "present"}, str(tmp_path), True, True
+    ) == "keep"
+
+
+def test_no_capture_removes_only_capture_hooks(tmp_path, monkeypatch, isolated_home):
+    home = isolated_home
+    (home / ".claude").mkdir()
+    store = tmp_path / "store"
+    (store / "pages").mkdir(parents=True)
+    monkeypatch.setattr(mi, "detect_harnesses", lambda: {
+        "claude_code": str(home / ".claude" / "CLAUDE.md"), "codex": None,
+        "antigravity": None,
+    })
+    mi.wire_capture_hooks(str(store), dry_run=False)
+    mi.cmd_run(str(store), dry_run=False, apply_cleanup=False,
+               assume_yes=True, capture=False)
+
+    after = json.loads(_settings(home).read_text(encoding="utf-8"))
+    assert _entries(_settings(home), "SessionEnd") == []
+    assert _entries(_settings(home), "PreCompact") == []
+    start = _entries(_settings(home), "SessionStart")
+    assert len(start) == 1
+    assert "pull --quiet" in start[0]["command"]
+
+
+def test_no_capture_decline_keeps_hooks(tmp_path, monkeypatch, isolated_home):
+    home = isolated_home
+    (home / ".claude").mkdir()
+    store = tmp_path / "store"
+    mi.wire_capture_hooks(str(store), dry_run=False)
+    monkeypatch.setattr(mi, "capture_hooks_wired", lambda _store: True)
+    monkeypatch.setattr(mi, "_prompt_yes_no", lambda *a, **kw: False)
+
+    assert mi._capture_decision(
+        False, True, {"claude_code": "present"}, str(store), False, False
+    ) == "keep"
+
+
+def _wired_claude_store(tmp_path, monkeypatch, home):
+    (home / ".claude").mkdir()
+    store = tmp_path / "store"
+    (store / "pages").mkdir(parents=True)
+    monkeypatch.setattr(mi, "detect_harnesses", lambda: {
+        "claude_code": str(home / ".claude" / "CLAUDE.md"), "codex": None,
+        "antigravity": None,
+    })
+    mi.wire_capture_hooks(str(store), dry_run=False)
+    return store
+
+
+def test_noninteractive_no_capture_keeps_hooks_and_prints_hint(
+    tmp_path, monkeypatch, isolated_home, capsys
+):
+    store = _wired_claude_store(tmp_path, monkeypatch, isolated_home)
+    before = _settings(isolated_home).read_text(encoding="utf-8")
+
+    mi.cmd_run(str(store), dry_run=False, apply_cleanup=False, capture=False)
+
+    assert _settings(isolated_home).read_text(encoding="utf-8") == before
+    for event in ("SessionEnd", "PreCompact", "SessionStart"):
+        assert len(_entries(_settings(isolated_home), event)) == 1
+    assert "okfmem init --no-capture --yes" in capsys.readouterr().out
+
+
+def test_dry_run_no_capture_previews_removal_and_writes_nothing(
+    tmp_path, monkeypatch, isolated_home, capsys
+):
+    store = _wired_claude_store(tmp_path, monkeypatch, isolated_home)
+    before = _settings(isolated_home).read_text(encoding="utf-8")
+
+    mi.cmd_run(str(store), dry_run=True, apply_cleanup=False, capture=False)
+
+    output = capsys.readouterr().out
+    assert _settings(isolated_home).read_text(encoding="utf-8") == before
+    for event in ("SessionEnd", "PreCompact", "SessionStart"):
+        assert f"capture {event:11} would remove" in output
+    assert "capture hooks skipped" not in output
+
+
+def test_dry_run_without_flag_previews_kept_capture_hooks(
+    tmp_path, monkeypatch, isolated_home, capsys
+):
+    store = _wired_claude_store(tmp_path, monkeypatch, isolated_home)
+
+    mi.cmd_run(str(store), dry_run=True, apply_cleanup=False)
+
+    assert "capture hooks kept (existing choice)" in capsys.readouterr().out
+
+
+def test_capture_predicate_ignores_pull_hook_under_capture_engine_path(
+    tmp_path, monkeypatch, isolated_home
+):
+    claude = isolated_home / ".claude"
+    claude.mkdir()
+    pull = '"/opt/capture/bin/python3" "/home/you/src/capture/okfmem" pull --quiet'
+    settings = claude / "settings.json"
+    settings.write_text(json.dumps({"hooks": {"SessionStart": [
+        {"hooks": [{"type": "command", "command": pull}]}
+    ]}}), encoding="utf-8")
+
+    assert not mi._is_capture_command(pull)
+    assert mi._is_capture_command('"python" "/home/you/src/capture/okfmem" capture --stdin-hook')
+    assert not mi.capture_hooks_wired(str(tmp_path / "store"))
+    assert mu.unwire_capture_hooks(dry_run=False)["SessionStart"][0] == "absent"
+    assert [hook["command"] for hook in _entries(settings, "SessionStart")] == [pull]
 
 
 def test_init_capture_flag_wires_capture_hooks(tmp_path, monkeypatch, isolated_home):
