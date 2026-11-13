@@ -7,6 +7,8 @@ import pytest
 
 import memory_init as mi
 
+pytestmark = pytest.mark.os_real
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 

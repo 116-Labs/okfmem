@@ -15,6 +15,8 @@ import memory_capture as mc
 import memory_init as mi
 import memory_transcript as mt
 
+pytestmark = pytest.mark.os_real
+
 ROOT = Path(mc.__file__).parent
 OKFMEM = str(ROOT / "okfmem")
 

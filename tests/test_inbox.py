@@ -667,6 +667,7 @@ def test_push_json_reports_page_collection_oserror(env, monkeypatch, tmp_path, c
     assert "cannot read pages" in captured.err
 
 
+@pytest.mark.os_real
 @pytest.mark.skipif(os.name != "nt", reason="PowerShell wrapper is Windows-only")
 def test_powershell_wrapper_propagates_json_push_failure(env, tmp_path):
     _git(env["worker"], "remote", "set-url", "origin", str(tmp_path / "gone.git"))
@@ -680,6 +681,7 @@ def test_powershell_wrapper_propagates_json_push_failure(env, tmp_path):
     assert list(got) == ["error"] and got["error"]
 
 
+@pytest.mark.os_real
 @pytest.mark.skipif(os.name != "nt", reason="cmd wrapper is Windows-only")
 def test_cmd_wrapper_propagates_json_push_failure(env, tmp_path):
     _git(env["worker"], "remote", "set-url", "origin", str(tmp_path / "gone.git"))

@@ -5,7 +5,11 @@ idempotent on re-run.
 import json
 import os
 
+import pytest
+
 import memory_init as mi
+
+pytestmark = pytest.mark.os_real
 
 
 def _settings(tmp_path, data):

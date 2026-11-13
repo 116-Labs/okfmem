@@ -12,9 +12,10 @@ import pytest
 
 import memory_init as mi
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("git") is None, reason="git binary not available"
-)
+pytestmark = [
+    pytest.mark.os_real,
+    pytest.mark.skipif(shutil.which("git") is None, reason="git binary not available"),
+]
 
 ROLLOUT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

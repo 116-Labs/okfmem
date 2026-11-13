@@ -12,6 +12,8 @@ import memory_consolidate as mc
 import memory_init as mi
 import memory_reindex as mr
 
+pytestmark = pytest.mark.os_real
+
 
 def _make_repo(path, remote=None, markers=()):
     os.makedirs(path, exist_ok=True)

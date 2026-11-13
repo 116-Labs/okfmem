@@ -5,6 +5,8 @@ import sys
 
 import pytest
 
+pytestmark = pytest.mark.os_real
+
 
 def _module(monkeypatch):
     update = importlib.import_module("memory_update")

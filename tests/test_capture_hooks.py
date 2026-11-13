@@ -9,6 +9,8 @@ import memory_capture as mc
 import memory_init as mi
 import memory_uninstall as mu
 
+pytestmark = pytest.mark.os_real
+
 _REAL_HOME = os.path.expanduser("~")
 
 

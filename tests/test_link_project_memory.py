@@ -6,6 +6,8 @@ import pytest
 
 import memory_init as mi
 
+pytestmark = pytest.mark.os_real
+
 
 # ---------------------------------------------------------------------------
 # encode_root — the inverse of decode_root

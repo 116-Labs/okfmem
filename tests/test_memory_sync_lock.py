@@ -5,6 +5,8 @@ import pytest
 
 import memory_sync as ms
 
+pytestmark = pytest.mark.os_real
+
 # Tests that expect the acquire to fail wait out this timeout; with the backoff
 # shortened below each costs ~0.1 s instead of a real second (#217).
 SHORT_TIMEOUT = 0.1

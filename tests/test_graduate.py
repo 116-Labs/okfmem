@@ -16,7 +16,11 @@ Load-bearing invariants under test:
 import os
 from types import SimpleNamespace
 
+import pytest
+
 import memory_graduate as mg
+
+pytestmark = pytest.mark.os_real
 
 PAGE = (
     "---\n"
