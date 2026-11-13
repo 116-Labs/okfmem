@@ -498,6 +498,28 @@ def test_catch_up_queues_idle_uncaptured_sessions_once(cap):
     assert cap.spawned == [str(cap.store)]
 
 
+def test_catch_up_resolves_project_from_cwd_after_claude_metadata(cap):
+    path = cap.transcript([
+        {"type": "session-owner", "sessionId": "s1"},
+        {"type": "queue-operation", "sessionId": "s1"},
+        {"type": "attachment", "sessionId": "s1", "cwd": str(cap.repo)},
+    ])
+    old = time.time() - mc.CATCHUP_IDLE_S - 60
+    os.utime(path, (old, old))
+    ledger = cap.store / ".okfmem" / "capture" / "ledger.json"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(json.dumps({"catchup_floor": "1970-01-01T00:00:00+00:00", "entries": {}}))
+
+    assert mc.main(["--catch-up", "--store", str(cap.store)]) == 0
+
+    [job] = cap.jobs()
+    assert job["trigger"] == "catch-up" and job["project"] == "proj"
+    assert job["cwd"] == str(cap.repo)
+    assert cap.spawned == [str(cap.store)]
+    capture_log = cap.store / ".okfmem" / "capture" / "capture.log"
+    assert "no project resolves" not in capture_log.read_text(encoding="utf-8")
+
+
 def test_job_left_running_by_a_dead_worker_counts_as_an_attempt(cap):
     path = cap.transcript([user("decided X", cap.repo)])
     job, job_path = cap.job(path, focus="X")
