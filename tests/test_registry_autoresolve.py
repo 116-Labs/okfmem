@@ -342,6 +342,7 @@ def test_pull_dirty_page_with_non_ascii_content_keeps_bytes(tmp_path):
             base_body + " ✓", "2026-10-15", 5).encode("utf-8")
 
 
+@pytest.mark.filterwarnings("error::pytest.PytestUnhandledThreadExceptionWarning")
 def test_show_blob_returns_none_for_non_utf8_blob(tmp_path):
     _, store = _seed_store(tmp_path)
     with open(os.path.join(store, "projects", "demo", "raw.md"), "wb") as f:
