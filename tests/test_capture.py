@@ -32,6 +32,11 @@ with open(log, encoding="utf-8") as f:
 path = os.environ.get("STUB_RESPONSES", "")
 responses = json.load(open(path, encoding="utf-8")) if path and os.path.exists(path) else []
 resp = (responses[n] if n < len(responses) else responses[-1]) if responses else {}
+hold = resp.get("hold_until")
+if hold:
+    end = time.monotonic() + 120
+    while not os.path.exists(hold) and time.monotonic() < end:
+        time.sleep(0.05)
 time.sleep(resp.get("sleep", 0))
 print(json.dumps({"type": "result", "subtype": resp.get("subtype", "success"), "is_error": False,
                   "total_cost_usd": resp.get("cost", 0.0), "structured_output": resp.get("reply")}))
@@ -156,16 +161,18 @@ def _flag(argv, name):
 
 def test_now_returns_at_once_and_the_detached_worker_calls_the_stub_internally(cap, monkeypatch):
     cap.transcript([user("We decided to pin the runner image because drift broke CI", cap.repo)])
-    cap.respond([{**TRIAGE_SAVE, "sleep": 5}, {"reply": reply(), "cost": 0.1}])
+    release = cap.tmp / "release"
+    cap.respond([{**TRIAGE_SAVE, "hold_until": str(release)}, {"reply": reply(), "cost": 0.1}])
     started = time.monotonic()
     r = subprocess.run([sys.executable, OKFMEM, "capture", "--now", "--harness", "claude-code",
                         "--session", "s1", "--store", str(cap.store)],
                        capture_output=True, text=True, timeout=60)
     elapsed = time.monotonic() - started
     assert r.returncode == 0, r.stderr
-    # Must stay below the stub's 5 s triage sleep, or it no longer proves --now doesn't wait.
-    assert elapsed < 3.0, elapsed
+    assert elapsed < 30, elapsed
     assert json.loads(r.stdout)["status"] == "queued"
+    assert not any(j["status"] == "saved" for j in cap.jobs())
+    release.write_text("go", encoding="utf-8")
     deadline = time.monotonic() + 180
     while time.monotonic() < deadline:
         if any(j["status"] not in mc.PENDING + ("captured",) for j in cap.jobs()):
