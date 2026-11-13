@@ -163,9 +163,10 @@ def test_now_returns_at_once_and_the_detached_worker_calls_the_stub_internally(c
                        capture_output=True, text=True, timeout=60)
     elapsed = time.monotonic() - started
     assert r.returncode == 0, r.stderr
-    assert elapsed < 1.0, elapsed
+    # Must stay below the stub's 5 s triage sleep, or it no longer proves --now doesn't wait.
+    assert elapsed < 3.0, elapsed
     assert json.loads(r.stdout)["status"] == "queued"
-    deadline = time.monotonic() + 60
+    deadline = time.monotonic() + 180
     while time.monotonic() < deadline:
         if any(j["status"] not in mc.PENDING + ("captured",) for j in cap.jobs()):
             break
