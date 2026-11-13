@@ -342,6 +342,18 @@ def test_pull_dirty_page_with_non_ascii_content_keeps_bytes(tmp_path):
             base_body + " ✓", "2026-10-15", 5).encode("utf-8")
 
 
+def test_show_blob_normalises_crlf_blob_to_lf(tmp_path):
+    _, store = _seed_store(tmp_path)
+    _git(store, "config", "core.autocrlf", "false")
+    with open(os.path.join(store, "projects", "demo", "crlf.md"), "wb") as f:
+        f.write(b"---\r\nname: x\r\n---\r\nbody\rlone\r\n")
+    _git(store, "add", "-A")
+    assert ms._show_blob(store, 0, "projects/demo/crlf.md") == (
+        "---\nname: x\n---\nbody\nlone\n")
+
+
+@pytest.mark.os_real
+@pytest.mark.filterwarnings("error::pytest.PytestUnhandledThreadExceptionWarning")
 def test_show_blob_returns_none_for_non_utf8_blob(tmp_path):
     _, store = _seed_store(tmp_path)
     with open(os.path.join(store, "projects", "demo", "raw.md"), "wb") as f:

@@ -71,15 +71,15 @@ from datetime import datetime, timezone
 LOCK_STALE_SECONDS = 600  # 10 minutes
 
 
-def _git(store, *args, env=None, timeout=120, encoding=None):
+def _git(store, *args, env=None, timeout=120, encoding=None, binary=False):
     cmd_env = None
     if env is not None:
         cmd_env = {**os.environ, **env}
     return subprocess.run(
         ["git", "-C", store, *args],
         capture_output=True,
-        text=True,
-        encoding=encoding,
+        text=not binary,
+        encoding=None if binary else encoding,
         timeout=timeout,
         env=cmd_env,
     )
@@ -155,13 +155,15 @@ def _author_env(author):
 
 def _show_blob(store, stage, path):
     """`git show :<stage>:<path>` decoded as UTF-8 (not the locale code page,
-    since the merged text is written back as UTF-8). None on a missing blob or
-    undecodable bytes."""
+    since the merged text is written back as UTF-8), with CRLF and lone CR
+    normalised to LF. None on a missing blob or undecodable bytes."""
+    r = _git(store, "show", f":{stage}:{path}", binary=True)
+    if r.returncode != 0:
+        return None
     try:
-        r = _git(store, "show", f":{stage}:{path}", encoding="utf-8")
+        return r.stdout.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     except UnicodeDecodeError:
         return None
-    return r.stdout if r.returncode == 0 else None
 
 
 def _git_dir(store):
