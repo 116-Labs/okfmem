@@ -40,6 +40,12 @@ def pytest_addoption(parser, pluginmanager):
         help="ignored: pytest-xdist is not installed, so the suite runs serially")
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "os_real: reaches Windows-specific behaviour; runs in the Windows pool gate")
+
+
 def pytest_terminal_summary(terminalreporter, config):
     if _XDIST_MISSING and config.getoption("numprocesses"):
         terminalreporter.write_line(

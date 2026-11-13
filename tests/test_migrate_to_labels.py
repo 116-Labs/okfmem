@@ -13,6 +13,8 @@ import memory_init as mi
 import memory_migrate as mm
 import memory_reindex as mr
 
+pytestmark = pytest.mark.os_real
+
 
 def _init_git_store(store_path):
     """Create a git repo at store_path with git user set and clean initial commit."""

@@ -5,6 +5,8 @@ import pytest
 
 import memory_init as mi
 
+pytestmark = pytest.mark.os_real
+
 
 def _encode(path):
     return mi.encode_root(path)

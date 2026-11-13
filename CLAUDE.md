@@ -89,10 +89,17 @@ okfmem inbox apply DIR/decisions.json [--yes]   # validate, [y/N], write, lease-
 okfmem capture --now --harness claude-code --session ID   # queue a job; a detached worker triages + captures on a tool-less `claude -p`
 okfmem capture --record --harness codex --session ID --upto N   # after a foreground save: the ledger covers the session to N
 
+python3 scripts/gate_test.py     # pool test gate: win32 runs `-m os_real` serially, other platforms the full suite (`-n auto`)
+OKFMEM_TEST_SLICE=full python3 scripts/gate_test.py   # force the full suite anywhere (`os_real` forces the slice)
 python3 scripts/check-leaks.py   # leak gate (also runs first in CI)
 ruff check .                     # lint (advisory in CI today)
 ruff format --check .            # format check (advisory in CI today)
 ```
+
+**Test slices.** CI runs the full suite on Windows, macOS and Linux and backstops the pool gate.
+A new test that reaches Windows-specific code (links, junctions, paths, hooks, spawn flags,
+locks, PowerShell) gets `pytest.mark.os_real` (module-level `pytestmark`, or on the test).
+`tests/test_gate_slice.py` fails a Windows-only `skipif` that lacks it.
 
 Opt-in commands (`index`, `search`) route lazily to `plugins/memory_search.py` and build a
 rebuildable, git-ignored local SQLite FTS cache (`*.db`) — never committed.

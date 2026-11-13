@@ -5,6 +5,8 @@ import pytest
 
 import memory_init as mi
 
+pytestmark = pytest.mark.os_real
+
 
 # ---------------------------------------------------------------------------
 # #42 — Antigravity (agy) store-path access pre-grant. The concrete mechanism

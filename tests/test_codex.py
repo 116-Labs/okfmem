@@ -2,9 +2,13 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 import memory_codex as mc
 import memory_init as mi
 from plugins.adapters import codex
+
+pytestmark = pytest.mark.os_real
 
 
 def isolated(tmp_path, monkeypatch):

@@ -2,7 +2,11 @@ import json
 import os
 import sys
 
+import pytest
+
 import memory_init as mi
+
+pytestmark = pytest.mark.os_real
 
 
 def _expected_command():

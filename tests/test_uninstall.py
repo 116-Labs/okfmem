@@ -1,8 +1,12 @@
 import json
 import os
 
+import pytest
+
 import memory_init as mi
 import memory_uninstall as mu
+
+pytestmark = pytest.mark.os_real
 
 
 # ---------------------------------------------------------------------------

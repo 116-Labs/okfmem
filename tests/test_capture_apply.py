@@ -11,6 +11,8 @@ import pytest
 import memory_capture as mc
 import memory_sync as ms
 
+pytestmark = pytest.mark.os_real
+
 PAGE_TEXT = ("---\nname: Runner image\ndescription: pin it\ntype: project\nlabels: [repo:proj]\n"
              "created: 2026-01-01\nlast_accessed: 2026-02-02\naccess_count: 7\n---\n\n"
              + "".join(f"line {i}\n" for i in range(300)))
