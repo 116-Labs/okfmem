@@ -5,6 +5,16 @@ import pytest
 
 import memory_sync as ms
 
+# Tests that expect the acquire to fail wait out this timeout; with the backoff
+# shortened below each costs ~0.1 s instead of a real second (#217).
+SHORT_TIMEOUT = 0.1
+
+
+@pytest.fixture(autouse=True)
+def fast_backoff(monkeypatch):
+    real_sleep = time.sleep
+    monkeypatch.setattr(ms.time, "sleep", lambda s: real_sleep(min(s, 0.01)))
+
 
 def test_acquire_creates_lockfile_and_release_removes_it(tmp_path):
     store = str(tmp_path)
@@ -40,7 +50,7 @@ def test_second_acquire_fails_while_first_holds_the_lock(tmp_path):
     try:
         # Short timeout — the lock is fresh, not stale, so this must fail
         # rather than break through.
-        fd2 = ms._acquire_lock(store, timeout=1)
+        fd2 = ms._acquire_lock(store, timeout=SHORT_TIMEOUT)
         assert fd2 is None
     finally:
         ms._release_lock(store, fd1)
@@ -65,7 +75,7 @@ def test_fresh_lock_is_not_treated_as_stale(tmp_path):
     assert fd1 is not None
     try:
         # Well within LOCK_STALE_SECONDS — must not be broken.
-        fd2 = ms._acquire_lock(store, timeout=1)
+        fd2 = ms._acquire_lock(store, timeout=SHORT_TIMEOUT)
         assert fd2 is None
     finally:
         ms._release_lock(store, fd1)
@@ -88,10 +98,10 @@ def test_failed_stale_break_still_times_out(tmp_path, monkeypatch):
     monkeypatch.setattr(ms.os, "remove", _boom)
 
     start = time.monotonic()
-    fd = ms._acquire_lock(store, timeout=1)
+    fd = ms._acquire_lock(store, timeout=SHORT_TIMEOUT)
     elapsed = time.monotonic() - start
     assert fd is None
-    assert elapsed < 5  # honored the ~1s timeout instead of hanging
+    assert elapsed < 2  # honored the short timeout instead of hanging
 
 
 @pytest.mark.skipif(os.name == "nt",
@@ -106,7 +116,7 @@ def test_stale_looking_lock_with_live_owner_is_not_broken(tmp_path):
     old = time.time() - (ms.LOCK_STALE_SECONDS + 60)
     os.utime(lock_path, (old, old))
 
-    fd = ms._acquire_lock(store, timeout=1)
+    fd = ms._acquire_lock(store, timeout=SHORT_TIMEOUT)
     assert fd is None                 # not broken -> acquire fails on timeout
     assert os.path.isfile(lock_path)  # lockfile left untouched
 

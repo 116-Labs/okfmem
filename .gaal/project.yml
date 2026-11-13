@@ -8,7 +8,7 @@ tracker:
   kind: github
 gates:
   - name: test
-    command: python3 -m pytest -q
+    command: python3 -m pytest -q -n auto
     required: true
 preflight:
   - name: leaks
