@@ -65,8 +65,8 @@ jobs:
         shell: bash
         run: |
           if [ -d tests ] || git ls-files '*_test.py' 'test_*.py' | grep -q .; then
-            pip install pytest
-            pytest -q
+            pip install pytest pytest-xdist
+            pytest -q -n auto
           else
             echo "No test suite found — skipping (tracked as a follow-up)."
           fi

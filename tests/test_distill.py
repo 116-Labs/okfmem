@@ -370,9 +370,15 @@ def test_distill_never_writes_to_store(tmp_path, monkeypatch, capsys):
             }))
         _write(str(proj_dir / f"sess{i}.jsonl"), "\n".join(lines) + "\n")
 
+    codex_root = tmp_path / "codex"
+    codex_root.mkdir()
+
     before = _snapshot(str(store))
 
+    # Every source root is explicit: a defaulted one reads the machine's real
+    # transcripts (#217: the real ~/.codex made this test take 75 s).
     argv = ["distill", "--store", str(store), "--claude-root", str(croot),
+            "--codex-root", str(codex_root),
             "--agy-path", str(tmp_path / "nope.jsonl"), "--min-sessions", "3"]
     monkeypatch.setattr(sys, "argv", ["okfmem distill"] + argv)
     md.main()
