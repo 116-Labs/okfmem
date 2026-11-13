@@ -1534,14 +1534,14 @@ def status_lines(store):
 
 def hook_status_lines(store):
     settings = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+    import memory_init as mi
     configured = False
     try:
         with open(settings, encoding="utf-8") as f:
             data = json.load(f)
         hooks = data.get("hooks", {}) if isinstance(data, dict) else {}
         configured = any(
-            isinstance(hook, dict) and "okfmem" in hook.get("command", "")
-            and "capture" in hook.get("command", "")
+            isinstance(hook, dict) and mi._is_capture_command(str(hook.get("command", "")))
             for groups in hooks.values() if isinstance(groups, list)
             for group in groups if isinstance(group, dict)
             for hook in group.get("hooks", []) if isinstance(group.get("hooks", []), list)

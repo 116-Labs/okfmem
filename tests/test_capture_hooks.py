@@ -498,6 +498,19 @@ def test_catch_up_keeps_transcript_project_when_started_from_another_project(
     assert job["cwd"] == str(root_a)
 
 
+def test_status_not_configured_when_only_pull_hook_engine_path_contains_capture(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(mc.os.path, "expanduser", lambda p: str(home) if p == "~" else p)
+    _settings(home).write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [
+        {"command": '"python" "/home/you/src/capture/okfmem" pull --quiet'}
+    ]}]}}), encoding="utf-8")
+    monkeypatch.setattr(mc.mt, "uncaptured", lambda *a: iter([]))
+
+    [line, *_] = mc.hook_status_lines(str(tmp_path / "store"))
+    assert line.startswith("capture hooks   not configured;")
+
+
 def test_status_reports_hook_configuration_verification_and_backlog(tmp_path, monkeypatch):
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
