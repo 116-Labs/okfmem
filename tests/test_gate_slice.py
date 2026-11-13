@@ -43,12 +43,20 @@ def test_slice_os_real_forces_slice_on_linux():
 def test_gate_script_prints_slice_first_and_returns_pytest_exit_code(tmp_path):
     failing = tmp_path / "test_fails.py"
     failing.write_text("def test_fails():\n    assert False\n", encoding="utf-8")
+    (tmp_path / "conftest.py").write_text(
+        "def pytest_addoption(parser, pluginmanager):\n"
+        "    if not (pluginmanager.has_plugin('xdist')\n"
+        "            or pluginmanager.has_plugin('xdist.plugin')):\n"
+        "        parser.getgroup('xdist')._addoption(\n"
+        "            '-n', '--numprocesses', dest='numprocesses', default=None)\n",
+        encoding="utf-8",
+    )
     result = subprocess.run(
         [sys.executable, str(GATE), "-p", "no:cacheprovider", str(failing)],
         capture_output=True, text=True,
         env={**os.environ, "OKFMEM_TEST_SLICE": "full"},
     )
-    assert result.returncode != 0
+    assert result.returncode == 1
     assert result.stdout.splitlines()[0].startswith("gate_test: slice=full platform=")
 
 
