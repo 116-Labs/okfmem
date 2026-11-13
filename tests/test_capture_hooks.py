@@ -170,7 +170,90 @@ def test_noninteractive_init_offers_manual_capture_command(tmp_path, monkeypatch
 
     output = capsys.readouterr().out
     assert "okfmem init --capture" in output
+    assert "okfmem init --yes" in output
     assert not _settings(home).exists()
+
+
+def test_yes_wires_general_config_but_not_capture(tmp_path, monkeypatch, isolated_home):
+    home = isolated_home
+    (home / ".claude").mkdir()
+    store = tmp_path / "store"
+    (store / "pages").mkdir(parents=True)
+    linked = []
+    monkeypatch.setattr(mi, "detect_harnesses", lambda: {
+        "claude_code": str(home / ".claude" / "CLAUDE.md"), "codex": None,
+        "antigravity": None,
+    })
+    monkeypatch.setattr(mi, "link_skills", lambda _dry_run: linked.append(True) or [])
+
+    mi.cmd_run(str(store), dry_run=False, apply_cleanup=False, assume_yes=True)
+
+    settings = _settings(home)
+    assert "SessionEnd" not in json.loads(settings.read_text(encoding="utf-8"))["hooks"]
+    assert "PreCompact" not in json.loads(settings.read_text(encoding="utf-8"))["hooks"]
+    assert len(_entries(settings, "SessionStart")) == 1
+    assert linked == [True]
+
+
+def test_capture_decision_prompts_separately_and_defaults_to_skip(tmp_path, monkeypatch):
+    prompts = []
+    monkeypatch.setattr(mi, "capture_hooks_wired", lambda _store: False)
+    monkeypatch.setattr(mi, "_prompt_yes_no", lambda question, **kw:
+                        prompts.append((question, kw)) or False)
+
+    decision = mi._capture_decision(
+        None, True, {"claude_code": "present"}, str(tmp_path), True, False
+    )
+
+    assert decision == "skip"
+    assert prompts == [(
+        "Capture memory in the background at session end (uses your Claude plan)?",
+        {"assume_yes": False, "non_interactive": False,
+         "manual_hint": "Turn on capture later with: okfmem init --capture"},
+    )]
+
+
+def test_capture_decision_keeps_existing_hooks_without_prompt(tmp_path, monkeypatch):
+    monkeypatch.setattr(mi, "capture_hooks_wired", lambda _store: True)
+    monkeypatch.setattr(mi, "_prompt_yes_no", lambda *a, **kw: pytest.fail("prompted"))
+
+    assert mi._capture_decision(
+        None, True, {"claude_code": "present"}, str(tmp_path), True, True
+    ) == "keep"
+
+
+def test_no_capture_removes_only_capture_hooks(tmp_path, monkeypatch, isolated_home):
+    home = isolated_home
+    (home / ".claude").mkdir()
+    store = tmp_path / "store"
+    (store / "pages").mkdir(parents=True)
+    monkeypatch.setattr(mi, "detect_harnesses", lambda: {
+        "claude_code": str(home / ".claude" / "CLAUDE.md"), "codex": None,
+        "antigravity": None,
+    })
+    mi.wire_capture_hooks(str(store), dry_run=False)
+    mi.cmd_run(str(store), dry_run=False, apply_cleanup=False,
+               assume_yes=True, capture=False)
+
+    after = json.loads(_settings(home).read_text(encoding="utf-8"))
+    assert _entries(_settings(home), "SessionEnd") == []
+    assert _entries(_settings(home), "PreCompact") == []
+    start = _entries(_settings(home), "SessionStart")
+    assert len(start) == 1
+    assert "pull --quiet" in start[0]["command"]
+
+
+def test_no_capture_decline_keeps_hooks(tmp_path, monkeypatch, isolated_home):
+    home = isolated_home
+    (home / ".claude").mkdir()
+    store = tmp_path / "store"
+    mi.wire_capture_hooks(str(store), dry_run=False)
+    monkeypatch.setattr(mi, "capture_hooks_wired", lambda _store: True)
+    monkeypatch.setattr(mi, "_prompt_yes_no", lambda *a, **kw: False)
+
+    assert mi._capture_decision(
+        False, True, {"claude_code": "present"}, str(store), False, False
+    ) == "keep"
 
 
 def test_init_capture_flag_wires_capture_hooks(tmp_path, monkeypatch, isolated_home):
