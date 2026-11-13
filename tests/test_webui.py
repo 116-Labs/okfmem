@@ -17,6 +17,9 @@ from test_inbox_apply import _decisions, _dump, _good_decisions, _store_state
 pytestmark = pytest.mark.skipif(shutil.which("git") is None,
                                 reason="git binary not available")
 
+# Only bounds a hang: a busy machine can take far longer than 10 s for /api/done.
+HTTP_WAIT_S = 60
+
 
 def _call(srv, path, token=True, body=None):
     url = f"http://127.0.0.1:{srv.port}{path}"
@@ -24,7 +27,7 @@ def _call(srv, path, token=True, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=HTTP_WAIT_S) as r:
             return r.status, r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
@@ -85,7 +88,7 @@ def _run_review(env, work, confirm=lambda: True, decisions_post=None, lines=None
         env["store"], work, confirm, out=lines.append, imported_by="tester",
         open_browser=False, server=srv, **kw)))
     t.start()
-    for _ in range(200):
+    for _ in range(int(HTTP_WAIT_S / 0.05)):
         if "/api/state" in srv.api:
             break
         threading.Event().wait(0.05)
@@ -98,7 +101,7 @@ def _run_review(env, work, confirm=lambda: True, decisions_post=None, lines=None
     if t.is_alive() and (post is None or post[0] != 200):
         srv.stop()
         _wake(srv)
-    t.join(10)
+    t.join(HTTP_WAIT_S)
     return state, post, result, lines
 
 
