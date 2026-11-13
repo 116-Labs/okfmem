@@ -3229,6 +3229,12 @@ def capture_hook_command(store, trigger, catch_up=False):
     return f'"{sys.executable}" "{cli}" capture {args}'
 
 
+def _is_capture_command(cmd):
+    """True if `cmd` runs okfmem's `capture --stdin-hook` subcommand. Keyed on the
+    subcommand, not substrings, so an engine path holding `capture` never matches."""
+    return bool(re.search(r"\bokfmem[\"']?\s+capture\s+--stdin-hook\b", cmd))
+
+
 def wire_capture_hooks(store, dry_run):
     import memory_transcript as mt
 
@@ -3246,8 +3252,9 @@ def wire_capture_hooks(store, dry_run):
     }
     results = {}
     for event, (command, timeout) in commands.items():
-        managed = lambda current: "okfmem" in current and "capture" in current
-        results[event] = wire_claude_hook(event, command, managed, dry_run, timeout=timeout)
+        results[event] = wire_claude_hook(
+            event, command, _is_capture_command, dry_run, timeout=timeout
+        )
     if not dry_run and any(action == "added" for action, _ in results.values()):
         ledger = mt._load_ledger(store)
         ledger["catchup_floor"] = enabled_at
@@ -3380,7 +3387,14 @@ def cmd_run(
             manual_hint=config_hint,
         )
     if dry_run:
-        capture_decision = "wire" if capture is True else "skip"
+        # Preview without prompting: a wired machine shows what the real run would do.
+        wired = capture is not True and capture_hooks_wired(store)
+        if capture is True:
+            capture_decision = "wire"
+        elif wired:
+            capture_decision = "remove" if capture is False else "keep"
+        else:
+            capture_decision = "skip"
     else:
         capture_decision = _capture_decision(
             capture, apply_config, harnesses, store, assume_yes, non_interactive
@@ -3668,11 +3682,13 @@ def cmd_run(
         from memory_uninstall import unwire_capture_hooks
         results = unwire_capture_hooks(dry_run)
         for event, (action, path) in results.items():
-            if action == "removed":
+            removed = action == "removed"
+            if removed:
                 changes += 1
+            label = "would remove" if removed and dry_run else action
             detail = _short(path) if path else "unavailable"
-            print(f"{glyph('chg' if action == 'removed' else 'ok')} "
-                  f"capture {event:11} {action} ({detail})")
+            print(f"{glyph('chg' if removed else 'ok')} "
+                  f"capture {event:11} {label} ({detail})")
     elif not apply_config:
         print(f"{glyph('ok')} capture hooks skipped (config changes declined)")
     elif capture_decision == "keep":
@@ -4290,9 +4306,11 @@ def main():
     )
     capture_group = ap.add_mutually_exclusive_group()
     capture_group.add_argument("--capture", dest="capture", action="store_true",
-                               help="enable Claude Code session capture hooks")
+                               help="turn on background capture: wire okfmem's Claude "
+                               "Code session capture hooks (uses your Claude plan)")
     capture_group.add_argument("--no-capture", dest="capture", action="store_false",
-                               help="leave Claude Code session capture hooks disabled")
+                               help="turn background capture off: remove okfmem's "
+                               "capture hooks (asks [y/N]; --yes answers)")
     ap.set_defaults(capture=None)
     ap.add_argument(
         "-y",
@@ -4301,7 +4319,8 @@ def main():
         help="apply config changes (settings.json hooks + skill/"
         "memory links under ~/.claude) without prompting -- "
         "for installers/CI. A non-interactive run WITHOUT this "
-        "skips them and prints the manual command instead.",
+        "skips them and prints the manual command instead. "
+        "Does not turn on background capture; use --capture.",
     )
     ap.add_argument(
         "--wire-statusline",
