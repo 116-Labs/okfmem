@@ -432,7 +432,11 @@ def spawn_worker(store):
         "close_fds": True,
     }
     if os.name == "nt":
-        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        # A hidden console, not DETACHED_PROCESS: detached leaves each console child
+        # (git, claude) to open its own visible window (#216).
+        no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        kwargs["creationflags"] = no_window | new_group
     else:
         kwargs["start_new_session"] = True
     subprocess.Popen(argv, **kwargs)

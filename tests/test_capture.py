@@ -632,3 +632,25 @@ def test_record_works_for_codex_which_has_no_runner(cap, capsys):
     upto = json.loads(capsys.readouterr().out)["upto"]
     assert mc.main(["--record", "--harness", "codex", "--transcript", str(rollout), "--upto", str(upto)]) == 0
     assert cap.ledger_offset("codex:c1") == upto
+
+
+def _popen_kwargs(monkeypatch, tmp_path, os_name):
+    seen = {}
+    monkeypatch.setattr(os, "name", os_name)
+    monkeypatch.setattr(mc, "capture_dir", lambda store: str(tmp_path))
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: seen.update(kw))
+    mc.spawn_worker(str(tmp_path))
+    return seen
+
+
+def test_windows_worker_gets_a_hidden_console_not_detached(monkeypatch, tmp_path):
+    kw = _popen_kwargs(monkeypatch, tmp_path, "nt")
+    assert kw["creationflags"] == 0x08000000 | 0x00000200
+    assert not kw["creationflags"] & 0x00000008  # DETACHED_PROCESS
+    assert "start_new_session" not in kw
+
+
+def test_posix_worker_starts_a_new_session_without_creationflags(monkeypatch, tmp_path):
+    kw = _popen_kwargs(monkeypatch, tmp_path, "posix")
+    assert kw["start_new_session"] is True
+    assert "creationflags" not in kw
