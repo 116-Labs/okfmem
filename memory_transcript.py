@@ -86,23 +86,39 @@ def transcript_identity(harness, path):
     with open(path, "rb") as raw:
         first = raw.readline()
     fingerprint = hashlib.sha256(first).hexdigest()
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            try:
-                record = json.loads(line)
-            except ValueError:
-                continue
-            if harness == "codex":
+    if harness == "codex":
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
                 meta = _codex_meta(record, path)
                 if meta:
                     session, cwd = meta
                     break
-            elif isinstance(record, dict) and record.get("sessionId") and record.get("cwd"):
-                session, cwd = record["sessionId"], record["cwd"]
-                break
-            elif isinstance(record, dict) and record.get("sessionId"):
-                session = record["sessionId"]
-                break
+    else:
+        scanned = records = 0
+        candidate_session = None
+        with open(path, "rb") as fh:
+            while scanned < 64 * 1024 and records < 200:
+                line = fh.readline(64 * 1024 - scanned)
+                if not line:
+                    break
+                scanned += len(line)
+                records += 1
+                try:
+                    record = json.loads(line.decode("utf-8", errors="replace"))
+                except ValueError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                session_id = record.get("sessionId")
+                if session_id:
+                    candidate_session = session_id
+                if candidate_session and session_id and record.get("cwd"):
+                    session, cwd = candidate_session, record["cwd"]
+                    break
     return {"harness": harness, "session": session, "thread": session,
             "cwd": cwd, "fingerprint": fingerprint}
 

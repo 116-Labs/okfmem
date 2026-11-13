@@ -1,8 +1,11 @@
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import time
+
+import pytest
 
 import memory_transcript as mt
 
@@ -23,6 +26,53 @@ def codex_meta(session="real", cwd="project"):
 def codex_message(text):
     return {"type": "response_item", "timestamp": "now", "payload": {
         "type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}}
+
+
+@pytest.mark.parametrize("record_type", ["session-owner", "custom-title", "mode", "last-prompt"])
+def test_claude_identity_reads_past_metadata_without_cwd(tmp_path, record_type):
+    path = tmp_path / "sessions" / "session.jsonl"
+    path.parent.mkdir()
+    cwd = str(tmp_path / "repo")
+    write_jsonl(path, [
+        {"type": record_type, "sessionId": "S"},
+        {"type": "queue-operation", "sessionId": "S"},
+        {"type": "attachment", "sessionId": "S", "cwd": cwd},
+    ])
+
+    identity = mt.transcript_identity("claude-code", path)
+
+    assert identity["session"] == "S" and identity["cwd"] == cwd
+    first_line = path.read_bytes().splitlines(keepends=True)[0]
+    assert identity["fingerprint"] == hashlib.sha256(first_line).hexdigest()
+
+
+def test_claude_identity_keeps_fallbacks_when_cwd_is_beyond_record_limit(tmp_path):
+    path = tmp_path / "sessions" / "session.jsonl"
+    path.parent.mkdir()
+    records = [{"type": "session-owner", "sessionId": "S"}]
+    records.extend({"type": "queue-operation", "sessionId": "S"} for _ in range(199))
+    records.append({"type": "attachment", "sessionId": "S", "cwd": str(tmp_path / "repo")})
+    write_jsonl(path, records)
+
+    identity = mt.transcript_identity("claude-code", path)
+
+    assert identity["session"] == path.stem
+    assert identity["cwd"] == "sessions"
+
+
+def test_claude_identity_stops_at_byte_limit(tmp_path):
+    path = tmp_path / "sessions" / "session.jsonl"
+    path.parent.mkdir()
+    records = [{"type": "session-owner", "sessionId": "S"}]
+    records.extend({"type": "queue-operation", "sessionId": "S", "padding": "x" * 1500}
+                   for _ in range(45))
+    records.append({"type": "attachment", "sessionId": "S", "cwd": str(tmp_path / "repo")})
+    write_jsonl(path, records)
+
+    identity = mt.transcript_identity("claude-code", path)
+
+    assert identity["session"] == path.stem
+    assert identity["cwd"] == "sessions"
 
 
 def test_read_since_is_contiguous_and_leaves_partial_line(tmp_path):
