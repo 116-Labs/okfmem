@@ -183,6 +183,50 @@ def test_now_returns_at_once_and_the_detached_worker_calls_the_stub_internally(c
     assert [j["status"] for j in cap.jobs()] == ["saved"]
 
 
+def test_find_transcript_counts_a_symlinked_project_dir_once(cap):
+    path = cap.transcript([user("hello", cap.repo)])
+    try:
+        os.symlink(cap.sessions, cap.sessions.parent / "-alias", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    assert mc.find_transcript("claude-code", "s1") == os.path.realpath(path)
+
+
+def test_now_queues_when_a_project_dir_has_a_symlink_alias(cap):
+    cap.transcript([user("We decided to pin the runner image", cap.repo)])
+    try:
+        os.symlink(cap.sessions, cap.sessions.parent / "-alias", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    rc = mc.main(["--now", "--harness", "claude-code", "--session", "s1",
+                  "--store", str(cap.store)])
+    assert rc == 0
+
+
+def test_find_transcript_still_rejects_two_distinct_files_for_one_session(cap):
+    cap.transcript([user("one", cap.repo)])
+    other = cap.sessions.parent / "-other"
+    other.mkdir()
+    (other / "s1.jsonl").write_bytes(json.dumps(user("two", cap.repo)).encode() + b"\n")
+    with pytest.raises(mc.EnqueueError, match="2 claude-code transcripts match"):
+        mc.find_transcript("claude-code", "s1")
+
+
+def test_find_transcript_dedupes_a_symlinked_codex_dir(cap, monkeypatch):
+    real = cap.tmp / "codex-real"
+    real.mkdir()
+    rollout = real / "rollout-s1.jsonl"
+    rollout.write_text("{}\n")
+    alias = cap.tmp / "codex-alias"
+    try:
+        os.symlink(real, alias, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    monkeypatch.setattr(mc, "_session_files", lambda h: ([str(real), str(alias)], "codex"))
+    monkeypatch.setattr(mc, "_session_of", lambda h, p: "s1")
+    assert mc.find_transcript("codex", "s1") == os.path.realpath(rollout)
+
+
 def test_internal_flag_makes_trigger_consolidate_pull_and_codex_exit_without_model_or_git(cap, monkeypatch):
     _install_stub(cap.bindir, "git", GIT_STUB)
     git_log = cap.tmp / "git.log"
