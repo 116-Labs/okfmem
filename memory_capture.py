@@ -312,17 +312,24 @@ def find_transcript(harness, session):
         raise EnqueueError(f"invalid session id {session!r}")
     roots, kind = _session_files(harness)
     matches = []
+    seen = set()  # a symlinked project dir lists one transcript twice (#236)
     if kind == "claude-code":
         for d in roots:
-            path = os.path.join(d, f"{session}.jsonl")
+            path = os.path.realpath(os.path.join(d, f"{session}.jsonl"))
+            if path in seen:
+                continue
             if os.path.isfile(path) and _session_of(harness, path) == session:
+                seen.add(path)
                 matches.append(path)
     else:
         for root in roots:
             for dirpath, _, files in os.walk(root):
                 for name in files:
-                    path = os.path.join(dirpath, name)
+                    path = os.path.realpath(os.path.join(dirpath, name))
+                    if path in seen:
+                        continue
                     if name.endswith(".jsonl") and _session_of(harness, path) == session:
+                        seen.add(path)
                         matches.append(path)
     if len(matches) != 1:
         raise EnqueueError(f"{len(matches)} {harness} transcripts match session {session}")
