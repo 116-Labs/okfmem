@@ -39,8 +39,10 @@ review:
     - verify
 identities:
   push:
+    - { app_id: 5265774, user_id: 340704654, login: "toran-bot[bot]" }
     - 116-labs-gaal-push[bot]
   review:
+    - { app_id: 5265785, user_id: 340704925, login: "toran-review[bot]" }
     - 116-labs-gaal-review[bot]
 limits:
   implement_attempts: 3
