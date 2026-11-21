@@ -3431,6 +3431,18 @@ def cmd_run(
     resolved = resolve_project(store)
     if association_pending:
         print(f"{glyph('warn')} project memory unchanged until the move is approved")
+    elif has_layout_marker(store) and resolved.get("root"):
+        import memory_relabel
+
+        old_name = memory_relabel.relabel_hint(
+            store,
+            claude_projects,
+            resolved["root"],
+            _load_registry(os.path.join(store, "registry.json")),
+            resolved["project"],
+        )
+        if old_name:
+            print(f"{glyph('warn')} {memory_relabel.format_hint(old_name, resolved['project'])}")
     elif (resolved["project"] and resolved["state"] != "ready"
           and not has_layout_marker(store)):
         # Flat pool: the link step below compiles views/<repo> and seeds

@@ -72,6 +72,22 @@ All three share one read-only probe, which you can also run yourself:
 okfmem init --project-link-state   # -> linked <name> | unlinked <name> | not-a-repo | no-claude
 ```
 
+### After a repo rename or move
+
+`init` names the project after the repo's `origin` remote, so renaming or transferring the
+repo gives it a new project name, and the pages labelled `repo:<old>` stop loading. After you
+point the remote at the new URL, run `okfmem init` in the repo: when the new project is empty
+and the old one still has pages, it prints one line naming both and the command to run:
+
+```bash
+okfmem relabel <old> <new> [--dry-run]
+```
+
+That adds `repo:<new>` beside `repo:<old>` on every page with the old label, copies
+`state/<old>.md` to `state/<new>.md` when the new one is missing, and recompiles the view.
+It is additive and safe to re-run; the second run changes nothing. Then run `okfmem init --yes`
+again to re-point the harness memory link at the new view.
+
 ### Uninstalling
 
 ```bash
