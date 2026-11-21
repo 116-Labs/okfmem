@@ -49,6 +49,10 @@ Usage:
   okfmem store split --projects a,b --dest PATH [--delete-source] [--dry-run] [--yes]
                                                  # copy projects into another store;
                                                  # --delete-source asks you to type SPLIT
+  okfmem relabel <old> <new> [--dry-run] [--store PATH]
+                                                 # after a repo rename or move: add
+                                                 # repo:<new> beside repo:<old>, copy
+                                                 # state, recompile the view — #238
   okfmem state check [--project P] [--session ID|--since S --hash H]
                                                  # read-only: guard state file
                                                  # against baseline differences
@@ -82,7 +86,7 @@ MODULES = {"backfill": "memory_backfill.py", "init": "memory_init.py",
            "inbox": "memory_inbox.py", "migrate-to-labels": "memory_migrate.py",
            "state": "memory_state.py", "find": "memory_find.py",
            "store": "memory_store.py", "export": "memory_export.py",
-           "capture": "memory_capture.py"}
+           "capture": "memory_capture.py", "relabel": "memory_relabel.py"}
 # Opt-in plugin commands -> plugins/<file>. Loaded ONLY if the file is present,
 # so core install stays harness-agnostic. Several commands may share one plugin.
 PLUGINS = {"index": "memory_search.py", "search": "memory_search.py",
