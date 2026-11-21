@@ -210,6 +210,19 @@ def test_differing_untracked_blocker_is_kept_and_named(tmp_path):
     assert not _tracked(store, "state.md")
 
 
+def test_mid_rebase_store_skips_blocker_check_and_keeps_files(tmp_path, monkeypatch):
+    origin, store = _seed(tmp_path)
+    _advance_remote(tmp_path, origin, "new", "same", fname="state.md")
+    mine = os.path.join(store, "state.md")
+    with open(mine, "w", encoding="utf-8") as f:
+        f.write("same")
+    monkeypatch.setattr(mp, "_rebase_in_progress", lambda _store: True)
+    res = mp.pull_store(store)
+    assert res["conflict"] is False
+    assert "rebase is already in progress" in res["reason"]
+    assert os.path.exists(mine)
+
+
 def test_sync_drops_identical_untracked_blocker_before_commit(tmp_path):
     import memory_sync as ms
 
