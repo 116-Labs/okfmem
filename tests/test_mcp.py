@@ -83,6 +83,10 @@ def test_stdio_find_matches_cli_order(store):
     assert resps[3]["error"]["code"] == -32601
 
 
+def test_propose_page_schema_requires_repo():
+    assert mm.TOOLS["propose_page"][3] == ["name", "text", "repo"]
+
+
 def test_initialize_answers_a_supported_protocol_version():
     def init(version):
         msg = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -237,6 +241,7 @@ def gstore(tmp_path):
     for k, v in (("user.email", "t@e.st"), ("user.name", "t"), ("commit.gpgsign", "false")):
         git(st, "config", k, v)
     os.makedirs(os.path.join(st, "pages"))
+    os.makedirs(os.path.join(st, "projects", "gaal"))
     page(__import__("pathlib").Path(st, "pages"), "gaal-a", ["repo:gaal"])
     git(st, "add", "-A")
     git(st, "commit", "-qm", "seed")
@@ -264,10 +269,82 @@ def test_propose_page_creates_inbox_ref_and_leaves_store(gstore):
 
 def test_propose_page_stdio_caller_is_local(gstore):
     err, text = call(gstore["store"], mm.LOCAL, "propose_page",
-                     {"name": "new-page.md", "text": GOOD})
+                     {"name": "new-page.md", "text": GOOD, "repo": "gaal"})
     assert not err
     ref = json.loads(text)["ref"]
     assert json.loads(git(gstore["origin"], "show", f"{ref}:meta.json"))["ref"] == "local"
+
+
+def refusal(st, scope, args):
+    err, text = call(st, scope, "propose_page", args)
+    assert err
+    body = json.loads(text)
+    assert body["error"] == "page refused"
+    for p in body["problems"]:
+        assert set(p) == {"field", "rule", "message"}
+    return body["problems"]
+
+
+def no_inbox_refs(gstore):
+    assert git(gstore["origin"], "for-each-ref", "refs/okfmem") == ""
+
+
+def test_propose_page_lists_every_problem_at_once(gstore):
+    bad = "---\nname: X\ntype: gossip\n---\n\nbody\n"
+    problems = refusal(gstore["store"], remote(),
+                       {"name": "MEMORY.md", "text": bad, "repo": "gaal"})
+    assert {(p["field"], p["rule"]) for p in problems} == {
+        ("name", "invalid-name"),
+        ("frontmatter.description", "missing"),
+        ("frontmatter.type", "type-not-allowed"),
+    }
+    no_inbox_refs(gstore)
+
+
+def test_propose_page_one_problem_per_missing_field(gstore):
+    problems = refusal(gstore["store"], remote(),
+                       {"name": "x.md", "text": "---\nname: X\n---\n\nb\n", "repo": "gaal"})
+    assert sorted(p["field"] for p in problems) == [
+        "frontmatter.description", "frontmatter.type"]
+
+
+def test_propose_page_without_frontmatter_is_one_text_problem(gstore):
+    problems = refusal(gstore["store"], remote(),
+                       {"name": "x.md", "text": "plain\n", "repo": "gaal"})
+    assert [(p["field"], p["rule"]) for p in problems] == [("text", "no-frontmatter")]
+
+
+def test_propose_page_unknown_or_missing_repo_before_any_ref(gstore):
+    st = gstore["store"]
+    scope = mm.Scope(["*"])
+    unknown = refusal(st, scope, {"name": "x.md", "text": GOOD, "repo": "nowhere"})
+    assert [(p["field"], p["rule"]) for p in unknown] == [("repo", "unknown-repo")]
+    missing = refusal(st, mm.LOCAL, {"name": "x.md", "text": GOOD})
+    assert [(p["field"], p["rule"]) for p in missing] == [("repo", "missing")]
+    no_inbox_refs(gstore)
+
+
+def test_propose_page_oversize_is_a_problem(gstore):
+    big = GOOD + "x" * 200_000
+    problems = refusal(gstore["store"], remote(), {"name": "x.md", "text": big, "repo": "gaal"})
+    assert [(p["field"], p["rule"]) for p in problems] == [("text", "too-large")]
+
+
+def test_propose_page_leak_names_label_not_text(gstore):
+    secret = "ghp_" + "a1B2" * 9
+    problems = refusal(gstore["store"], remote(),
+                       {"name": "x.md", "text": GOOD + secret + "\n", "repo": "gaal"})
+    assert [(p["field"], p["rule"]) for p in problems] == [("text", "leak")]
+    assert "GitHub token" in problems[0]["message"]
+    assert secret not in json.dumps(problems)
+    no_inbox_refs(gstore)
+
+
+def test_propose_page_hidden_repo_gets_plain_scope_answer(gstore):
+    bad = "---\nname: X\n---\n"
+    err, text = call(gstore["store"], remote(), "propose_page",
+                     {"name": "MEMORY.md", "text": bad, "repo": "hive"})
+    assert err and text == "repo is not allowed: hive"
 
 
 def test_propose_page_rejections(gstore):

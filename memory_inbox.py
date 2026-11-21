@@ -71,11 +71,13 @@ from memory_init import (  # noqa: E402
     has_layout_marker,
     resolve_project,
 )
+from memory_capture import PAGE_TYPES  # noqa: E402
 from memory_sync import sync_store  # noqa: E402
 
 INBOX_NS = "refs/okfmem/inbox"
 REMOTE = "origin"
 REQUIRED_FIELDS = ("name", "description", "type")
+MAX_PAGE_TEXT = 200_000
 SKIP_NAMES = {"MEMORY.md", "STATE.md", "CONTEXT.md"}
 # Page names come from untrusted refs too, so this also blocks path traversal.
 PAGE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.md$")
@@ -888,6 +890,50 @@ def policy_reasons(policy, push_, page, project, dest_pages):
     if page["slug"] in dest_pages:
         reasons.append(f"slug '{page['slug']}' already exists — hold for review")
     return reasons
+
+
+def _problem(field, rule, message):
+    return {"field": field, "rule": rule, "message": message}
+
+
+def proposal_problems(store, name, text, repo):
+    """Every reason a proposed page could never be imported; empty means it may be pushed.
+    Leak hits carry the pattern label only, never the matched text."""
+    problems = []
+    if not importable_name(name):
+        problems.append(_problem(
+            "name", "invalid-name",
+            "use a plain file name ending in .md (letters, digits, . _ -), "
+            "not MEMORY, STATE or CONTEXT"))
+    if len(text) > MAX_PAGE_TEXT:
+        problems.append(_problem(
+            "text", "too-large", f"shorten the page to at most {MAX_PAGE_TEXT} characters"))
+    fm = find_frontmatter(text)
+    if not fm:
+        problems.append(_problem(
+            "text", "no-frontmatter",
+            f"start the page with OKF frontmatter holding {', '.join(REQUIRED_FIELDS)}"))
+    else:
+        fields = parse_fields(text, fm)
+        for key in REQUIRED_FIELDS:
+            if not fields.get(key):
+                problems.append(_problem(
+                    f"frontmatter.{key}", "missing", f"add a non-empty `{key}:` to the frontmatter"))
+        typ = _unquote(fields.get("type") or "").lower()
+        if typ and typ not in PAGE_TYPES:
+            problems.append(_problem(
+                "frontmatter.type", "type-not-allowed",
+                f"set `type:` to one of {', '.join(PAGE_TYPES)}"))
+    if not repo:
+        problems.append(_problem(
+            "repo", "missing", "give the project name of the page's `repo:` label"))
+    elif resolve_repo_project(store, repo) is None:
+        problems.append(_problem(
+            "repo", "unknown-repo", "use a repo that matches a project in this store"))
+    for label in leak_hits(text):
+        problems.append(_problem(
+            "text", "leak", f"remove the text matching the '{label}' leak pattern"))
+    return problems
 
 
 def import_policy(store, dest, policy, imported_by, out=print, do_sync=True):

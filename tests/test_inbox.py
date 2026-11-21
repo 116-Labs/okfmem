@@ -771,3 +771,16 @@ def test_pull_reports_a_failed_batch_read_instead_of_nothing_pending(env, monkey
     assert mx.pull(env["store"], out=lines.append) == 1
     assert not any("nothing pending" in line for line in lines)
     assert any("could not read the inbox" in line for line in lines)
+
+
+def test_proposal_problems_reports_all_and_passes_a_good_page(tmp_path):
+    (tmp_path / "projects" / "demo").mkdir(parents=True)
+    good = "---\nname: N\ndescription: d\ntype: Feedback\n---\n\nbody\n"
+    assert mx.proposal_problems(str(tmp_path), "n.md", good, "acme/demo") == []
+    problems = mx.proposal_problems(str(tmp_path), "../n.md", "---\nname: N\n---\n", None)
+    assert [(p["field"], p["rule"]) for p in problems] == [
+        ("name", "invalid-name"),
+        ("frontmatter.description", "missing"),
+        ("frontmatter.type", "missing"),
+        ("repo", "missing"),
+    ]
