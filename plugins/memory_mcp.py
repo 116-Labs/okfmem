@@ -45,7 +45,6 @@ PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 IDENTITY_TIMEOUT = 10
 REQUEST_TIMEOUT = 30
 MAX_BODY = 1_000_000
-MAX_PAGE_TEXT = 200_000
 CACHE_MAX = 1024
 SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 TEAM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
@@ -57,7 +56,9 @@ _PAGE_LINK_RE = re.compile(r"^pages/([^/]+)\.md$")
 
 
 class ToolError(Exception):
-    pass
+    def __init__(self, message, problems=None):
+        super().__init__(message)
+        self.problems = problems
 
 
 class Scope:
@@ -207,17 +208,12 @@ def tool_propose_page(store, scope, args, caller="local"):
     name = _need_str(args, "name")
     text = _need_str(args, "text")
     repo = _need_str(args, "repo", required=scope.labels is not None)
-    if not memory_inbox.importable_name(name):
-        raise ToolError(f"invalid page name: {name}")
-    if len(text) > MAX_PAGE_TEXT:
-        raise ToolError("page text is too large")
-    if memory_inbox.page_fields(text) is None:
-        raise ToolError(
-            "page needs OKF frontmatter with "
-            f"{', '.join(memory_inbox.REQUIRED_FIELDS)}"
-        )
+    # Scope first: a hidden repo must answer like a missing one, never with a problem list.
     if repo is not None and not scope.repo_ok(repo):
         raise ToolError(f"repo is not allowed: {repo}")
+    problems = memory_inbox.proposal_problems(store, name, text, repo)
+    if problems:
+        raise ToolError("page refused", problems)
     lines = []
     with tempfile.TemporaryDirectory() as tmp:
         with open(os.path.join(tmp, name), "w", encoding="utf-8", newline="") as f:
@@ -262,7 +258,10 @@ TOOLS = {
         tool_propose_page,
         "Propose a new page (`name` ends in .md; `text` has OKF frontmatter with "
         "name, description, type) to the inbox for review; never edits the store. "
-        "`repo` is the project name of its `repo:` label.",
+        "`repo` is the project name of its `repo:` label. A refused page returns "
+        'an error `{"error": "page refused", "problems": [{"field", "rule", '
+        '"message"}]}` listing every problem at once; `field` is name, text, '
+        "repo or frontmatter.<key>.",
         {"name": _STR, "text": _STR, "repo": _STR},
         ["name", "text"],
     ),
@@ -316,7 +315,9 @@ def handle_message(store, scope, msg, caller="local"):
             data = fn(store, scope, args, caller) if name == "propose_page" else fn(store, scope, args)
             result = {"content": [{"type": "text", "text": json.dumps(data)}], "isError": False}
         except ToolError as e:
-            result = {"content": [{"type": "text", "text": str(e)}], "isError": True}
+            body = str(e) if e.problems is None else json.dumps(
+                {"error": str(e), "problems": e.problems})
+            result = {"content": [{"type": "text", "text": body}], "isError": True}
         except Exception:
             # One bad call must not end a stdio session or leak a traceback remotely.
             return _rpc_error(rid, -32603, "internal error")
