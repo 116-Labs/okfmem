@@ -128,6 +128,31 @@ def test_relabel_keeps_a_real_new_state(tmp_path):
     assert "Real notes." in open(new_state, encoding="utf-8").read()
 
 
+def test_relabel_keeps_heading_only_user_state(tmp_path):
+    root = _moved_repo(tmp_path)
+    store = _store(tmp_path, root)
+    new_state = os.path.join(store, "state", "toran.md")
+    body = "# STATE — toran\n\n## Deploy release after database migration\n"
+    with open(new_state, "w", encoding="utf-8") as f:
+        f.write(body)
+    assert mr.relabel(store, "gaal", "toran", out=lambda *_: None) == 0
+    assert open(new_state, encoding="utf-8").read() == body
+
+
+def test_relabel_replaces_the_exact_seeded_stub_state(tmp_path):
+    root = _moved_repo(tmp_path)
+    store = _store(tmp_path, root)
+    new_state = os.path.join(store, "state", "toran.md")
+    with open(new_state, "w", encoding="utf-8") as f:
+        f.write(
+            "---\nname: toran-state\ntype: state\n---\n\n# STATE — toran\n\n"
+            "No session saved yet. Run `/okfmem-save` at the end of a "
+            "session to populate this.\n"
+        )
+    assert mr.relabel(store, "gaal", "toran", out=lambda *_: None) == 0
+    assert "Work." in open(new_state, encoding="utf-8").read()
+
+
 def test_relabel_dry_run_writes_nothing(tmp_path):
     root = _moved_repo(tmp_path)
     store = _store(tmp_path, root)

@@ -62,18 +62,24 @@ def _state_path(store, name):
     return os.path.join(store, "state", f"{name}.md")
 
 
-def _is_stub_state(path):
-    """True when the state file is missing or only the heading init seeds."""
+def _is_stub_state(path, name):
+    """True when the state file is missing or exactly what init seeds for `name`."""
     try:
         text = _read(path)
     except OSError:
         return True
     fm = find_frontmatter(text)
-    body = text[fm[2]:] if fm else text
-    return all(
-        not ln.strip() or ln.strip().startswith(("#", "---"))
-        for ln in body.splitlines()
+    body = text[fm[2]:].lstrip() if fm else text
+    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+    if fm and lines[:1] == ["---"]:
+        lines = lines[1:]
+    seeded = (
+        f"# STATE — {name}",
+        "No session saved yet. Run `/okfmem-save` at the end of a session to populate this.",
     )
+    return bool(lines) and lines[0] == seeded[0] and all(
+        ln in seeded for ln in lines
+    ) or not lines
 
 
 def _linked_project(store, claude_projects, root):
@@ -98,7 +104,7 @@ def relabel_hint(store, claude_projects, root, reg, new):
     state; None otherwise. Read-only."""
     if not (new and root and has_layout_marker(store)):
         return None
-    if pages_with_label(store, new) or not _is_stub_state(_state_path(store, new)):
+    if pages_with_label(store, new) or not _is_stub_state(_state_path(store, new), new):
         return None
     candidates = [
         _linked_project(store, claude_projects, root),
@@ -108,7 +114,7 @@ def relabel_hint(store, claude_projects, root, reg, new):
     for old in candidates:
         if not isinstance(old, str) or old.lower() == new.lower():
             continue
-        if pages_with_label(store, old) or not _is_stub_state(_state_path(store, old)):
+        if pages_with_label(store, old) or not _is_stub_state(_state_path(store, old), old):
             return old
     return None
 
@@ -142,7 +148,7 @@ def relabel(store, old, new, dry_run=False, out=print):
         return 2
     old_state, new_state = _state_path(store, old), _state_path(store, new)
     old_pages = pages_with_label(store, old)
-    copy_state = os.path.isfile(old_state) and _is_stub_state(new_state)
+    copy_state = os.path.isfile(old_state) and _is_stub_state(new_state, new)
     if not old_pages and not os.path.isfile(old_state):
         out(f"error: nothing is labelled repo:{old} and state/{old}.md is missing")
         return 1
