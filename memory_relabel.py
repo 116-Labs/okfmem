@@ -170,6 +170,14 @@ def relabel(store, old, new, dry_run=False, out=print):
             f.write(text)
     if copy_state:
         shutil.copy2(old_state, new_state)
+        # A newer plain-file stub view copy would be copied back over the state.
+        view_state = os.path.join(store, "views", new, "STATE.md")
+        if (
+            not os.path.islink(view_state)
+            and os.path.isfile(view_state)
+            and _is_stub_state(view_state, new)
+        ):
+            os.remove(view_state)
     _recompile(store, new)
     out(f"recompiled views/{new}")
     return 0

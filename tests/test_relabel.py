@@ -152,6 +152,26 @@ def test_relabel_replaces_the_exact_seeded_stub_state(tmp_path):
     assert "Work." in open(new_state, encoding="utf-8").read()
 
 
+def test_relabel_replaces_a_plain_file_stub_view_state_and_is_idempotent(tmp_path):
+    root = _moved_repo(tmp_path)
+    store = _store(tmp_path, root)
+    stub = (
+        "---\nname: toran-state\ndescription: Active-state snapshot for toran\n"
+        "type: state\nmodified: 2026-11-21\n---\n\n# STATE — toran\n\n"
+    )
+    view_state = os.path.join(store, "views", "toran", "STATE.md")
+    os.makedirs(os.path.dirname(view_state))
+    for p in (os.path.join(store, "state", "toran.md"), view_state):
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(stub)
+    assert mr.relabel(store, "gaal", "toran", out=lambda *_: None) == 0
+    for p in (os.path.join(store, "state", "toran.md"), view_state):
+        assert "Work." in open(p, encoding="utf-8").read()
+    before = _tree(store)
+    assert mr.relabel(store, "gaal", "toran", out=lambda *_: None) == 0
+    assert _tree(store) == before
+
+
 def test_relabel_keeps_generated_body_with_edited_frontmatter(tmp_path):
     root = _moved_repo(tmp_path)
     store = _store(tmp_path, root)
