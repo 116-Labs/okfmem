@@ -263,7 +263,7 @@ TOOLS = {
         '"message"}]}` listing every problem at once; `field` is name, text, '
         "repo or frontmatter.<key>.",
         {"name": _STR, "text": _STR, "repo": _STR},
-        ["name", "text"],
+        ["name", "text", "repo"],
     ),
 }
 

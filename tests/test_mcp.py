@@ -83,6 +83,10 @@ def test_stdio_find_matches_cli_order(store):
     assert resps[3]["error"]["code"] == -32601
 
 
+def test_propose_page_schema_requires_repo():
+    assert mm.TOOLS["propose_page"][3] == ["name", "text", "repo"]
+
+
 def test_initialize_answers_a_supported_protocol_version():
     def init(version):
         msg = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
