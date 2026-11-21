@@ -38,6 +38,7 @@ def _config(repo):
 
 
 def _commit(repo, name, content):
+    os.makedirs(os.path.dirname(os.path.join(repo, name)), exist_ok=True)
     with open(os.path.join(repo, name), "w", encoding="utf-8") as f:
         f.write(content)
     _git(repo, "add", "-A")
@@ -162,6 +163,78 @@ def test_rebase_conflict_exits_clean(tmp_path):
     status = subprocess.run(["git", "status", "--porcelain"], cwd=store,
                             capture_output=True, text=True)
     assert status.stdout.strip() == ""
+
+
+def _tracked(store, path):
+    return _git(store, "ls-files", "--", path).stdout.strip() == path
+
+
+def test_identical_untracked_blocker_fast_forwards_and_becomes_tracked(tmp_path):
+    origin, store = _seed(tmp_path)
+    _advance_remote(tmp_path, origin, "new", "same", fname="state.md")
+    with open(os.path.join(store, "state.md"), "w", encoding="utf-8") as f:
+        f.write("same")
+    res = mp.pull_store(store)
+    assert res["pulled"] is True
+    assert res["conflict"] is False
+    assert _tracked(store, "state.md")
+    assert _git(store, "status", "--porcelain").stdout.strip() == ""
+
+
+def test_identical_untracked_blocker_rebases_over_local_commit(tmp_path):
+    origin, store = _seed(tmp_path)
+    _advance_remote(tmp_path, origin, "new", "same", fname="sub/state.md")
+    _commit(store, "local.txt", "mine")
+    os.makedirs(os.path.join(store, "sub"))
+    with open(os.path.join(store, "sub", "state.md"), "w", encoding="utf-8") as f:
+        f.write("same")
+    res = mp.pull_store(store)
+    assert res["pulled"] is True
+    assert res["conflict"] is False
+    assert _tracked(store, "sub/state.md")
+    assert os.path.exists(os.path.join(store, "local.txt"))
+
+
+def test_differing_untracked_blocker_is_kept_and_named(tmp_path):
+    origin, store = _seed(tmp_path)
+    _advance_remote(tmp_path, origin, "new", "theirs", fname="state.md")
+    mine = os.path.join(store, "state.md")
+    with open(mine, "w", encoding="utf-8") as f:
+        f.write("mine")
+    res = mp.pull_store(store)
+    assert res["pulled"] is False
+    assert "state.md" in res["reason"]
+    assert "not a rebase conflict" in res["reason"]
+    with open(mine, encoding="utf-8") as f:
+        assert f.read() == "mine"
+    assert not _tracked(store, "state.md")
+
+
+def test_sync_drops_identical_untracked_blocker_before_commit(tmp_path):
+    import memory_sync as ms
+
+    origin, store = _seed(tmp_path)
+    _advance_remote(tmp_path, origin, "new", "same", fname="state.md")
+    for name, body in (("state.md", "same"), ("extra.txt", "x")):
+        with open(os.path.join(store, name), "w", encoding="utf-8") as f:
+            f.write(body)
+    res = ms.sync_store(store, "msg")
+    assert res["conflict"] is False
+    assert _tracked(store, "state.md")
+    assert _tracked(store, "extra.txt")
+
+
+def test_sync_reports_differing_untracked_blocker(tmp_path):
+    import memory_sync as ms
+
+    origin, store = _seed(tmp_path)
+    _advance_remote(tmp_path, origin, "new", "theirs", fname="state.md")
+    with open(os.path.join(store, "state.md"), "w", encoding="utf-8") as f:
+        f.write("mine")
+    res = ms.sync_store(store, "msg")
+    assert res["committed"] is False
+    assert "state.md" in res["reason"]
+    assert "not a rebase conflict" in res["reason"]
 
 
 def test_never_raises_on_garbage_store(tmp_path):
