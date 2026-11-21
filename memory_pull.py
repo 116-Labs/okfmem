@@ -169,6 +169,18 @@ def pull_store(store, timeout=DEFAULT_TIMEOUT, token=None):
             res["reason"] = "already up to date."
             return res
 
+        # An untracked file the incoming commits also track blocks the pull and
+        # git's refusal is indistinguishable from a rebase conflict (#245).
+        # Skipped mid-rebase: the guard below must still win, and a human's
+        # in-progress store is not ours to delete from.
+        blocked = []
+        if not _rebase_in_progress(store):
+            _, blocked = ms.clear_untracked_blockers(store)
+        if blocked:
+            res["conflict"] = True
+            res["reason"] = ms.untracked_blocker_reason(blocked)
+            return res
+
         # A clean tree can take the cheap fast-forward path. A dirty tree (or
         # a history that isn't a fast-forward) falls back to rebase, stashing
         # any local edits around it so they survive the rebase.

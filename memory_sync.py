@@ -328,6 +328,55 @@ def _has_unmerged_paths(store):
     return any(line[:2] in _UNMERGED_CODES for line in st.stdout.splitlines())
 
 
+def clear_untracked_blockers(store, upstream="@{u}"):
+    """Untracked files that `upstream` also tracks would make git refuse the
+    pull ("would be overwritten") and the failure reads like a rebase conflict.
+    Delete those whose content equals the incoming blob (the pull re-creates
+    them tracked); keep the rest. Returns (deleted, differing) path lists, and
+    ([], []) when anything can't be read: fail closed, never delete on doubt."""
+    other = _git(store, "ls-files", "-z", "--others", "--exclude-standard")
+    tree = _git(store, "ls-tree", "-r", "-z", "--full-tree", upstream)
+    if other.returncode != 0 or tree.returncode != 0:
+        return [], []
+    untracked = {p for p in other.stdout.split("\0") if p}
+    if not untracked:
+        return [], []
+    incoming = {}
+    for entry in tree.stdout.split("\0"):
+        meta, _, path = entry.partition("\t")
+        if path in untracked:
+            parts = meta.split()
+            if len(parts) == 3:
+                incoming[path] = (parts[0], parts[2])
+    deleted, differing = [], []
+    for path in sorted(incoming):
+        mode, blob = incoming[path]
+        full = os.path.join(store, *path.split("/"))
+        same = False
+        if mode in ("100644", "100755") and not os.path.islink(full):
+            h = _git(store, "hash-object", "--", path)
+            same = h.returncode == 0 and h.stdout.strip() == blob
+        if same:
+            try:
+                os.remove(full)
+            except OSError:
+                differing.append(path)
+                continue
+            deleted.append(path)
+        else:
+            differing.append(path)
+    return deleted, differing
+
+
+def untracked_blocker_reason(paths):
+    """The one-line reason for untracked files the pull would overwrite."""
+    names = ", ".join(paths)
+    return (
+        f"untracked {names} blocks the pull: it differs from the incoming "
+        "copy (not a rebase conflict); move it aside and run okfmem pull."
+    )
+
+
 def _unmerged_paths(store):
     """The current unmerged paths (repo-relative, '/'-separated as git prints
     them), or [] if there are none / they can't be enumerated. Callers treat
@@ -785,6 +834,14 @@ def sync_store(store, message, do_push=True, do_pull=True, token=None, author=No
                         # A pre-existing rebase-in-progress was already caught
                         # by the early return at the top of the try, so the
                         # tree is clean here and this pull's own rebase is safe.
+                        _, blocked = clear_untracked_blockers(store)
+                        if blocked:
+                            res["conflict"] = True
+                            res["reason"] = (
+                                untracked_blocker_reason(blocked)
+                                + " NOT committed, NOT pushed."
+                            )
+                            return res
                         rb = _git(store, "rebase", "--autostash", "@{u}")
                         if rb.returncode != 0:
                             # Rebase failed mid-flight. #25, #80: a conflict
