@@ -176,3 +176,113 @@ def test_dispatcher_routes_find(store):
     )
     assert r.returncode == 0, r.stderr
     assert "pages/p.md" in r.stdout
+
+
+def by_match(results, kind):
+    return [r for r in results if r["match"] == kind]
+
+
+def test_page_linked_from_a_match_is_related_with_via(store):
+    page(store / "pages", "hit", body="watch [fix](answer.md)\n")
+    page(store / "pages", "answer", body="unrelated words\n")
+    res = mf.find(str(store), ["watch"])
+    assert slugs(by_match(res, "terms")) == ["hit"]
+    [rel] = by_match(res, "link")
+    assert (rel["slug"], rel["via"]) == ("answer", ["hit"])
+
+
+def test_page_linking_to_a_match_is_related(store):
+    page(store / "pages", "hit", body="watch\n")
+    page(store / "pages", "pointer", body="see [it](./hit.md#top)\n")
+    [rel] = by_match(mf.find(str(store), ["watch"]), "link")
+    assert (rel["slug"], rel["via"]) == ("pointer", ["hit"])
+
+
+def test_direct_match_is_never_related_and_limit_keeps_direct(store):
+    page(store / "pages", "a", body="watch [b](b.md) [c](c.md)\n", last="2026-02-01")
+    page(store / "pages", "b", body="watch\n", last="2026-01-01")
+    page(store / "pages", "c", body="nothing\n")
+    res = mf.find(str(store), ["watch"], limit=1)
+    assert slugs(by_match(res, "terms")) == ["b"]
+    assert slugs(by_match(res, "link")) == []
+    full = mf.find(str(store), ["watch"], limit=0)
+    assert sorted(slugs(by_match(full, "terms"))) == ["a", "b"]
+    assert slugs(by_match(full, "link")) == ["c"]
+
+
+def test_related_zero_is_todays_output_and_n_caps_it(store):
+    links = " ".join(f"[x](r{i}.md)" for i in range(5))
+    page(store / "pages", "hit", body=f"watch {links}\n")
+    for i in range(5):
+        page(store / "pages", f"r{i}", body="none\n")
+    off = mf.find(str(store), ["watch"], related=0)
+    assert slugs(off) == ["hit"] and all(r["match"] == "terms" for r in off)
+    assert len(by_match(mf.find(str(store), ["watch"]), "link")) == 3
+    assert len(by_match(mf.find(str(store), ["watch"], related=2), "link")) == 2
+
+
+def test_hub_boost_breaks_ties_but_name_tier_wins(store):
+    page(store / "pages", "plain", body="watch\n", last="2026-06-01")
+    page(store / "pages", "hub", body="watch\n", last="2026-01-01")
+    page(store / "pages", "p1", body="watch [h](hub.md)\n")
+    page(store / "pages", "p2", body="watch [h](hub.md)\n")
+    page(store / "pages", "named", name="Watch", body="x\n")
+    order = slugs(by_match(mf.find(str(store), ["watch"], limit=0), "terms"))
+    assert order[0] == "named"
+    assert order.index("hub") < order.index("plain")
+
+
+def test_links_to_urls_missing_and_archived_pages_are_ignored(store):
+    page(
+        store / "pages",
+        "hit",
+        body="watch [u](https://x.test/y.md) [m](nope.md) [a](archive/old.md) [up](../etc.md)\n",
+    )
+    page(store / "pages" / "archive", "old", body="stale\n")
+    assert by_match(mf.find(str(store), ["watch"]), "link") == []
+    res = mf.find(str(store), ["watch"], archive=True)
+    assert [r["path"] for r in by_match(res, "link")] == ["pages/archive/old.md"]
+
+
+def test_repo_filter_applies_to_related_pages(store):
+    page(store / "pages", "hit", labels=["repo:gaal"], body="watch [a](in.md) [b](out.md)\n")
+    page(store / "pages", "in", labels=["repo:gaal"], body="x\n")
+    page(store / "pages", "out", body="x\n")
+    res = mf.find(str(store), ["watch"], repo="gaal")
+    assert slugs(by_match(res, "link")) == ["in"]
+
+
+def test_json_carries_match_and_via(store, capsys):
+    page(store / "pages", "hit", body="watch [a](ans.md)\n")
+    page(store / "pages", "ans", body="x\n")
+    assert mf.main(["watch", "--json", "--store", str(store)]) == 0
+    direct, rel = json.loads(capsys.readouterr().out)
+    assert direct["match"] == "terms" and "via" not in direct
+    assert (rel["match"], rel["via"]) == ("link", ["hit"])
+
+
+def test_text_output_lists_related_under_a_heading(store, capsys):
+    page(store / "pages", "hit", body="watch [a](ans.md)\n")
+    page(store / "pages", "ans", body="x\n")
+    assert mf.main(["watch", "--store", str(store)]) == 0
+    out = capsys.readouterr().out
+    assert out.index("pages/hit.md") < out.index("related:") < out.index("pages/ans.md")
+    assert "via hit" in out
+    assert mf.main(["watch", "--related", "-1", "--store", str(store)]) == 2
+
+
+def test_no_direct_match_means_no_related_and_exit_one(store):
+    page(store / "pages", "a", body="[b](b.md)\n")
+    page(store / "pages", "b", body="x\n")
+    assert mf.find(str(store), ["absent"]) == []
+    assert mf.main(["absent", "--store", str(store)]) == 1
+
+
+def test_find_reads_each_page_file_once(store, monkeypatch):
+    page(store / "pages", "hit", body="watch [a](ans.md)\n")
+    page(store / "pages", "ans", body="x\n")
+    reads = []
+    real = mf.read_page
+    monkeypatch.setattr(mf, "read_page", lambda p: reads.append(p) or real(p))
+    mf.find(str(store), ["watch"])
+    assert len(reads) == len(set(reads)) == 2

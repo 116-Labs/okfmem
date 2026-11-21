@@ -148,6 +148,26 @@ def test_remote_user_type_is_hidden_whatever_its_case_or_quoting(store, tmp_path
         assert "me-d" not in [r["slug"] for r in json.loads(text)]
 
 
+def test_mcp_find_returns_related_pages_and_honours_related_zero(store, tmp_path):
+    page(tmp_path / "pages", "gaal-a", ["repo:gaal"], body="watch [x](gaal-x.md)\n")
+    page(tmp_path / "pages", "gaal-x", ["repo:gaal"], body="nothing\n")
+    _, text = call(store, mm.LOCAL, "find", {"terms": ["watch"], "repo": "gaal"})
+    rel = [r for r in json.loads(text) if r["match"] == "link"]
+    assert [(r["slug"], r["via"]) for r in rel] == [("gaal-x", ["gaal-a"])]
+    _, text = call(store, mm.LOCAL, "find", {"terms": ["watch"], "related": 0})
+    assert all(r["match"] == "terms" for r in json.loads(text))
+    assert call(store, mm.LOCAL, "find", {"terms": ["watch"], "related": -1})[0]
+
+
+def test_scoped_find_never_shows_a_hidden_page_or_slug_in_via(store, tmp_path):
+    page(tmp_path / "pages", "gaal-a", ["repo:gaal"], body="watch [h](hive-b.md) [g](gaal-x.md)\n")
+    page(tmp_path / "pages", "gaal-x", ["repo:gaal"], body="nothing\n")
+    page(tmp_path / "pages", "hive-b", ["repo:hive"], body="watch [x](gaal-x.md)\n")
+    _, text = call(store, remote(), "find", {"terms": ["watch"]})
+    res = json.loads(text)
+    assert [(r["slug"], r.get("via")) for r in res] == [("gaal-a", None), ("gaal-x", ["gaal-a"])]
+
+
 def test_star_allows_every_label_but_not_an_unlabelled_page(store, tmp_path):
     page(tmp_path / "pages", "bare-e")
     assert call(store, remote(("*",)), "read_page", {"slug": "bare-e"})[0]

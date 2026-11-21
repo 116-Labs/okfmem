@@ -34,6 +34,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.append(os.path.join(HERE, "plugins"))
 from memory_frontmatter import (  # noqa: E402
+    LINK_RE,
     find_frontmatter,
     merge_labels,
     normalize_label,
@@ -54,7 +55,6 @@ FORMAT = 1
 MANIFEST = "manifest.json"
 # Decay state is the exporter's own; the importer's decay starts fresh.
 PER_PERSON_RE = re.compile(r"^(?:last_accessed|access_count|pinned)[ \t]*:")
-LINK_RE = re.compile(r"\[[^\]]*\]\(\s*<?([^)\s<>#]+\.md)(?:#[^)\s>]*)?>?\s*\)")
 
 
 def _never_exported(name):

@@ -129,15 +129,21 @@ def tool_find(store, scope, args):
     limit = args.get("limit", 10)
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
         raise ToolError("limit must be 0 (no cap) or more")
+    related = args.get("related", memory_find.RELATED_DEFAULT)
+    if isinstance(related, bool) or not isinstance(related, int) or related < 0:
+        raise ToolError("related must be 0 (off) or more")
     if scope.unrestricted:
-        return memory_find.find(store, terms, repo, False, limit)
-    hits = memory_find.find(store, terms, repo, False, 0)
-    out = []
-    for r in hits:
-        page = _load_page(store, r["slug"])
-        if page and scope.page_ok(page[1], page[2]):
-            out.append(r)
-    return out[:limit] if limit else out
+        return memory_find.find(store, terms, repo, False, limit, related)
+    # Hidden pages are dropped before ranking, so none reaches a result or `via`.
+    return memory_find.find(
+        store,
+        terms,
+        repo,
+        False,
+        limit,
+        related,
+        visible=lambda p: bool(SLUG_RE.match(p["slug"])) and scope.page_ok(p["labels"], p["type"]),
+    )
 
 
 def tool_read_page(store, scope, args):
@@ -228,11 +234,14 @@ _STR = {"type": "string"}
 TOOLS = {
     "find": (
         tool_find,
-        "Rank durable pages by search terms (same ranking as `okfmem find`).",
+        "Rank durable pages by search terms (same ranking as `okfmem find`). "
+        "After the direct matches (`match: terms`) it lists up to `related` pages "
+        "(default 3, 0 is off) one link away from them (`match: link`, `via`).",
         {
             "terms": {"type": "array", "items": _STR},
             "repo": _STR,
             "limit": {"type": "integer"},
+            "related": {"type": "integer"},
         },
         ["terms"],
     ),

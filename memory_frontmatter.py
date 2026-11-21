@@ -22,6 +22,7 @@ FIELD_RE = re.compile(r"^([A-Za-z_][\w-]*):\s?(.*)$")
 LABELS_RE = re.compile(r"^labels:\s*(.*?)\s*$")
 BLOCK_ITEM_RE = re.compile(r"^\s+-(?:\s+(.*?))?\s*$|^-(?:\s+(.*?))?\s*$")
 LABEL_RE = re.compile(r"^(?:[a-z0-9_.-]+:)?[a-z0-9_.-]+$")
+LINK_RE = re.compile(r"\[[^\]]*\]\(\s*<?([^)\s<>#]+\.md)(?:#[^)\s>]*)?>?\s*\)")
 
 NAMESPACES = ("repo", "org", "stack", "topic")
 SCOPES = ("evergreen", "transient")
