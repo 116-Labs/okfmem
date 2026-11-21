@@ -68,18 +68,18 @@ def _is_stub_state(path, name):
         text = _read(path)
     except OSError:
         return True
-    fm = find_frontmatter(text)
-    body = text[fm[2]:].lstrip() if fm else text
-    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
-    if fm and lines[:1] == ["---"]:
-        lines = lines[1:]
-    seeded = (
-        f"# STATE — {name}",
-        "No session saved yet. Run `/okfmem-save` at the end of a session to populate this.",
+    text = text.replace("\r\n", "\n")
+    if not text.strip():
+        return True
+    n = re.escape(name)
+    seed = (
+        rf"---\nname: {n}-state\ndescription: Active-state snapshot for {n}\n"
+        rf"type: state\n(?:modified: \d{{4}}-\d{{2}}-\d{{2}}\n)?---\n\n"
+        rf"# STATE — {n}\n\n?"
+        r"(?:No session saved yet\. Run `/okfmem-save` at the end of a "
+        r"session to populate this\.\n)?"
     )
-    return bool(lines) and lines[0] == seeded[0] and all(
-        ln in seeded for ln in lines
-    ) or not lines
+    return re.fullmatch(seed, text) is not None
 
 
 def _linked_project(store, claude_projects, root):
