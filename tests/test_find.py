@@ -204,10 +204,25 @@ def test_direct_match_is_never_related_and_limit_keeps_direct(store):
     page(store / "pages", "c", body="nothing\n")
     res = mf.find(str(store), ["watch"], limit=1)
     assert slugs(by_match(res, "terms")) == ["b"]
-    assert slugs(by_match(res, "link")) == []
+    assert slugs(by_match(res, "link")) == ["c"]
     full = mf.find(str(store), ["watch"], limit=0)
     assert sorted(slugs(by_match(full, "terms"))) == ["a", "b"]
     assert slugs(by_match(full, "link")) == ["c"]
+
+
+def test_limit_caps_direct_matches_but_not_related_seeds(store):
+    page(store / "pages", "first", body="needle needle\n")
+    page(store / "pages", "second", body="needle [answer](answer.md)\n")
+    page(store / "pages", "answer", body="different words\n")
+    res = mf.find(str(store), ["needle"], limit=1)
+    assert slugs(by_match(res, "terms")) == ["first"]
+    assert slugs(by_match(res, "link")) == ["answer"]
+
+
+def test_absolute_link_targets_are_not_local_edges(store):
+    page(store / "pages", "hit", body="needle [outside](/answer.md)\n")
+    page(store / "pages", "answer", body="different words\n")
+    assert by_match(mf.find(str(store), ["needle"]), "link") == []
 
 
 def test_related_zero_is_todays_output_and_n_caps_it(store):

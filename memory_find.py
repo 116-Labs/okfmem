@@ -112,7 +112,7 @@ def page_links(page, archive=False):
     base = "archive" if page["archived"] else ""
     out = set()
     for target in LINK_RE.findall(page["body"]):
-        if "://" in target:
+        if "://" in target or target.startswith("/"):
             continue
         head, _, name = posixpath.normpath(posixpath.join(base, target)).rpartition("/")
         if head not in ("", "archive") or (head and not archive):
@@ -177,12 +177,12 @@ def find(
             direct[k]["slug"],
         ),
     )
+    top = ranked[:RELATED_FROM]
     if limit:
         ranked = ranked[:limit]
     results = [direct[k] for k in ranked]
     if not related or not results:
         return results
-    top = ranked[:RELATED_FROM]
     linked = []
     for key, (rel, page) in pages.items():
         if key in direct:
