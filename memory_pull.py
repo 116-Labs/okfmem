@@ -48,6 +48,7 @@ import hashlib
 import json
 import os
 import re
+import select
 import subprocess
 import sys
 import time
@@ -59,6 +60,11 @@ import memory_sync as ms  # reuse _git / lock helpers — one lock, one lock fil
 # Keep network calls short: this may run on a SessionStart hook path and must
 # never make a session wait meaningfully long for a dead network.
 DEFAULT_TIMEOUT = 30
+
+# Seconds to wait for stdin's first byte, and the cap on the whole stdin read:
+# an open pipe with no writer must never hang the pull (#247).
+STDIN_READ_TIMEOUT = 0.2
+STDIN_READ_DEADLINE = 1.0
 
 
 def _safe_git(store, *args, timeout=DEFAULT_TIMEOUT, env=None):
@@ -472,11 +478,73 @@ def record_session_start(store, session_id, cwd=None):
     return session_path
 
 
+def _stdin_fd(stream):
+    try:
+        return stream.fileno()
+    except (AttributeError, OSError, ValueError):  # io.UnsupportedOperation is an OSError
+        return None
+
+
+def _stdin_has_data(stream, timeout=STDIN_READ_TIMEOUT):
+    """True when a read would not block forever: data is ready, or the stream
+    has no descriptor / is a file. An idle open pipe returns False (#247)."""
+    fd = _stdin_fd(stream)
+    if fd is None:
+        return True
+    if os.name == "nt":
+        try:
+            import ctypes
+            import msvcrt
+            from ctypes import wintypes
+            kernel32 = ctypes.windll.kernel32
+            kernel32.GetFileType.argtypes = [wintypes.HANDLE]
+            kernel32.PeekNamedPipe.argtypes = [
+                wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+            handle = msvcrt.get_osfhandle(fd)
+            if kernel32.GetFileType(handle) != 3:  # not a pipe: disk/char never hang
+                return True
+            avail = wintypes.DWORD(0)
+            end = time.monotonic() + timeout
+            while True:
+                if not kernel32.PeekNamedPipe(handle, None, 0, None,
+                                              ctypes.byref(avail), None):
+                    return False  # broken pipe: nothing more will arrive
+                if avail.value > 0:
+                    return True
+                if time.monotonic() >= end:
+                    return False
+                time.sleep(0.015)
+        except (OSError, ValueError, AttributeError):
+            return False
+    try:
+        ready, _, _ = select.select([fd], [], [], timeout)
+    except (OSError, ValueError):
+        return False
+    return bool(ready)
+
+
+def _read_stdin_bounded(stream, deadline=STDIN_READ_DEADLINE):
+    fd = _stdin_fd(stream)
+    if fd is None:
+        return stream.read()
+    end = time.monotonic() + deadline
+    chunks = []
+    while time.monotonic() < end and _stdin_has_data(stream):
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
 def _read_stdin_session_payload():
     if sys.stdin is None or sys.stdin.isatty():
         return {}
     try:
-        raw = sys.stdin.read()
+        if not _stdin_has_data(sys.stdin):
+            return {}
+        raw = _read_stdin_bounded(sys.stdin)
         if not raw:
             return {}
         data = json.loads(raw)
