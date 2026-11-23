@@ -339,6 +339,7 @@ def _spawn_pull(store, cwd, **popen_kw):
                             **popen_kw)
 
 
+@pytest.mark.os_real
 def test_pull_open_idle_stdin_pipe_exits_zero(tmp_path):
     _, store = _seed(tmp_path)
     p = _spawn_pull(store, str(tmp_path), stdin=subprocess.PIPE)
@@ -349,6 +350,7 @@ def test_pull_open_idle_stdin_pipe_exits_zero(tmp_path):
         p.communicate()
 
 
+@pytest.mark.os_real
 def test_pull_unclosed_partial_stdin_exits_zero(tmp_path):
     _, store = _seed(tmp_path)
     p = _spawn_pull(store, str(tmp_path), stdin=subprocess.PIPE)
@@ -361,6 +363,7 @@ def test_pull_unclosed_partial_stdin_exits_zero(tmp_path):
         p.communicate()
 
 
+@pytest.mark.os_real
 def test_pull_devnull_and_file_stdin_exit_zero(tmp_path):
     _, store = _seed(tmp_path)
     p = _spawn_pull(store, str(tmp_path), stdin=subprocess.DEVNULL)
@@ -374,6 +377,7 @@ def test_pull_devnull_and_file_stdin_exit_zero(tmp_path):
         p.communicate()
 
 
+@pytest.mark.os_real
 def test_pull_closed_json_payload_records_session_start(tmp_path, monkeypatch):
     import json as _json
 
@@ -405,6 +409,7 @@ def test_read_stdin_session_payload_parses_stringio(monkeypatch):
     assert mp._read_stdin_session_payload() == {"session_id": "s1"}
 
 
+@pytest.mark.os_real
 def test_stdin_has_data_false_for_idle_pipe_true_for_written():
     r, w = os.pipe()
     try:
