@@ -39,6 +39,9 @@ Shares its lockfile (`<store>/.git/okfmem-sync.lock`, #27) and git helpers with
 memory_sync.py so a concurrent `okfmem sync` and `okfmem pull` on the same
 store serialize instead of racing.
 
+A pull that brought in commits recompiles views/* afterwards (#249); --no-views
+skips that.
+
 Store location: --store, else $OKFMEM_STORE, else ~/okfmem-store. Every store
 attached in its registry.json `stores` list (#139) is pulled the same way
 afterwards, each on its own: one failing store never stops the others.
@@ -320,6 +323,25 @@ def pull_attached(store, timeout=DEFAULT_TIMEOUT):
         except Exception as e:
             out.append((a, _failed(f"unexpected error; skipped ({e}).")))
     return out
+
+
+def refresh_pulled_views(store, res, attached):
+    """Recompile views/* of every store a pull changed (#249). A home view also
+    lists attached stores' pages, so an attached pull refreshes it too. Writes
+    only under the git-ignored views/; never commits, pushes or archives."""
+    changed = [a["path"] for a, r in attached if r.get("pulled")]
+    if not res.get("pulled") and not changed:
+        return
+    try:
+        engine = os.path.dirname(os.path.realpath(__file__))
+        if engine not in sys.path:
+            sys.path.insert(0, engine)
+        from memory_consolidate import _refresh_all_views
+
+        for path in dict.fromkeys([store, *changed]):
+            _refresh_all_views(path)
+    except Exception:
+        pass  # fail-open: a view refresh never fails a pull
 
 
 def unlinked_repo_notice(store):
@@ -605,6 +627,8 @@ def main():
                          "unlinked repo is the failure it exists to catch")
     ap.add_argument("--session", default=None,
                     help="session ID for writing baseline record in .okfmem/sessions/<session_id>.json")
+    ap.add_argument("--no-views", action="store_true",
+                    help="fetch only: do not recompile views/ after new commits")
     args = ap.parse_args()
 
     res = pull_store(args.store, token=ms.store_token())
@@ -614,6 +638,9 @@ def main():
     for a, r in attached:
         if not args.quiet or r.get("auth_failed") or r.get("token_clash"):
             print(f"okfmem pull [{a['name']}]: {r['reason']}")
+
+    if not args.no_views:
+        refresh_pulled_views(args.store, res, attached)
 
     notice = unlinked_repo_notice(args.store)
     if notice:
