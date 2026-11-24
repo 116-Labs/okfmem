@@ -407,38 +407,66 @@ def _existing_page(cap):
     (cap.store / "pages" / "runner-image.md").write_text(text)
 
 
+def _reply_file(cap):
+    return json.loads(next((cap.store / ".okfmem" / "capture" / "jobs").glob("*.result.json")).read_text())
+
+
 @pytest.mark.parametrize("bad", ["traversal", "excerpt", "ninth", "big"])
-def test_invalid_capture_reply_is_rejected_whole_and_nothing_is_written(cap, bad):
+def test_reply_with_an_invalid_page_keeps_the_valid_pages_and_state_and_records_the_drop(cap, bad):
     _existing_page(cap)
     cap.config(pages_cap_bytes=10)
-    before = {p.name: p.read_bytes() for p in (cap.store / "pages").iterdir()}
-    replies = {
-        "traversal": reply(page(), page(slug="../x")),
-        "excerpt": reply(page(), page(slug="runner-image", action="update")),
-        "ninth": reply(*[page(slug=f"p{i}") for i in range(9)]),
-        "big": reply(page(), page(slug="huge", body="x" * 30 * 1024)),
-    }
+    state = {k: "x" for k in mc.STATE_SECTIONS}
+    pages = {
+        "traversal": [page(), page(slug="../x")],
+        "excerpt": [page(), page(slug="runner-image", action="update")],
+        "ninth": [page(slug=f"p{i}") for i in range(9)],
+        "big": [page(), page(slug="huge", body="x" * 30 * 1024)],
+    }[bad]
     path = cap.transcript([user("the runner image pinning rule changed", cap.repo)])
     cap.job(path, focus="runner image pinning")
-    cap.respond([{"reply": replies[bad], "cost": 0.1}])
+    cap.respond([{"reply": reply(*pages, state=state), "cost": 0.1}])
     mc.run_worker(str(cap.store))
-    assert len(cap.calls()) == 1
+    [job] = cap.jobs()
+    assert job["status"] == "captured", job.get("error")
+    result = _reply_file(cap)
+    assert len(result["reply"]["pages"]) == len(pages) - 1 and result["reply"]["state"] == state
+    assert len(job["dropped"]) == 1 and result["dropped"] == job["dropped"]
+    if bad == "excerpt":
+        assert "excerpt" in job["dropped"][0]
+
+
+def test_reply_with_nothing_usable_is_rejected_whole(cap):
+    path = cap.transcript([user("decided X", cap.repo)])
+    cap.job(path, focus="X")
+    cap.respond([{"reply": reply(page(slug="../x"), state=None), "cost": 0.1}])
+    mc.run_worker(str(cap.store))
     [job] = cap.jobs()
     assert job["status"] == "queued" and job["attempts"] == 1 and "rejected" in job["error"]
     assert not list((cap.store / ".okfmem" / "capture" / "jobs").glob("*.result.json"))
-    assert {p.name: p.read_bytes() for p in (cap.store / "pages").iterdir()} == before
     assert cap.ledger_offset() is None
-    if bad == "excerpt":
-        assert "excerpt" in job["error"]
 
 
-def test_capture_input_lists_non_candidate_slugs_and_create_of_one_is_rejected(cap):
+def test_create_of_a_full_candidate_is_applied_as_an_update(cap):
+    _existing_page(cap)
+    path = cap.transcript([user("the runner image pinning rule changed", cap.repo)])
+    cap.job(path, focus="runner image pinning")
+    state = {k: "x" for k in mc.STATE_SECTIONS}
+    cap.respond([{"reply": reply(page(slug="runner-image", action="create"), state=state), "cost": 0.1}])
+    mc.run_worker(str(cap.store))
+    [job] = cap.jobs()
+    assert job["status"] == "captured" and not job["dropped"]
+    result = _reply_file(cap)
+    assert [(p["slug"], p["action"]) for p in result["reply"]["pages"]] == [("runner-image", "update")]
+    assert result["reply"]["state"] == state
+
+
+def test_capture_input_lists_non_candidate_slugs_and_create_of_one_is_dropped_alone(cap):
     unrelated = ("---\nname: Zebra notes\ndescription: zebra\ntype: project\n"
                  "labels: [repo:other]\n---\n\n# Zebra notes\n\nzebra\n")
     (cap.store / "pages" / "runner-image-pin.md").write_text(unrelated)
     path = cap.transcript([user("we decided to drop the cache", cap.repo)])
     cap.job(path, focus="drop the cache")
-    cap.respond([{"reply": reply(page(slug="runner-image-pin")), "cost": 0.1}])
+    cap.respond([{"reply": reply(page(slug="runner-image-pin"), page(slug="cache-drop")), "cost": 0.1}])
     mc.run_worker(str(cap.store))
     [call] = cap.calls()
     candidates, others = call["stdin"].split("## Candidate pages", 1)[1].split(
@@ -446,8 +474,129 @@ def test_capture_input_lists_non_candidate_slugs_and_create_of_one_is_rejected(c
     assert "runner-image-pin" not in candidates
     assert "runner-image-pin" in others.split("## Transcript slice", 1)[0]
     [job] = cap.jobs()
-    assert job["status"] == "queued" and "overwrite an existing page" in job["error"]
+    assert job["status"] == "captured" and "overwrite an existing page" in job["dropped"][0]
+    assert [p["slug"] for p in _reply_file(cap)["reply"]["pages"]] == ["cache-drop"]
     assert (cap.store / "pages" / "runner-image-pin.md").read_text() == unrelated
+
+
+def test_focus_naming_an_existing_page_feeds_it_in_full(cap):
+    _existing_page(cap)
+    path = cap.transcript([user("zebra quokka", cap.repo)])
+    cap.job(path, focus="- update runner-image with the new pin rule")
+    cap.respond([{"reply": reply(page(slug="runner-image", action="update")), "cost": 0.1}])
+    mc.run_worker(str(cap.store))
+    assert "### runner-image (full)" in cap.calls()[0]["stdin"]
+    assert cap.jobs()[0]["status"] == "captured"
+
+
+def test_focus_job_gets_the_focus_budget_and_a_plain_job_keeps_the_default(cap):
+    path = cap.transcript([user("decided X", cap.repo)])
+    cap.job(path, focus="X")
+    cap.respond([{"reply": reply(), "cost": 0.45}])
+    mc.run_worker(str(cap.store))
+    assert float(_flag(cap.calls()[0]["argv"], "--max-budget-usd")) == pytest.approx(
+        mc.DEFAULTS["focus_budget_usd"])
+    assert mc.DEFAULTS["focus_budget_usd"] > 1.0 and cap.jobs()[0]["status"] == "captured"
+
+
+def test_budget_exceeded_retries_once_on_the_focus_and_the_last_turns(cap):
+    turns = [user(f"turn-{i:03d} decided things", cap.repo) for i in range(mc.NARROW_TURNS + 20)]
+    path = cap.transcript(turns)
+    cap.job(path, focus="keep this")
+    cap.config(focus_budget_usd=0.5)
+    cap.respond([{"subtype": "error_max_budget_usd", "exit": 1, "cost": 0.49},
+                 {"reply": reply(), "cost": 0.2}])
+    mc.run_worker(str(cap.store))
+    first, second = cap.calls()
+    assert "turn-001" in first["stdin"] and "turn-001" not in second["stdin"]
+    assert "turn-059" in second["stdin"] and "keep this" in second["stdin"]
+    [job] = cap.jobs()
+    assert job["status"] == "captured" and job["narrowed"] is True
+
+
+def test_a_second_budget_overrun_is_not_retried_again(cap):
+    path = cap.transcript([user("decided X", cap.repo)])
+    cap.job(path, focus="X")
+    cap.respond([{"subtype": "error_max_budget_usd", "exit": 1, "cost": 0.1}])
+    mc.run_worker(str(cap.store))
+    assert len(cap.calls()) == 2
+    assert cap.jobs()[0]["status"] == "queued" and cap.jobs()[0]["attempts"] == 1
+
+
+def _fail(cap, job_path, error="job budget exhausted"):
+    data = json.loads(Path(job_path).read_text())
+    data.update(status="failed", error=error)
+    Path(job_path).write_text(json.dumps(data))
+    return data["request_id"]
+
+
+def test_a_failed_focus_job_is_announced_once_naming_project_time_reason_and_retry(cap):
+    path = cap.transcript([user("decided X", cap.repo)])
+    job, jpath = cap.job(path, focus="X")
+    plain, ppath = cap.job(path)
+    rid = _fail(cap, jpath)
+    _fail(cap, ppath)
+    [line] = mc.failed_notices(str(cap.store))
+    assert "proj" in line and job["created"] in line and "job budget exhausted" in line
+    assert f"okfmem capture --retry {rid}" in line
+    assert mc.failed_notices(str(cap.store)) == []
+
+
+def test_many_failed_saves_are_capped_with_a_tally(cap):
+    path = cap.transcript([user("decided X", cap.repo)])
+    for _ in range(mc.MAX_NOTICES + 2):
+        _fail(cap, cap.job(path, focus="X")[1])
+    lines = mc.failed_notices(str(cap.store))
+    assert len(lines) == mc.MAX_NOTICES + 1 and "2 more" in lines[-1] and "--retry-failed" in lines[-1]
+
+
+def test_pull_prints_the_failed_save_notice_even_when_quiet(cap, capsys, monkeypatch):
+    import memory_pull
+
+    path = cap.transcript([user("decided X", cap.repo)])
+    _fail(cap, cap.job(path, focus="X")[1])
+    monkeypatch.setattr(sys, "argv", ["okfmem-pull", "--quiet", "--store", str(cap.store)])
+    monkeypatch.setattr(memory_pull, "_read_stdin_session_payload", lambda: {})
+    with pytest.raises(SystemExit):
+        memory_pull.main()
+    assert "your save of proj" in capsys.readouterr().out
+
+
+def test_retry_requeues_a_failed_job_with_its_focus_and_a_replay_writes_no_duplicate(cap, capsys):
+    _existing_page(cap)
+    path = cap.transcript([user("zebra quokka", cap.repo)])
+    _, jpath = cap.job(path, focus="- update runner-image")
+    rid = _fail(cap, jpath)
+    assert mc.main(["--retry", rid, "--store", str(cap.store)]) == 0
+    assert json.loads(capsys.readouterr().out)["request_ids"] == [rid]
+    [job] = cap.jobs()
+    assert job["status"] == "queued" and job["focus"] == "- update runner-image" and job["attempts"] == 0
+    cap.respond([{"reply": reply(page(slug="runner-image", action="create")), "cost": 0.1}])
+    mc.run_worker(str(cap.store))
+    assert cap.jobs()[0]["status"] == "captured"
+    assert [(p["slug"], p["action"]) for p in _reply_file(cap)["reply"]["pages"]] == [("runner-image", "update")]
+
+
+def test_retry_failed_requeues_only_failed_focus_jobs_of_the_named_project(cap, capsys):
+    path = cap.transcript([user("decided X", cap.repo)])
+    mine = _fail(cap, cap.job(path, focus="X")[1])
+    _fail(cap, cap.job(path)[1])
+    other, opath = cap.job(path, focus="Y")
+    data = json.loads(Path(opath).read_text())
+    data.update(status="failed", project="elsewhere")
+    Path(opath).write_text(json.dumps(data))
+    assert mc.main(["--retry-failed", "--project", "proj", "--store", str(cap.store)]) == 0
+    assert json.loads(capsys.readouterr().out)["request_ids"] == [mine]
+    assert mc.main(["--retry", other["request_id"] + "x", "--store", str(cap.store)]) == 4
+
+
+def test_job_prints_the_status_of_one_job(cap, capsys):
+    path = cap.transcript([user("decided X", cap.repo)])
+    _, jpath = cap.job(path, focus="X")
+    rid = _fail(cap, jpath, "boom")
+    assert mc.main(["--job", rid, "--store", str(cap.store)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "failed" and out["error"] == "boom"
 
 
 def test_update_of_a_candidate_given_in_full_is_accepted_with_its_hash(cap):

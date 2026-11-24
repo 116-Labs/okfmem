@@ -352,6 +352,20 @@ def unlinked_repo_notice(store):
         return None
 
 
+def failed_save_notices(store):
+    """One line per failed user-requested save, once each; printed even under `--quiet`
+    because a silent failed save loses the user's notes. Never raises."""
+    try:
+        engine = os.path.dirname(os.path.realpath(__file__))
+        if engine not in sys.path:
+            sys.path.insert(0, engine)
+        import memory_capture as mc
+
+        return mc.failed_notices(os.path.abspath(os.path.expanduser(store)))
+    except Exception:
+        return []
+
+
 def prune_sessions(store, max_age_days=7, now=None):
     """Prune session records in <store>/.okfmem/sessions older than max_age_days."""
     sess_dir = os.path.join(store, ".okfmem", "sessions")
@@ -618,6 +632,9 @@ def main():
     notice = unlinked_repo_notice(args.store)
     if notice:
         print(notice)
+
+    for line in failed_save_notices(args.store):
+        print(line)
 
     check_inbox_nudge(args.store, quiet=args.quiet)
 

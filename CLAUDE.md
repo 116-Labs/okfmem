@@ -88,6 +88,8 @@ okfmem inbox dump --out DIR   # read-only: every pending page -> DIR/pending.jso
 okfmem inbox apply DIR/decisions.json [--yes]   # validate, [y/N], write, lease-delete refs, sync
 okfmem capture --now --harness claude-code --session ID   # queue a job; a detached worker triages + captures on a tool-less `claude -p`
 okfmem capture --record --harness codex --session ID --upto N   # after a foreground save: the ledger covers the session to N
+okfmem capture --retry ID     # requeue one failed save; --retry-failed [--project P] requeues every failed focus job
+okfmem capture --job ID       # one job's status as JSON (the save skill's once-only check)
 
 python3 scripts/gate_test.py     # pool test gate: win32 runs `-m os_real` serially, other platforms the full suite (`-n auto`)
 OKFMEM_TEST_SLICE=full python3 scripts/gate_test.py   # force the full suite anywhere (`os_real` forces the slice)

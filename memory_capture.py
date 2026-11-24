@@ -7,6 +7,8 @@
     okfmem capture --catch-up [--store PATH]
     okfmem capture --record --harness H [--session ID] [--transcript PATH] --upto N
                    [--outcome saved|skipped] [--store PATH]
+    okfmem capture --retry REQUEST_ID | --retry-failed [--project P] [--store PATH]
+    okfmem capture --job REQUEST_ID [--store PATH]   # one job's status as JSON
     okfmem capture --worker [--store PATH]        # internal: started detached by a trigger
 
 A trigger writes an immutable job to <store>/.okfmem/capture/jobs/ and starts a
@@ -47,10 +49,13 @@ DEFAULTS = {
     "cap_bytes": 200_000,
     "pages_cap_bytes": 60_000,
     "budget_usd": 0.50,
+    "focus_budget_usd": 1.50,
     "run_budget_usd": 2.00,
     "max_chunks_per_job": 3,
 }
 MAX_ATTEMPTS = 3
+NARROW_TURNS = 40
+MAX_NOTICES = 5
 # Above two 600 s model calls, so a live worker between heartbeats is never stale.
 LOCK_STALE_S = 30 * 60
 RUNNER_TIMEOUT_S = 600
@@ -133,6 +138,10 @@ class CaptureError(Exception):
 
 class RunnerError(CaptureError):
     pass
+
+
+class BudgetExceeded(RunnerError):
+    """The model call stopped on its own `--max-budget-usd` cap."""
 
 
 class Rejected(CaptureError):
@@ -758,6 +767,9 @@ class Budget:
             raise JobBudgetExhausted("job budget exhausted")
         return min(self.job_left, self.run_left)
 
+    def grant(self, amount):
+        self.job_left += amount
+
     def charge(self, cost):
         self.spent += cost
         self.job_left -= cost
@@ -817,6 +829,11 @@ def drain(store, cfg, owner, seen, spent):
     return spent
 
 
+def job_budget(cfg, job):
+    base = cfg["focus_budget_usd"] if job.get("focus") else cfg["budget_usd"]
+    return base + float(job.get("budget_grant") or 0)
+
+
 def process_job(store, cfg, owner, path, job, run_left):
     if job.get("status") == "running":
         # Only a worker that died mid-job leaves this; count it so a crash cannot loop forever.
@@ -829,7 +846,7 @@ def process_job(store, cfg, owner, path, job, run_left):
             return 0.0
     job.update(status="running", updated=_utc())
     _write_json(path, job)
-    budget = Budget(cfg["budget_usd"] - float(job.get("cost_usd") or 0), run_left)
+    budget = Budget(job_budget(cfg, job) - float(job.get("cost_usd") or 0), run_left)
     try:
         _run_job(store, cfg, owner, job, budget)
     except RunBudgetReached:
@@ -858,6 +875,10 @@ def _run_job(store, cfg, owner, job, budget):
         raise CaptureError("transcript was rewritten since the job was queued")
     entry = mt.ledger_get(store, job["ledger_key"]) or {}
     start = max(int(entry.get("offset") or 0), int(job.get("cursor") or 0))
+    if job.get("replay") and not job.get("cursor"):
+        # A replayed save must not start past what a later capture already advanced the ledger to.
+        start = int(job.get("start_at") or (start if start < upto else max(0, upto - cfg["cap_bytes"])))
+    job.setdefault("start_at", start)
     chunks, outcome = 0, None
     while start < upto and chunks < cfg["max_chunks_per_job"]:
         turns, end, _ = mt.read_since(harness, transcript, start, cfg["cap_bytes"], upto=upto)
@@ -907,11 +928,25 @@ def handle_chunk(store, cfg, owner, job, turns, start, end, budget):
             return f"triage: {str(verdict.get('reason') or '').strip()[:200]}"
         heartbeat(store, owner)
     candidates = gather_candidates(store, job["project"], (focus or "") + "\n" + chunk,
-                                   cfg["pages_cap_bytes"])
+                                   cfg["pages_cap_bytes"], focus=focus)
     state = read_state(store, job["project"])
+    if job.get("narrowed"):
+        chunk = mt.render_slice(turns[-NARROW_TURNS:])
     text = _capture_input(store, job, opener, focus, chunk, state, candidates)
-    reply = _call(store, job, cfg["capture_model"], "capture.md", text, CAPTURE_SCHEMA, budget)
-    validate_capture(store, reply, job["project"], candidates)
+    try:
+        reply = _call(store, job, cfg["capture_model"], "capture.md", text, CAPTURE_SCHEMA, budget)
+    except BudgetExceeded:
+        if job.get("narrowed"):
+            raise
+        # One retry on the focus notes plus the last turns, with half a job budget more to spend.
+        extra = job_budget(cfg, job) / 2
+        job.update(narrowed=True, budget_grant=float(job.get("budget_grant") or 0) + extra)
+        budget.grant(extra)
+        text = _capture_input(store, job, opener, focus, mt.render_slice(turns[-NARROW_TURNS:]),
+                              state, candidates)
+        reply = _call(store, job, cfg["capture_model"], "capture.md", text, CAPTURE_SCHEMA, budget)
+    reply, dropped = validate_capture(store, reply, job["project"], candidates)
+    job["dropped"] = dropped
     heartbeat(store, owner)
     result = {
         "schema_version": 1,
@@ -926,6 +961,7 @@ def handle_chunk(store, cfg, owner, job, turns, start, end, budget):
         "upto": job["upto"],
         "created": _utc(),
         "reply": reply,
+        "dropped": dropped,
         "inputs": {
             "pages": {c["slug"]: {"path": c["path"], "sha256": c["sha256"],
                                   "excerpt_only": c["excerpt_only"]} for c in candidates},
@@ -1011,8 +1047,35 @@ def _terms(text, limit=12):
     return sorted(counts, key=lambda w: (-counts[w], w))[:limit]
 
 
-def gather_candidates(store, project, text, cap_bytes):
-    """Up to 8 pages ranked by memory_find's scoring; full text within `cap_bytes`."""
+def _focus_pages(store, project, focus):
+    """Paths of pages the focus names by slug, then those it matches by search alone."""
+    named = [os.path.join(store, "pages", f"{s}.md") for s in existing_slugs(store)
+             if re.search(rf"(?<![a-z0-9-]){re.escape(s)}(?![a-z0-9-])", focus.lower())]
+    return named + [p for p in _ranked_paths(store, project, focus)[:MAX_PAGES // 2] if p not in named]
+
+
+def gather_candidates(store, project, text, cap_bytes, focus=None):
+    """Up to 8 pages: the focus's own first, then memory_find's ranking; full text within `cap_bytes`."""
+    paths = _focus_pages(store, project, focus) if focus else []
+    paths += [p for p in _ranked_paths(store, project, text) if p not in paths]
+    out, used = [], 0
+    for path in paths[:MAX_PAGES]:
+        with open(path, "rb") as f:
+            raw = f.read()
+        body = raw.decode("utf-8", errors="replace")
+        entry = {"slug": os.path.basename(path)[:-3],
+                 "path": os.path.relpath(path, store).replace(os.sep, "/"),
+                 "sha256": hashlib.sha256(raw).hexdigest()}
+        if used + len(raw) <= cap_bytes:
+            used += len(raw)
+            entry.update(text=body, excerpt_only=False)
+        else:
+            entry.update(text="\n".join(body.splitlines()[:EXCERPT_LINES]), excerpt_only=True)
+        out.append(entry)
+    return out
+
+
+def _ranked_paths(store, project, text):
     terms = _terms(text)
     repo = f"repo:{project}".lower()
     ranked = []
@@ -1030,21 +1093,7 @@ def gather_candidates(store, project, text, cap_bytes):
                 tiers[3] += hit[1]
         if matched:
             ranked.append(((-matched, repo not in page["labels"], *(-t for t in tiers), page["slug"]), path))
-    out, used = [], 0
-    for _, path in sorted(ranked)[:MAX_PAGES]:
-        with open(path, "rb") as f:
-            raw = f.read()
-        text = raw.decode("utf-8", errors="replace")
-        entry = {"slug": os.path.basename(path)[:-3],
-                 "path": os.path.relpath(path, store).replace(os.sep, "/"),
-                 "sha256": hashlib.sha256(raw).hexdigest()}
-        if used + len(raw) <= cap_bytes:
-            used += len(raw)
-            entry.update(text=text, excerpt_only=False)
-        else:
-            entry.update(text="\n".join(text.splitlines()[:EXCERPT_LINES]), excerpt_only=True)
-        out.append(entry)
-    return out
+    return [path for _, path in sorted(ranked)[:MAX_PAGES]]
 
 
 def read_state(store, project):
@@ -1066,66 +1115,74 @@ def _one_line(value):
     return isinstance(value, str) and value.strip() and "\n" not in value and "\r" not in value
 
 
+def _page_problems(store, page, project, full, excerpt):
+    """Why one page cannot be written as given; a create of a full candidate is turned into an update."""
+    if not isinstance(page, dict) or set(page) != set(PAGE_KEYS):
+        return [f"does not have exactly the fields {', '.join(PAGE_KEYS)}"]
+    slug = page["slug"]
+    if not isinstance(slug, str) or not SLUG_RE.fullmatch(slug):
+        return [f"slug {slug!r} is not a kebab-case slug"]
+    problems = []
+    if page["action"] not in ("create", "update"):
+        problems.append(f"action {page['action']!r}")
+    elif page["action"] == "update" and slug not in full:
+        problems.append("update declined: " + (
+            "given only as an excerpt" if slug in excerpt else "not a candidate page"))
+    elif page["action"] == "create" and os.path.exists(os.path.join(store, "pages", f"{slug}.md")):
+        if slug in full:
+            page["action"] = "update"
+        else:
+            problems.append("create would overwrite an existing page")
+    if page["type"] not in PAGE_TYPES:
+        problems.append(f"type {page['type']!r}")
+    for key in ("name", "description"):
+        if not _one_line(page[key]):
+            problems.append(f"{key} is not one non-empty line")
+    labels = page["labels"]
+    if (not isinstance(labels, list)
+            or not all(_one_line(lb) and not set(lb) & set(",[]") for lb in labels)):
+        problems.append("labels are not a list of plain labels")
+    elif f"repo:{project}" not in labels:
+        problems.append(f"labels lack repo:{project}")
+    if not isinstance(page["body"], str) or not page["body"].strip():
+        problems.append("body is empty")
+    elif len(page["body"].encode("utf-8")) > MAX_BODY_BYTES:
+        problems.append(f"body over {MAX_BODY_BYTES} bytes")
+    return problems
+
+
 def validate_capture(store, reply, project, candidates):
-    """Raise Rejected on any violation: the whole reply is refused, nothing is written."""
+    """(repaired reply, dropped notes): bad pages are dropped and a bad state nulled so the rest
+    is still written. Rejected only when nothing in the reply is usable."""
     if not isinstance(reply, dict):
         raise Rejected("capture reply is not a JSON object")
-    problems = []
     pages = reply.get("pages")
+    if not isinstance(pages, list):
+        raise Rejected("reply rejected: pages is not a list")
     full = {c["slug"] for c in candidates if not c["excerpt_only"]}
     excerpt = {c["slug"] for c in candidates if c["excerpt_only"]}
-    if not isinstance(pages, list):
-        problems.append("pages is not a list")
-        pages = []
-    elif len(pages) > MAX_PAGES:
-        problems.append(f"{len(pages)} pages, at most {MAX_PAGES}")
-    slugs = set()
+    kept, dropped, seen = [], [], set()
     for i, page in enumerate(pages):
-        where = f"pages[{i}]"
-        if not isinstance(page, dict) or set(page) != set(PAGE_KEYS):
-            problems.append(f"{where} does not have exactly the fields {', '.join(PAGE_KEYS)}")
+        name = page["slug"] if isinstance(page, dict) and isinstance(page.get("slug"), str) else f"pages[{i}]"
+        problems = _page_problems(store, page, project, full, excerpt)
+        if not problems and page["slug"] in seen:
+            problems = ["appears twice"]
+        if not problems and len(kept) >= MAX_PAGES:
+            problems = [f"more than {MAX_PAGES} pages"]
+        if problems:
+            dropped.append(f"{name}: {'; '.join(problems)}")
             continue
-        slug = page["slug"]
-        if not isinstance(slug, str) or not SLUG_RE.fullmatch(slug):
-            problems.append(f"{where} slug {slug!r} is not a kebab-case slug")
-            continue
-        where = f"page {slug}"
-        if slug in slugs:
-            problems.append(f"{where} appears twice")
-        slugs.add(slug)
-        if page["action"] not in ("create", "update"):
-            problems.append(f"{where} action {page['action']!r}")
-        elif page["action"] == "update" and slug not in full:
-            problems.append(f"{where} update declined: " + (
-                "given only as an excerpt" if slug in excerpt else "not a candidate page"))
-        elif page["action"] == "create" and os.path.exists(os.path.join(store, "pages", f"{slug}.md")):
-            problems.append(f"{where} create would overwrite an existing page")
-        if page["type"] not in PAGE_TYPES:
-            problems.append(f"{where} type {page['type']!r}")
-        for key in ("name", "description"):
-            if not _one_line(page[key]):
-                problems.append(f"{where} {key} is not one non-empty line")
-        labels = page["labels"]
-        if (not isinstance(labels, list)
-                or not all(_one_line(lb) and not set(lb) & set(",[]") for lb in labels)):
-            problems.append(f"{where} labels are not a list of plain labels")
-        elif f"repo:{project}" not in labels:
-            problems.append(f"{where} labels lack repo:{project}")
-        if not isinstance(page["body"], str) or not page["body"].strip():
-            problems.append(f"{where} body is empty")
-        elif len(page["body"].encode("utf-8")) > MAX_BODY_BYTES:
-            problems.append(f"{where} body over {MAX_BODY_BYTES} bytes")
-    state = reply.get("state", "missing")
+        seen.add(page["slug"])
+        kept.append(page)
+    state = reply.get("state")
     if state is not None and not (isinstance(state, dict) and set(state) == set(STATE_SECTIONS)
                                   and all(isinstance(v, str) for v in state.values())):
-        problems.append("state is neither null nor the six sections")
-    if not isinstance(reply.get("summary"), str):
-        problems.append("summary is not a string")
-    extra = set(reply) - {"pages", "state", "summary"}
-    if extra:
-        problems.append(f"unexpected fields {sorted(extra)}")
-    if problems:
-        raise Rejected("reply rejected: " + "; ".join(problems[:6]))
+        dropped.append("state: neither null nor the six sections")
+        state = None
+    if dropped and not kept and state is None:
+        raise Rejected("reply rejected: " + "; ".join(dropped[:6]))
+    summary = reply.get("summary")
+    return {"pages": kept, "state": state, "summary": summary if isinstance(summary, str) else ""}, dropped
 
 
 # --- apply --------------------------------------------------------------------
@@ -1409,6 +1466,8 @@ def _record(store, job, journal):
         parts.append(f"state {state_outcome}: {state.get('reason')}")
     if held:
         parts.append("pages held: " + "; ".join(held))
+    if job.get("dropped"):
+        parts.append("pages dropped: " + "; ".join(job["dropped"]))
     outcome = "; ".join(parts)
     _advance_ledger(store, job, journal["end"], outcome)
     if state_outcome == "written" and job.get("session"):
@@ -1500,6 +1559,8 @@ def run_claude(model, prompt, input_file, schema, budget_usd, cwd):
     except (TypeError, ValueError):
         cost = 0.0
     if proc.returncode != 0 or out.get("is_error") or out.get("subtype", "success") != "success":
+        if out.get("subtype") == "error_max_budget_usd":
+            raise BudgetExceeded("claude failed: error_max_budget_usd", cost)
         raise RunnerError(f"claude failed: {out.get('subtype') or 'exit ' + str(proc.returncode)}", cost)
     reply = out.get("structured_output")
     if reply is None:
@@ -1511,6 +1572,66 @@ def run_claude(model, prompt, input_file, schema, budget_usd, cwd):
 
 
 RUNNERS = {"claude": run_claude}
+
+
+# --- failed saves -------------------------------------------------------------
+
+
+def failed_notices(store):
+    """Announce each failed focus job once: the lines to print, at most MAX_NOTICES plus a tally."""
+    fresh = [(path, job) for path, job in iter_jobs(store)
+             if job.get("status") == "failed" and job.get("focus") and not job.get("announced")]
+    fresh.sort(key=lambda pair: str(pair[1].get("updated") or ""))
+    lines = []
+    for path, job in fresh:
+        job["announced"] = _utc()
+        try:
+            _write_json(path, job)
+        except OSError:
+            continue
+        if len(lines) < MAX_NOTICES:
+            lines.append(f"okfmem: your save of {job.get('project')} at {job.get('created')} failed "
+                         f"({str(job.get('error') or 'unknown')[:120]}); "
+                         f"run `okfmem capture --retry {job['request_id']}`")
+    if len(fresh) > len(lines):
+        lines.append(f"okfmem: {len(fresh) - len(lines)} more failed saves; "
+                     "run `okfmem capture --retry-failed`")
+    return lines
+
+
+def requeue(store, path, job):
+    for key in ("error", "cursor", "outcome", "announced", "dropped", "apply_attempts"):
+        job.pop(key, None)
+    job.update(status="queued", attempts=0, cost_usd=0.0, replay=True, updated=_utc())
+    _write_json(path, job)
+    log(store, f"{job['request_id']}: requeued for retry")
+
+
+def retry_jobs(args, store):
+    jobs = iter_jobs(store)
+    if args.retry:
+        picked = [(p, j) for p, j in jobs if j["request_id"] == args.retry]
+        if not picked or picked[0][1].get("status") != "failed":
+            print(f"okfmem capture: no failed job {args.retry}", file=sys.stderr)
+            return 4
+    else:
+        picked = [(p, j) for p, j in jobs if j.get("status") == "failed" and j.get("focus")
+                  and (not args.project or j.get("project") == args.project)]
+    for path, job in picked:
+        requeue(store, path, job)
+    if picked:
+        _spawn_or_log(store)
+    print(json.dumps({"status": "requeued", "request_ids": [j["request_id"] for _, j in picked]}))
+    return 0
+
+
+def show_job(args, store):
+    for _, job in iter_jobs(store):
+        if job["request_id"] == args.job:
+            print(json.dumps({k: job.get(k) for k in ("request_id", "status", "error", "outcome", "dropped")}))
+            return 0
+    print(f"okfmem capture: no job {args.job}", file=sys.stderr)
+    return 4
 
 
 # --- status -------------------------------------------------------------------
@@ -1598,6 +1719,11 @@ def _parser():
     mode.add_argument("--now", action="store_true", help="queue one session now")
     mode.add_argument("--record", action="store_true",
                       help="mark a session covered up to --upto after a foreground save")
+    mode.add_argument("--retry", metavar="REQUEST_ID", help="requeue one failed job with its focus")
+    mode.add_argument("--retry-failed", action="store_true",
+                      help="requeue every failed focus job (narrow with --project)")
+    mode.add_argument("--job", metavar="REQUEST_ID", help="print one job's status as JSON")
+    ap.add_argument("--project", help="--retry-failed: only this project's jobs")
     ap.add_argument("--catch-up", action="store_true",
                     help="queue Claude Code sessions whose capture never ran")
     ap.add_argument("--harness", help="claude-code or codex (stdin-hook default: claude-code)")
@@ -1627,9 +1753,15 @@ def main(argv=None):
     if os.environ.get("OKFMEM_INTERNAL") == "1":
         return 0
     args = _parser().parse_args(argv)
-    if not (args.worker or args.stdin_hook or args.now or args.catch_up or args.record):
-        _parser().error("one of --worker, --stdin-hook, --now, --catch-up, or --record is required")
+    if not (args.worker or args.stdin_hook or args.now or args.catch_up or args.record
+            or args.retry or args.retry_failed or args.job):
+        _parser().error("one of --worker, --stdin-hook, --now, --catch-up, --record, --retry, "
+                        "--retry-failed, or --job is required")
     store = resolve_store(args.store)
+    if args.retry or args.retry_failed:
+        return retry_jobs(args, store)
+    if args.job:
+        return show_job(args, store)
     if args.now:
         return trigger_now(args, store)
     if args.catch_up and not args.stdin_hook:
