@@ -323,3 +323,100 @@ def test_notice_never_raises(monkeypatch):
     monkeypatch.setattr(mi, "project_link_state",
                         lambda store: (_ for _ in ()).throw(RuntimeError("boom")))
     assert mp.unlinked_repo_notice("/any/store") is None
+
+
+# --------------------------------------------------------------------------
+# stdin handling — an open pipe must never hang `okfmem pull` (#247)
+# --------------------------------------------------------------------------
+
+_PULL = [sys.executable, os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "memory_pull.py")]
+
+
+def _spawn_pull(store, cwd, **popen_kw):
+    return subprocess.Popen([*_PULL, "--quiet", "--store", str(store)], cwd=cwd,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            **popen_kw)
+
+
+@pytest.mark.os_real
+def test_pull_open_idle_stdin_pipe_exits_zero(tmp_path):
+    _, store = _seed(tmp_path)
+    p = _spawn_pull(store, str(tmp_path), stdin=subprocess.PIPE)
+    try:
+        assert p.wait(timeout=20) == 0
+    finally:
+        p.kill()
+        p.communicate()
+
+
+@pytest.mark.os_real
+def test_pull_unclosed_partial_stdin_exits_zero(tmp_path):
+    _, store = _seed(tmp_path)
+    p = _spawn_pull(store, str(tmp_path), stdin=subprocess.PIPE)
+    try:
+        p.stdin.write(b'{"session_id": "s1", "cw')
+        p.stdin.flush()
+        assert p.wait(timeout=20) == 0
+    finally:
+        p.kill()
+        p.communicate()
+
+
+@pytest.mark.os_real
+def test_pull_devnull_and_file_stdin_exit_zero(tmp_path):
+    _, store = _seed(tmp_path)
+    p = _spawn_pull(store, str(tmp_path), stdin=subprocess.DEVNULL)
+    assert p.wait(timeout=20) == 0
+    p.communicate()
+    payload = tmp_path / "in.json"
+    payload.write_text("{}", encoding="utf-8")
+    with open(payload, "rb") as f:
+        p = _spawn_pull(store, str(tmp_path), stdin=f)
+        assert p.wait(timeout=20) == 0
+        p.communicate()
+
+
+@pytest.mark.os_real
+def test_pull_closed_json_payload_records_session_start(tmp_path, monkeypatch):
+    import json as _json
+
+    seen = []
+    monkeypatch.setattr(mp, "pull_store", lambda *a, **k: {
+        "conflict": False, "reason": "ok"})
+    monkeypatch.setattr(mp, "pull_attached", lambda *a, **k: [])
+    monkeypatch.setattr(mp, "unlinked_repo_notice", lambda *a, **k: None)
+    monkeypatch.setattr(mp, "check_inbox_nudge", lambda *a, **k: None)
+    monkeypatch.setattr(mp, "record_session_start",
+                        lambda store, sid, cwd=None: seen.append((sid, cwd)))
+    r, w = os.pipe()
+    os.write(w, _json.dumps({"session_id": "s1", "cwd": "/x"}).encode())
+    os.close(w)
+    with os.fdopen(r, "r", encoding="utf-8") as stream:
+        monkeypatch.setattr(sys, "stdin", stream)
+        monkeypatch.setattr(sys, "argv", ["memory_pull", "--quiet",
+                                          "--store", str(tmp_path)])
+        with pytest.raises(SystemExit) as exc:
+            mp.main()
+    assert exc.value.code == 0
+    assert seen == [("s1", "/x")]
+
+
+def test_read_stdin_session_payload_parses_stringio(monkeypatch):
+    import io
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO('{"session_id": "s1"}'))
+    assert mp._read_stdin_session_payload() == {"session_id": "s1"}
+
+
+@pytest.mark.os_real
+def test_stdin_has_data_false_for_idle_pipe_true_for_written():
+    r, w = os.pipe()
+    try:
+        with os.fdopen(r, "rb", closefd=False) as stream:
+            assert mp._stdin_has_data(stream, timeout=0.05) is False
+            os.write(w, b"x")
+            assert mp._stdin_has_data(stream, timeout=0.05) is True
+    finally:
+        os.close(r)
+        os.close(w)
