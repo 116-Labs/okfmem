@@ -370,6 +370,24 @@ def test_codex_status_skills_available_matches_shipped_skills(tmp_path, monkeypa
     assert "skills missing" in mc.status(str(store))
 
 
+def test_retire_skill_entry_through_linked_engine_path(tmp_path):
+    # The engine is reached through a directory link (a junction on Windows
+    # without symlink rights), as in a pool checkout under a junctioned
+    # cache dir. The retired skill's target is gone, so the installed link
+    # dangles, and it must still be recognized as okfmem's and removed.
+    real = tmp_path / "real"
+    (real / "skills").mkdir(parents=True)
+    alias = tmp_path / "alias"
+    mi._make_link(str(real), str(alias))
+    engine = alias / "skills"
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    link = dest / "okfmem-reindex"
+    link.symlink_to(engine / "okfmem-reindex", target_is_directory=True)
+    assert mi._retire_skill_entry(str(link), str(engine), False) == "retire"
+    assert not link.is_symlink()
+
+
 def test_link_skills_retires_managed_okfmem_reindex_entries(tmp_path, monkeypatch):
     home, _, _ = isolated(tmp_path, monkeypatch)
     import memory_uninstall as mu

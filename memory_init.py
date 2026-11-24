@@ -1719,6 +1719,23 @@ def _link_matches_target(link, target):
 RETIRED_SKILLS = ("okfmem-reindex",)
 
 
+def _linked_parent(link):
+    """Resolved, normcased directory a symlink or junction points into.
+
+    A retired skill's target no longer exists, and Windows `realpath` of a
+    dangling link stops at the link's raw target: it does not resolve a
+    junction or symlink in that target's parents. So resolve the target's
+    parent directory, which still exists, instead of the dangling target."""
+    try:
+        target = os.readlink(link)
+    except OSError:
+        return os.path.normcase(os.path.dirname(os.path.realpath(link)))
+    if target.startswith("\\\\?\\"):
+        target = target[4:]
+    target = os.path.join(os.path.dirname(link), target)
+    return os.path.normcase(os.path.realpath(os.path.dirname(target)))
+
+
 def _retire_skill_entry(link, engine, dry_run):
     """Remove an installed entry for a retired skill, only if okfmem made it
     (engine-pointing symlink/junction, or a marked copy). Returns an action
@@ -1727,11 +1744,9 @@ def _retire_skill_entry(link, engine, dry_run):
         return None
     engine_real = os.path.normcase(os.path.realpath(engine))
     linked = os.path.islink(link) or _is_junction(link)
-    if linked:
-        real = os.path.normcase(os.path.realpath(link))
-        if os.path.dirname(real) != engine_real:
-            return None
-    elif _managed_copy_target(link) is None:
+    if linked and _linked_parent(link) != engine_real:
+        return None
+    if not linked and _managed_copy_target(link) is None:
         return None
     if not dry_run:
         try:
