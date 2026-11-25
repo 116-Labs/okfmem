@@ -157,7 +157,7 @@ def _view_context(store, reg, name):
     return _resolve_overrides(reg, None, name, None, [])
 
 
-def _refresh_all_views(store, skip=None):
+def _refresh_all_views(store, skip=None, seed_state=True):
     """Recompile every views/* dir except `skip`, the cwd's view already
     compiled: consolidate archives and relabels pages store-wide, so a view
     for a repo other than the cwd's goes stale (#142)."""
@@ -175,7 +175,8 @@ def _refresh_all_views(store, skip=None):
         try:
             org, stack = _view_context(store, reg, name)
             compile_view(store, name, org=org, stack=stack,
-                         aliases=_resolve_aliases(reg, name), reg=reg)
+                         aliases=_resolve_aliases(reg, name), reg=reg,
+                         seed_state=seed_state)
         except Exception:
             continue
 

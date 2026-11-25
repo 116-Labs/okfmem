@@ -585,8 +585,10 @@ def _make_view_state_link(store, view_dir, repo):
     shutil.copy2(state_target, link_path)
 
 
-def compile_view(store, repo, org=None, stack=None, aliases=None, reg=None):
-    """Compile dynamic MEMORY.md projection and lane indexes into views/<repo>/."""
+def compile_view(store, repo, org=None, stack=None, aliases=None, reg=None,
+                 seed_state=True):
+    """Compile dynamic MEMORY.md projection and lane indexes into views/<repo>/.
+    seed_state=False never creates a missing tracked state/<repo>.md (#249)."""
     view_dir = os.path.join(store, "views", repo)
     os.makedirs(view_dir, exist_ok=True)
 
@@ -768,8 +770,41 @@ def compile_view(store, repo, org=None, stack=None, aliases=None, reg=None):
             f.write("\n".join(r_lines) + "\n")
 
     _make_view_pages_link(store, view_dir)
+    _sync_copied_view_pages(
+        store, view_dir,
+        {p["slug"] for tier in (repo_pages, org_pages, stack_pages)
+         for p in tier if not p["store"]})
     _make_view_store_links(view_dir, attached)
-    _make_view_state_link(store, view_dir, repo)
+    if seed_state or os.path.isfile(os.path.join(store, "state", f"{repo}.md")):
+        _make_view_state_link(store, view_dir, repo)
+
+
+def _sync_copied_view_pages(store, view_dir, included):
+    """Make a copied views/<repo>/pages/ hold exactly the `included` home pages.
+    A linked dir is the store's own pages/ and is never touched (#249)."""
+    pages_dir = os.path.join(view_dir, "pages")
+    src_dir = os.path.join(store, "pages")
+    if (not os.path.isdir(pages_dir) or os.path.islink(pages_dir)
+            or _is_junction(pages_dir)
+            or os.path.normcase(os.path.realpath(pages_dir))
+            == os.path.normcase(os.path.realpath(src_dir))):
+        return
+    wanted = {f"{s}.md" for s in included}
+    for root, _dirs, files in os.walk(pages_dir):
+        for fname in files:
+            rel = os.path.relpath(os.path.join(root, fname), pages_dir)
+            if rel.replace(os.sep, "/") in wanted:
+                continue
+            try:
+                os.remove(os.path.join(root, fname))
+            except OSError:
+                pass
+    for slug in included:
+        src = os.path.join(src_dir, f"{slug}.md")
+        try:
+            shutil.copy2(src, os.path.join(pages_dir, f"{slug}.md"))
+        except OSError:
+            pass
 
 
 def _make_view_store_links(view_dir, attached):
