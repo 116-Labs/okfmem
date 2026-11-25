@@ -388,6 +388,12 @@ def test_retire_skill_entry_through_linked_engine_path(tmp_path):
     assert not link.is_symlink()
 
 
+def test_strip_extended_prefix_maps_unc_and_drive_targets():
+    assert mi._strip_extended_prefix("\\\\?\\UNC\\srv\\share\\x") == "\\\\srv\\share\\x"
+    assert mi._strip_extended_prefix("\\\\?\\C:\\x") == "C:\\x"
+    assert mi._strip_extended_prefix("rel\\x") == "rel\\x"
+
+
 def test_link_skills_retires_managed_okfmem_reindex_entries(tmp_path, monkeypatch):
     home, _, _ = isolated(tmp_path, monkeypatch)
     import memory_uninstall as mu

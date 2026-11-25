@@ -1719,6 +1719,15 @@ def _link_matches_target(link, target):
 RETIRED_SKILLS = ("okfmem-reindex",)
 
 
+def _strip_extended_prefix(target):
+    """Drop the Windows `\\\\?\\` readlink prefix; a UNC target maps to `\\\\`."""
+    if target.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + target[8:]
+    if target.startswith("\\\\?\\"):
+        return target[4:]
+    return target
+
+
 def _linked_parent(link):
     """Resolved, normcased directory a symlink or junction points into.
 
@@ -1730,8 +1739,7 @@ def _linked_parent(link):
         target = os.readlink(link)
     except OSError:
         return os.path.normcase(os.path.dirname(os.path.realpath(link)))
-    if target.startswith("\\\\?\\"):
-        target = target[4:]
+    target = _strip_extended_prefix(target)
     target = os.path.join(os.path.dirname(link), target)
     return os.path.normcase(os.path.realpath(os.path.dirname(target)))
 
