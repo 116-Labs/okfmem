@@ -328,10 +328,12 @@ def pull_attached(store, timeout=DEFAULT_TIMEOUT):
 def refresh_pulled_views(store, res, attached):
     """Recompile views/* of every store a pull changed (#249). A home view also
     lists attached stores' pages, so an attached pull refreshes it too. Writes
-    only under the git-ignored views/; never commits, pushes or archives."""
+    only under the git-ignored views/ (never seeds state/); never commits,
+    pushes or archives."""
     changed = [a["path"] for a, r in attached if r.get("pulled")]
     if not res.get("pulled") and not changed:
         return
+    store = os.path.abspath(os.path.expanduser(store))
     try:
         engine = os.path.dirname(os.path.realpath(__file__))
         if engine not in sys.path:
@@ -339,7 +341,7 @@ def refresh_pulled_views(store, res, attached):
         from memory_consolidate import _refresh_all_views
 
         for path in dict.fromkeys([store, *changed]):
-            _refresh_all_views(path)
+            _refresh_all_views(path, seed_state=False)
     except Exception:
         pass  # fail-open: a view refresh never fails a pull
 

@@ -11,8 +11,11 @@ import memory_pull as mp
 from test_pull import _advance_remote, _bare, _clone, _commit, _git
 from test_views_projection import _write_page
 
-pytestmark = pytest.mark.skipif(shutil.which("git") is None,
-                                reason="git binary not available")
+pytestmark = [
+    pytest.mark.os_real,
+    pytest.mark.skipif(shutil.which("git") is None,
+                       reason="git binary not available"),
+]
 
 PAGE = ("---\nname: {n}\ndescription: d {n}\nimportance: 1\n"
         "last_accessed: 2026-10-01\nlabels: [{labels}]\n---\n\n# {n}\n")
@@ -72,11 +75,38 @@ def test_pull_that_changes_nothing_recompiles_no_view(tmp_path, monkeypatch):
     _, store = _seed_store(tmp_path)
     calls = []
     monkeypatch.setattr("memory_consolidate._refresh_all_views",
-                        lambda path, skip=None: calls.append(path))
+                        lambda path, **_kw: calls.append(path))
 
     _run_pull(store, monkeypatch)
 
     assert calls == []
+
+
+def test_pull_of_a_state_deletion_does_not_reseed_state(tmp_path, monkeypatch):
+    origin, store = _seed_store(tmp_path)
+    assert Path(store, "state", "x.md").is_file()
+    w = str(tmp_path / "w-split")
+    _clone(origin, w)
+    _git(w, "rm", "-q", "state/x.md")
+    _git(w, "commit", "-qm", "split away x")
+    _git(w, "push", "-q", "origin", "HEAD")
+
+    _run_pull(store, monkeypatch)
+
+    assert not Path(store, "state", "x.md").exists()
+    assert _git(store, "status", "--porcelain").stdout == ""
+
+
+def test_pull_refreshes_views_for_a_tilde_store_path(tmp_path, monkeypatch):
+    origin, store = _seed_store(tmp_path)
+    _advance_remote(tmp_path, origin, "new", _page("second", "repo:x"),
+                    fname="pages/second.md")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+    _run_pull("~/store", monkeypatch)
+
+    assert "pages/second.md" in _view(store, "x")
 
 
 def test_no_views_flag_fetches_without_touching_views(tmp_path, monkeypatch):

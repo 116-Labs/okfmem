@@ -585,8 +585,10 @@ def _make_view_state_link(store, view_dir, repo):
     shutil.copy2(state_target, link_path)
 
 
-def compile_view(store, repo, org=None, stack=None, aliases=None, reg=None):
-    """Compile dynamic MEMORY.md projection and lane indexes into views/<repo>/."""
+def compile_view(store, repo, org=None, stack=None, aliases=None, reg=None,
+                 seed_state=True):
+    """Compile dynamic MEMORY.md projection and lane indexes into views/<repo>/.
+    seed_state=False never creates a missing tracked state/<repo>.md (#249)."""
     view_dir = os.path.join(store, "views", repo)
     os.makedirs(view_dir, exist_ok=True)
 
@@ -773,7 +775,8 @@ def compile_view(store, repo, org=None, stack=None, aliases=None, reg=None):
         {p["slug"] for tier in (repo_pages, org_pages, stack_pages)
          for p in tier if not p["store"]})
     _make_view_store_links(view_dir, attached)
-    _make_view_state_link(store, view_dir, repo)
+    if seed_state or os.path.isfile(os.path.join(store, "state", f"{repo}.md")):
+        _make_view_state_link(store, view_dir, repo)
 
 
 def _sync_copied_view_pages(store, view_dir, included):
