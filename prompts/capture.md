@@ -35,8 +35,9 @@ Prefer `update` of a candidate given in full over `create`. An update returns th
 whole new body of that page, keeping every still-true fact the page already holds
 and rewriting stale content in place. Never update a candidate marked
 `excerpt_only`: you have not seen all of it. Never `create` a slug that is already a
-candidate or listed under "Other existing page slugs": a reply that does is rejected
-whole. Pick a distinct slug instead.
+candidate or listed under "Other existing page slugs": that page is dropped (a full
+candidate is applied as an update instead) and the rest of the reply is kept. Pick a
+distinct slug instead.
 
 Each page:
 

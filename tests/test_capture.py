@@ -577,6 +577,43 @@ def test_retry_requeues_a_failed_job_with_its_focus_and_a_replay_writes_no_dupli
     assert [(p["slug"], p["action"]) for p in _reply_file(cap)["reply"]["pages"]] == [("runner-image", "update")]
 
 
+def _replay_after_a_later_capture_moved_the_ledger(cap, capsys, **job_fields):
+    path = cap.transcript([user("zebra quokka alpha", cap.repo), assistant("noted", cap.repo)])
+    job, jpath = cap.job(path, focus="zebra quokka")
+    data = json.loads(Path(jpath).read_text())
+    data.update(job_fields)
+    Path(jpath).write_text(json.dumps(data))
+    rid = _fail(cap, jpath)
+    with open(path, "ab") as f:
+        f.write(json.dumps(user("later turn", cap.repo)).encode() + b"\n")
+    mt.ledger_put(str(cap.store), job["ledger_key"], transcript=job["transcript"],
+                  fingerprint=job["fingerprint"], offset=path.stat().st_size, outcome="saved")
+    assert mc.main(["--retry", rid, "--store", str(cap.store)]) == 0
+    capsys.readouterr()
+    cap.respond([{"reply": reply(page(slug="quokka-notes")), "cost": 0.1}])
+    mc.run_worker(str(cap.store))
+    return cap.jobs()[0]
+
+
+def test_replay_of_a_job_the_ledger_moved_past_still_sends_its_transcript_slice(cap, capsys):
+    job = _replay_after_a_later_capture_moved_the_ledger(cap, capsys)
+    assert job["status"] == "captured", job.get("error")
+    assert "alpha" in cap.calls()[0]["stdin"]
+
+
+def test_replay_starts_at_a_recorded_start_at_of_zero(cap, capsys):
+    job = _replay_after_a_later_capture_moved_the_ledger(cap, capsys, start_at=0)
+    assert job["status"] == "captured", job.get("error")
+    assert job["start_at"] == 0 and "alpha" in cap.calls()[0]["stdin"]
+
+
+def test_a_replay_never_lowers_the_session_ledger_offset(cap, capsys):
+    _replay_after_a_later_capture_moved_the_ledger(cap, capsys)
+    job = cap.jobs()[0]
+    mc._advance_ledger(str(cap.store), job, 10, "x")
+    assert cap.ledger_offset(job["ledger_key"]) == Path(job["transcript"]).stat().st_size
+
+
 def test_retry_failed_requeues_only_failed_focus_jobs_of_the_named_project(cap, capsys):
     path = cap.transcript([user("decided X", cap.repo)])
     mine = _fail(cap, cap.job(path, focus="X")[1])

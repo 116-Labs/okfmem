@@ -877,7 +877,8 @@ def _run_job(store, cfg, owner, job, budget):
     start = max(int(entry.get("offset") or 0), int(job.get("cursor") or 0))
     if job.get("replay") and not job.get("cursor"):
         # A replayed save must not start past what a later capture already advanced the ledger to.
-        start = int(job.get("start_at") or (start if start < upto else max(0, upto - cfg["cap_bytes"])))
+        fallback = start if start < upto else max(0, upto - cfg["cap_bytes"])
+        start = fallback if job.get("start_at") is None else int(job["start_at"])
     job.setdefault("start_at", start)
     chunks, outcome = 0, None
     while start < upto and chunks < cfg["max_chunks_per_job"]:
@@ -909,7 +910,7 @@ def _advance_ledger(store, job, end, outcome):
     data = mt.ledger_get(store, job["ledger_key"]) or {}
     mt.ledger_put(store, job["ledger_key"], **{
         **data, "transcript": job["transcript"], "fingerprint": job["fingerprint"],
-        "offset": end, "updated": _utc(), "outcome": outcome})
+        "offset": max(end, int(data.get("offset") or 0)), "updated": _utc(), "outcome": outcome})
 
 
 def handle_chunk(store, cfg, owner, job, turns, start, end, budget):
