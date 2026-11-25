@@ -117,7 +117,7 @@ The job is durable, and the engine owns everything else for this save: the page 
 
 `capture queued (focus: N items); okfmem status shows the result`
 
-Say "queued", never "saved".
+Say "queued", never "saved". Check the job once, about 30 seconds later, with the `request_id` from the stdout JSON: `okfmem capture --job <request_id> --store "$STORE_PATH"`. When its `status` is `failed`, say `save failed (<error>); run okfmem capture --retry <request_id>` instead. A job still `queued` or `running` is left to the next session start, which announces any failure.
 
 #### Exit 3: no runner (foreground fallback)
 
