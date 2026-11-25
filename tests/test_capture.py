@@ -602,9 +602,13 @@ def test_replay_of_a_job_the_ledger_moved_past_still_sends_its_transcript_slice(
 
 
 def test_replay_starts_at_a_recorded_start_at_of_zero(cap, capsys):
+    # A cap just over the first record puts the `upto - cap_bytes` fallback inside it, past
+    # "alpha", so only an honoured start_at=0 puts the first turn in the transcript slice.
+    cap.config(cap_bytes=len(json.dumps(user("zebra quokka alpha", cap.repo)).encode()) + 51)
     job = _replay_after_a_later_capture_moved_the_ledger(cap, capsys, start_at=0)
     assert job["status"] == "captured", job.get("error")
-    assert job["start_at"] == 0 and "alpha" in cap.calls()[0]["stdin"]
+    assert job["start_at"] == 0
+    assert "alpha" in cap.calls()[0]["stdin"].split("## Transcript slice", 1)[1]
 
 
 def test_a_replay_never_lowers_the_session_ledger_offset(cap, capsys):
