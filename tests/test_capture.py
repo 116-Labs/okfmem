@@ -303,6 +303,34 @@ def test_two_now_calls_with_different_focus_files_create_two_jobs(cap, capsys):
     assert len({j["request_id"] for j in jobs}) == 2
 
 
+def _session_end_job(cap, path):
+    identity, upto = mc.resolve_identity(str(cap.store), "claude-code", transcript=str(path))
+    return mc.enqueue(str(cap.store), identity, upto, "SessionEnd", None)
+
+
+def test_session_end_job_queued_behind_a_focus_job_makes_no_second_model_call(cap):
+    records = [user("from now on we always pin the runner image", cap.repo)]
+    path = cap.transcript(records)
+    cap.job(path, focus="pin the runner image")
+    cap.transcript(records + [assistant("noted", cap.repo), user("and keep it pinned", cap.repo)])
+    _session_end_job(cap, path)
+    cap.respond([{"reply": reply(), "cost": 0.2}])
+    mc.run_worker(str(cap.store))
+    assert len(cap.calls()) == 1
+    assert [(j["focus"] is not None, j["status"]) for j in cap.jobs()] == [(True, "captured"), (False, "queued")]
+
+
+def test_session_end_job_waits_for_a_failed_focus_job_and_spends_no_model_call(cap):
+    records = [user("from now on we always pin the runner image", cap.repo)]
+    path = cap.transcript(records)
+    _fail(cap, cap.job(path, focus="pin the runner image")[1])
+    cap.transcript(records + [user("and keep it pinned", cap.repo)])
+    _session_end_job(cap, path)
+    mc.run_worker(str(cap.store))
+    assert cap.calls() == []
+    assert sorted(j["status"] for j in cap.jobs()) == ["failed", "queued"]
+
+
 def test_focus_slice_goes_straight_to_capture(cap):
     path = cap.transcript([user("from now on we always pin the runner image", cap.repo)])
     cap.job(path, focus="pin the runner image")
