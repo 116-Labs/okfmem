@@ -308,16 +308,34 @@ def _session_end_job(cap, path):
     return mc.enqueue(str(cap.store), identity, upto, "SessionEnd", None)
 
 
-def test_session_end_job_queued_behind_a_focus_job_makes_no_second_model_call(cap):
+def _apply_by_advancing_the_ledger(cap, monkeypatch):
+    def apply(store, job):
+        mc._advance_ledger(store, job, job["cursor"], "saved")
+        job.update(status="saved")
+        mc._write_json(os.path.join(mc.jobs_dir(store), f"{job['request_id']}.json"), job)
+
+    monkeypatch.setattr(mc, "apply_result", apply)
+
+
+def test_session_end_job_queued_behind_a_focus_job_captures_only_the_bytes_after_it(cap, monkeypatch):
+    _apply_by_advancing_the_ledger(cap, monkeypatch)
     records = [user("from now on we always pin the runner image", cap.repo)]
     path = cap.transcript(records)
+    focus_upto = path.stat().st_size
     cap.job(path, focus="pin the runner image")
     cap.transcript(records + [assistant("noted", cap.repo), user("and keep it pinned", cap.repo)])
     _session_end_job(cap, path)
-    cap.respond([{"reply": reply(), "cost": 0.2}])
+    cap.respond([{"reply": reply(), "cost": 0.2}, TRIAGE_SAVE, {"reply": reply(), "cost": 0.1}])
     mc.run_worker(str(cap.store))
-    assert len(cap.calls()) == 1
-    assert [(j["focus"] is not None, j["status"]) for j in cap.jobs()] == [(True, "captured"), (False, "queued")]
+    calls = cap.calls()
+    assert [_flag(c["argv"], "--model") for c in calls] == ["sonnet", "haiku", "sonnet"]
+    focus, automatic = sorted(cap.jobs(), key=lambda j: j["focus"] is None)
+    assert [focus["status"], automatic["status"]] == ["saved", "saved"]
+    assert _result(cap, automatic)["start"] == focus_upto
+    assert _result(cap, automatic)["end"] == path.stat().st_size
+    slice_text = calls[2]["stdin"].split("## Transcript slice", 1)[1]
+    assert "keep it pinned" in slice_text and "always pin the runner image" not in slice_text
+    assert cap.ledger_offset() == path.stat().st_size
 
 
 def test_session_end_job_waits_for_a_failed_focus_job_and_spends_no_model_call(cap):
