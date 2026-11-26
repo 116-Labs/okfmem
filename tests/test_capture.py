@@ -618,17 +618,24 @@ def test_a_replay_never_lowers_the_session_ledger_offset(cap, capsys):
     assert cap.ledger_offset(job["ledger_key"]) == Path(job["transcript"]).stat().st_size
 
 
-def test_retry_failed_requeues_only_failed_focus_jobs_of_the_named_project(cap, capsys):
+def test_retry_failed_requeues_focus_then_automatic_jobs_of_the_named_project(cap, capsys):
     path = cap.transcript([user("decided X", cap.repo)])
+    automatic = _fail(cap, cap.job(path)[1])
     mine = _fail(cap, cap.job(path, focus="X")[1])
-    _fail(cap, cap.job(path)[1])
     other, opath = cap.job(path, focus="Y")
     data = json.loads(Path(opath).read_text())
     data.update(status="failed", project="elsewhere")
     Path(opath).write_text(json.dumps(data))
     assert mc.main(["--retry-failed", "--project", "proj", "--store", str(cap.store)]) == 0
-    assert json.loads(capsys.readouterr().out)["request_ids"] == [mine]
+    assert json.loads(capsys.readouterr().out)["request_ids"] == [mine, automatic]
     assert mc.main(["--retry", other["request_id"] + "x", "--store", str(cap.store)]) == 4
+
+
+def test_status_names_the_retry_command_next_to_a_failed_count(cap):
+    path = cap.transcript([user("decided X", cap.repo)])
+    _fail(cap, cap.job(path)[1])
+    [line] = mc.status_lines(str(cap.store))
+    assert "failed 1 (`okfmem capture --retry-failed --project proj`)" in line
 
 
 def test_job_prints_the_status_of_one_job(cap, capsys):

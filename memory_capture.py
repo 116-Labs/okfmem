@@ -1616,8 +1616,9 @@ def retry_jobs(args, store):
             print(f"okfmem capture: no failed job {args.retry}", file=sys.stderr)
             return 4
     else:
-        picked = [(p, j) for p, j in jobs if j.get("status") == "failed" and j.get("focus")
+        picked = [(p, j) for p, j in jobs if j.get("status") == "failed"
                   and (not args.project or j.get("project") == args.project)]
+        picked.sort(key=lambda pair: not pair[1].get("focus"))
     for path, job in picked:
         requeue(store, path, job)
     if picked:
@@ -1658,7 +1659,8 @@ def status_lines(store):
         else:
             detail = last.get("error") if last.get("status") == "failed" else last.get("outcome")
             tail = f"last {last.get('status')} {last.get('updated')}" + (f" — {detail}" if detail else "")
-        lines.append(f"capture   {project}: queued {queued}, failed {failed}; {tail}")
+        retry = f" (`okfmem capture --retry-failed --project {project}`)" if failed else ""
+        lines.append(f"capture   {project}: queued {queued}, failed {failed}{retry}; {tail}")
     ahead = _ahead_of_upstream(store) if any(j.get("saves") for j in jobs) else 0
     if ahead:
         lines.append(f"capture   unpushed: {ahead} commit(s); `okfmem sync` pushes them")
@@ -1722,7 +1724,7 @@ def _parser():
                       help="mark a session covered up to --upto after a foreground save")
     mode.add_argument("--retry", metavar="REQUEST_ID", help="requeue one failed job with its focus")
     mode.add_argument("--retry-failed", action="store_true",
-                      help="requeue every failed focus job (narrow with --project)")
+                      help="requeue every failed job, user-requested saves first (narrow with --project)")
     mode.add_argument("--job", metavar="REQUEST_ID", help="print one job's status as JSON")
     ap.add_argument("--project", help="--retry-failed: only this project's jobs")
     ap.add_argument("--catch-up", action="store_true",
