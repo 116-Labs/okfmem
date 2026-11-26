@@ -324,29 +324,38 @@ def test_sync_store_paths_stages_only_the_given_paths_and_default_callers_are_un
 def _moved_job(tmp_path, monkeypatch, new_first_line):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    first = json.dumps({"type": "user", "sessionId": "sess-1"}) + "\n"
+    first = (json.dumps({"type": "user", "sessionId": "sess-1"}) + "\n").encode()
     old = tmp_path / ".claude" / "projects" / "-old" / "sess-1.jsonl"
     new = tmp_path / ".claude" / "projects" / "-new" / "sess-1.jsonl"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(first)
     new.parent.mkdir(parents=True)
-    new.write_text(new_first_line)
-    job = {"request_id": "m1", "harness": "claude-code", "session": "sess-1", "transcript": str(old),
-           "fingerprint": sha(first), "ledger_key": "claude-code:sess-1", "upto": 0, "project": "proj"}
-    return job, new
-
-
-def test_job_whose_transcript_moved_is_found_by_session_and_the_move_is_logged(tmp_path, monkeypatch):
+    new.write_bytes(new_first_line.encode())
     store = tmp_path / "store"
     store.mkdir()
-    job, new = _moved_job(tmp_path, monkeypatch, json.dumps({"type": "user", "sessionId": "sess-1"}) + "\n")
-    mc._run_job(str(store), {}, "owner", job, SimpleNamespace())
-    assert job["transcript"] == os.path.realpath(new) and job["status"] == "skipped"
+    identity, upto = mc.resolve_identity(str(store), "claude-code", transcript=str(old))
+    identity["project"] = "proj"
+    job, path = mc.enqueue(str(store), identity, upto, "test", None)
+    old.unlink()
+    return job, path, new
+
+
+def test_queued_job_whose_transcript_moved_finishes_through_the_worker_and_logs_the_move(tmp_path, monkeypatch):
+    line = json.dumps({"type": "user", "sessionId": "sess-1"}) + "\n"
+    job, path, new = _moved_job(tmp_path, monkeypatch, line)
+    store = tmp_path / "store"
+    assert mc.run_worker(str(store)) == 0
+    saved = json.loads(Path(path).read_text())
+    assert saved["status"] == "skipped" and Path(saved["transcript"]) == Path(os.path.realpath(new))
     log_text = (store / ".okfmem" / "capture" / "capture.log").read_text()
-    assert f"m1: transcript moved to {job['transcript']}" in log_text
+    assert f"{job['request_id']}: transcript moved to {saved['transcript']}" in log_text
 
 
 def test_moved_transcript_with_a_different_first_line_fails_the_attempt_and_is_not_touched(tmp_path, monkeypatch):
-    job, new = _moved_job(tmp_path, monkeypatch, json.dumps({"type": "user", "sessionId": "sess-1", "x": 1}) + "\n")
+    other = json.dumps({"type": "user", "sessionId": "sess-1", "x": 1}) + "\n"
+    job, path, new = _moved_job(tmp_path, monkeypatch, other)
     before = new.read_bytes()
-    with pytest.raises(mc.CaptureError, match="sess-1"):
-        mc._run_job(str(tmp_path / "store"), {}, "owner", job, SimpleNamespace())
-    assert job["transcript"].endswith("-old/sess-1.jsonl") and new.read_bytes() == before
+    mc.run_worker(str(tmp_path / "store"))
+    saved = json.loads(Path(path).read_text())
+    assert saved["status"] == "queued" and "sess-1" in saved["error"]
+    assert Path(saved["transcript"]) == Path(job["transcript"]) and new.read_bytes() == before
