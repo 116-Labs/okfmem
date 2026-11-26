@@ -324,9 +324,7 @@ def test_delete_refs_lease_keeps_a_ref_moved_after_it_was_read(env):
     assert _git(env["origin"], "rev-parse", ref) == sha
 
 
-def test_apply_without_terminal_or_yes_writes_nothing_and_prints_the_command(
-        env, monkeypatch, capsys):
-    _push(env)
+def _apply_without_terminal(env, monkeypatch, capsys):
     out_dir, recs = _dump(env)
     path = _decisions(out_dir, _good_decisions(recs))
     before = _store_state(env)
@@ -338,10 +336,28 @@ def test_apply_without_terminal_or_yes_writes_nothing_and_prints_the_command(
     assert e.value.code == 2
     out = capsys.readouterr().out
     assert "nothing written" in out
-    assert f"okfmem inbox apply --store {env['store']} {path} --yes" in out
     assert _store_state(env) == before
     assert not os.path.exists(os.path.join(env["store"], "projects", "demo",
                                            "runner-image.md"))
+    return out, path
+
+
+def test_apply_without_terminal_or_yes_writes_nothing_and_prints_the_command(
+        env, monkeypatch, capsys):
+    _push(env)
+    out, path = _apply_without_terminal(env, monkeypatch, capsys)
+    assert mx.apply_hint(env["store"], path) in out
+
+
+def test_apply_hint_printed_without_terminal_quotes_a_store_path_with_a_space(
+        env, monkeypatch, capsys):
+    _push(env)
+    spaced = os.path.join(env["tmp"], "Application Support", "store")
+    os.makedirs(os.path.dirname(spaced))
+    shutil.move(env["store"], spaced)
+    out, path = _apply_without_terminal({**env, "store": spaced}, monkeypatch, capsys)
+    assert f'okfmem inbox apply --store "{spaced}" ' in out
+    assert mx.apply_hint(spaced, path) in out
 
 
 def test_apply_declined_at_the_prompt_writes_nothing(env):
