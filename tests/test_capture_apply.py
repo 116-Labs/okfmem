@@ -319,3 +319,34 @@ def test_sync_store_paths_stages_only_the_given_paths_and_default_callers_are_un
     assert "b.txt" in git(env.store, "status", "--porcelain")
     assert ms.sync_store(env.store, "all", do_push=False)["committed"]
     assert git(env.store, "show", "--name-only", "--format=", "HEAD").split() == ["b.txt"]
+
+
+def _moved_job(tmp_path, monkeypatch, new_first_line):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    first = json.dumps({"type": "user", "sessionId": "sess-1"}) + "\n"
+    old = tmp_path / ".claude" / "projects" / "-old" / "sess-1.jsonl"
+    new = tmp_path / ".claude" / "projects" / "-new" / "sess-1.jsonl"
+    new.parent.mkdir(parents=True)
+    new.write_text(new_first_line)
+    job = {"request_id": "m1", "harness": "claude-code", "session": "sess-1", "transcript": str(old),
+           "fingerprint": sha(first), "ledger_key": "claude-code:sess-1", "upto": 0, "project": "proj"}
+    return job, new
+
+
+def test_job_whose_transcript_moved_is_found_by_session_and_the_move_is_logged(tmp_path, monkeypatch):
+    store = tmp_path / "store"
+    store.mkdir()
+    job, new = _moved_job(tmp_path, monkeypatch, json.dumps({"type": "user", "sessionId": "sess-1"}) + "\n")
+    mc._run_job(str(store), {}, "owner", job, SimpleNamespace())
+    assert job["transcript"] == os.path.realpath(new) and job["status"] == "skipped"
+    log_text = (store / ".okfmem" / "capture" / "capture.log").read_text()
+    assert f"m1: transcript moved to {job['transcript']}" in log_text
+
+
+def test_moved_transcript_with_a_different_first_line_fails_the_attempt_and_is_not_touched(tmp_path, monkeypatch):
+    job, new = _moved_job(tmp_path, monkeypatch, json.dumps({"type": "user", "sessionId": "sess-1", "x": 1}) + "\n")
+    before = new.read_bytes()
+    with pytest.raises(mc.CaptureError, match="sess-1"):
+        mc._run_job(str(tmp_path / "store"), {}, "owner", job, SimpleNamespace())
+    assert job["transcript"].endswith("-old/sess-1.jsonl") and new.read_bytes() == before

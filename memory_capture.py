@@ -867,10 +867,28 @@ def process_job(store, cfg, owner, path, job, run_left):
     return budget.spent
 
 
+def _relocate_transcript(store, job):
+    """Re-resolve a transcript that moved with its project folder (#257); trust it only on a fingerprint match."""
+    if os.path.exists(job["transcript"]):
+        return
+    harness, session = job["harness"], job.get("session")
+    try:
+        moved = find_transcript(harness, session)
+        found = mt.transcript_identity(harness, moved)["fingerprint"]
+    except (EnqueueError, OSError, ValueError) as e:
+        raise CaptureError(f"transcript for session {session} is gone from {job['transcript']}: {e}") from e
+    if found != job["fingerprint"]:
+        raise CaptureError(f"transcript for session {session} at {moved} was rewritten since the job was queued")
+    job["transcript"] = moved
+    log(store, f"{job['request_id']}: transcript moved to {moved}")
+
+
 def _run_job(store, cfg, owner, job, budget):
     if BACKEND_FOR_HARNESS.get(job["harness"]) not in RUNNERS:
         raise CaptureError(f"no runner for harness {job['harness']}")
-    harness, transcript, upto = job["harness"], job["transcript"], int(job["upto"])
+    harness, upto = job["harness"], int(job["upto"])
+    _relocate_transcript(store, job)
+    transcript = job["transcript"]
     if mt.transcript_identity(harness, transcript)["fingerprint"] != job["fingerprint"]:
         raise CaptureError("transcript was rewritten since the job was queued")
     entry = mt.ledger_get(store, job["ledger_key"]) or {}
