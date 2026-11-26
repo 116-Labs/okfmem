@@ -30,6 +30,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -801,7 +802,8 @@ def drain(store, cfg, owner, seen, spent):
         if job.get("status") == "captured" and heartbeat(store, owner):
             apply_result(store, job)
     jobs = sorted(iter_jobs(store),
-                  key=lambda pair: (not pair[1].get("defer_until_existing", False),
+                  key=lambda pair: (bool(pair[1].get("focus")),
+                                    not pair[1].get("defer_until_existing", False),
                                     str(pair[1].get("updated") or "")), reverse=True)
     awaiting = {j.get("ledger_key") for _, j in jobs if j.get("status") == "captured"}
     for path, job in jobs:
@@ -1659,7 +1661,7 @@ def status_lines(store):
         else:
             detail = last.get("error") if last.get("status") == "failed" else last.get("outcome")
             tail = f"last {last.get('status')} {last.get('updated')}" + (f" — {detail}" if detail else "")
-        retry = f" (`okfmem capture --retry-failed --project {project}`)" if failed else ""
+        retry = f" (`okfmem capture --retry-failed --project {shlex.quote(project)}`)" if failed else ""
         lines.append(f"capture   {project}: queued {queued}, failed {failed}{retry}; {tail}")
     ahead = _ahead_of_upstream(store) if any(j.get("saves") for j in jobs) else 0
     if ahead:

@@ -631,6 +631,28 @@ def test_retry_failed_requeues_focus_then_automatic_jobs_of_the_named_project(ca
     assert mc.main(["--retry", other["request_id"] + "x", "--store", str(cap.store)]) == 4
 
 
+def test_worker_runs_a_requeued_focus_job_before_an_older_automatic_job(cap, capsys):
+    path = cap.transcript([user("decided X", cap.repo)])
+    _fail(cap, cap.job(path)[1])
+    _fail(cap, cap.job(path, focus="zebra-focus")[1])
+    assert mc.main(["--retry-failed", "--project", "proj", "--store", str(cap.store)]) == 0
+    capsys.readouterr()
+    cap.respond([{"reply": reply(page(slug="first-note")), "cost": 0.1},
+                 {"reply": reply(page(slug="second-note")), "cost": 0.1}])
+    mc.run_worker(str(cap.store))
+    assert "zebra-focus" in cap.calls()[0]["stdin"]
+
+
+def test_status_quotes_a_project_name_with_spaces_in_the_retry_command(cap):
+    path = cap.transcript([user("decided X", cap.repo)])
+    _, jpath = cap.job(path)
+    data = json.loads(Path(jpath).read_text())
+    data.update(status="failed", project="my project")
+    Path(jpath).write_text(json.dumps(data))
+    [line] = mc.status_lines(str(cap.store))
+    assert "--retry-failed --project 'my project'`" in line
+
+
 def test_status_names_the_retry_command_next_to_a_failed_count(cap):
     path = cap.transcript([user("decided X", cap.repo)])
     _fail(cap, cap.job(path)[1])
