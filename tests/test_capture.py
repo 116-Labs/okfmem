@@ -324,7 +324,11 @@ def test_session_end_job_queued_behind_a_focus_job_captures_only_the_bytes_after
     focus_upto = path.stat().st_size
     cap.job(path, focus="pin the runner image")
     cap.transcript(records + [assistant("noted", cap.repo), user("and keep it pinned", cap.repo)])
-    _session_end_job(cap, path)
+    automatic, apath = _session_end_job(cap, path)
+    # The SessionEnd hook fires after the focus save, so drain()'s newest-first
+    # order visits it first: only the #263 deferral makes the focus job run first.
+    automatic["updated"] = "9999-01-01T00:00:00+00:00"
+    mc._write_json(apath, automatic)
     cap.respond([{"reply": reply(), "cost": 0.2}, TRIAGE_SAVE, {"reply": reply(), "cost": 0.1}])
     mc.run_worker(str(cap.store))
     calls = cap.calls()
