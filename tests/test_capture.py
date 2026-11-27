@@ -650,14 +650,35 @@ def test_status_quotes_a_project_name_with_spaces_in_the_retry_command(cap):
     data.update(status="failed", project="my project")
     Path(jpath).write_text(json.dumps(data))
     [line] = mc.status_lines(str(cap.store))
-    assert "--retry-failed --project 'my project'`" in line
+    assert '--retry-failed "--project=my project"`' in line
+
+
+def test_status_keeps_a_leading_hyphen_project_as_the_flag_value(cap):
+    path = cap.transcript([user("decided X", cap.repo)])
+    _, jpath = cap.job(path)
+    data = json.loads(Path(jpath).read_text())
+    data.update(status="failed", project="-notes")
+    Path(jpath).write_text(json.dumps(data))
+    [line] = mc.status_lines(str(cap.store))
+    assert "--retry-failed --project=-notes`" in line
+    assert mc._parser().parse_args(
+        ["--retry-failed", "--project=-notes"]).project == "-notes"
+
+
+def test_status_names_a_store_that_is_not_the_default_in_the_retry_command(cap, monkeypatch, tmp_path):
+    path = cap.transcript([user("decided X", cap.repo)])
+    _fail(cap, cap.job(path)[1])
+    monkeypatch.setenv("OKFMEM_STORE", str(tmp_path / "other store"))
+    [line] = mc.status_lines(str(cap.store))
+    import memory_inbox as mx
+    assert f"--retry-failed --store {mx._quote_arg(str(cap.store))} --project=proj`" in line
 
 
 def test_status_names_the_retry_command_next_to_a_failed_count(cap):
     path = cap.transcript([user("decided X", cap.repo)])
     _fail(cap, cap.job(path)[1])
     [line] = mc.status_lines(str(cap.store))
-    assert "failed 1 (`okfmem capture --retry-failed --project proj`)" in line
+    assert "failed 1 (`okfmem capture --retry-failed --project=proj`)" in line
 
 
 def test_job_prints_the_status_of_one_job(cap, capsys):

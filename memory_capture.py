@@ -30,7 +30,6 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import shutil
 import socket
 import subprocess
@@ -1641,6 +1640,17 @@ def show_job(args, store):
 # --- status -------------------------------------------------------------------
 
 
+def retry_failed_hint(store, project):
+    """The `--retry-failed` command for `project`, pasteable into bash, zsh,
+    PowerShell and cmd. It names `--store` only when `store` is not the one
+    capture resolves by itself, and joins the project with `=` so a name that
+    starts with `-` stays the flag's value."""
+    from memory_inbox import _quote_arg  # memory_inbox imports this module
+
+    store_part = "" if store == resolve_store() else f" --store {_quote_arg(store)}"
+    return f"okfmem capture --retry-failed{store_part} {_quote_arg('--project=' + project)}"
+
+
 def status_lines(store):
     """`okfmem status` lines: per-project queued/failed counts and the latest outcome."""
     jobs = [job for _, job in iter_jobs(store)]
@@ -1661,7 +1671,7 @@ def status_lines(store):
         else:
             detail = last.get("error") if last.get("status") == "failed" else last.get("outcome")
             tail = f"last {last.get('status')} {last.get('updated')}" + (f" — {detail}" if detail else "")
-        retry = f" (`okfmem capture --retry-failed --project {shlex.quote(project)}`)" if failed else ""
+        retry = f" (`{retry_failed_hint(store, project)}`)" if failed else ""
         lines.append(f"capture   {project}: queued {queued}, failed {failed}{retry}; {tail}")
     ahead = _ahead_of_upstream(store) if any(j.get("saves") for j in jobs) else 0
     if ahead:
