@@ -319,3 +319,43 @@ def test_sync_store_paths_stages_only_the_given_paths_and_default_callers_are_un
     assert "b.txt" in git(env.store, "status", "--porcelain")
     assert ms.sync_store(env.store, "all", do_push=False)["committed"]
     assert git(env.store, "show", "--name-only", "--format=", "HEAD").split() == ["b.txt"]
+
+
+def _moved_job(tmp_path, monkeypatch, new_first_line):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    first = (json.dumps({"type": "user", "sessionId": "sess-1"}) + "\n").encode()
+    old = tmp_path / ".claude" / "projects" / "-old" / "sess-1.jsonl"
+    new = tmp_path / ".claude" / "projects" / "-new" / "sess-1.jsonl"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(first)
+    new.parent.mkdir(parents=True)
+    new.write_bytes(new_first_line.encode())
+    store = tmp_path / "store"
+    store.mkdir()
+    identity, upto = mc.resolve_identity(str(store), "claude-code", transcript=str(old))
+    identity["project"] = "proj"
+    job, path = mc.enqueue(str(store), identity, upto, "test", None)
+    old.unlink()
+    return job, path, new
+
+
+def test_queued_job_whose_transcript_moved_finishes_through_the_worker_and_logs_the_move(tmp_path, monkeypatch):
+    line = json.dumps({"type": "user", "sessionId": "sess-1"}) + "\n"
+    job, path, new = _moved_job(tmp_path, monkeypatch, line)
+    store = tmp_path / "store"
+    assert mc.run_worker(str(store)) == 0
+    saved = json.loads(Path(path).read_text())
+    assert saved["status"] == "skipped" and Path(saved["transcript"]) == Path(os.path.realpath(new))
+    log_text = (store / ".okfmem" / "capture" / "capture.log").read_text()
+    assert f"{job['request_id']}: transcript moved to {saved['transcript']}" in log_text
+
+
+def test_moved_transcript_with_a_different_first_line_fails_the_attempt_and_is_not_touched(tmp_path, monkeypatch):
+    other = json.dumps({"type": "user", "sessionId": "sess-1", "x": 1}) + "\n"
+    job, path, new = _moved_job(tmp_path, monkeypatch, other)
+    before = new.read_bytes()
+    mc.run_worker(str(tmp_path / "store"))
+    saved = json.loads(Path(path).read_text())
+    assert saved["status"] == "queued" and "sess-1" in saved["error"]
+    assert Path(saved["transcript"]) == Path(job["transcript"]) and new.read_bytes() == before
