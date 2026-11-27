@@ -618,17 +618,67 @@ def test_a_replay_never_lowers_the_session_ledger_offset(cap, capsys):
     assert cap.ledger_offset(job["ledger_key"]) == Path(job["transcript"]).stat().st_size
 
 
-def test_retry_failed_requeues_only_failed_focus_jobs_of_the_named_project(cap, capsys):
+def test_retry_failed_requeues_focus_then_automatic_jobs_of_the_named_project(cap, capsys):
     path = cap.transcript([user("decided X", cap.repo)])
+    automatic = _fail(cap, cap.job(path)[1])
     mine = _fail(cap, cap.job(path, focus="X")[1])
-    _fail(cap, cap.job(path)[1])
     other, opath = cap.job(path, focus="Y")
     data = json.loads(Path(opath).read_text())
     data.update(status="failed", project="elsewhere")
     Path(opath).write_text(json.dumps(data))
     assert mc.main(["--retry-failed", "--project", "proj", "--store", str(cap.store)]) == 0
-    assert json.loads(capsys.readouterr().out)["request_ids"] == [mine]
+    assert json.loads(capsys.readouterr().out)["request_ids"] == [mine, automatic]
     assert mc.main(["--retry", other["request_id"] + "x", "--store", str(cap.store)]) == 4
+
+
+def test_worker_runs_a_requeued_focus_job_before_an_older_automatic_job(cap, capsys):
+    path = cap.transcript([user("decided X", cap.repo)])
+    _fail(cap, cap.job(path)[1])
+    _fail(cap, cap.job(path, focus="zebra-focus")[1])
+    assert mc.main(["--retry-failed", "--project", "proj", "--store", str(cap.store)]) == 0
+    capsys.readouterr()
+    cap.respond([{"reply": reply(page(slug="first-note")), "cost": 0.1},
+                 {"reply": reply(page(slug="second-note")), "cost": 0.1}])
+    mc.run_worker(str(cap.store))
+    assert "zebra-focus" in cap.calls()[0]["stdin"]
+
+
+def test_status_quotes_a_project_name_with_spaces_in_the_retry_command(cap):
+    path = cap.transcript([user("decided X", cap.repo)])
+    _, jpath = cap.job(path)
+    data = json.loads(Path(jpath).read_text())
+    data.update(status="failed", project="my project")
+    Path(jpath).write_text(json.dumps(data))
+    [line] = mc.status_lines(str(cap.store))
+    assert '--retry-failed "--project=my project"`' in line
+
+
+def test_status_keeps_a_leading_hyphen_project_as_the_flag_value(cap):
+    path = cap.transcript([user("decided X", cap.repo)])
+    _, jpath = cap.job(path)
+    data = json.loads(Path(jpath).read_text())
+    data.update(status="failed", project="-notes")
+    Path(jpath).write_text(json.dumps(data))
+    [line] = mc.status_lines(str(cap.store))
+    assert "--retry-failed --project=-notes`" in line
+    assert mc._parser().parse_args(
+        ["--retry-failed", "--project=-notes"]).project == "-notes"
+
+
+def test_status_names_a_store_that_is_not_the_default_in_the_retry_command(cap, monkeypatch, tmp_path):
+    path = cap.transcript([user("decided X", cap.repo)])
+    _fail(cap, cap.job(path)[1])
+    monkeypatch.setenv("OKFMEM_STORE", str(tmp_path / "other store"))
+    [line] = mc.status_lines(str(cap.store))
+    import memory_inbox as mx
+    assert f"--retry-failed --store {mx._quote_arg(str(cap.store))} --project=proj`" in line
+
+
+def test_status_names_the_retry_command_next_to_a_failed_count(cap):
+    path = cap.transcript([user("decided X", cap.repo)])
+    _fail(cap, cap.job(path)[1])
+    [line] = mc.status_lines(str(cap.store))
+    assert "failed 1 (`okfmem capture --retry-failed --project=proj`)" in line
 
 
 def test_job_prints_the_status_of_one_job(cap, capsys):
