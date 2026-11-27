@@ -303,6 +303,56 @@ def test_two_now_calls_with_different_focus_files_create_two_jobs(cap, capsys):
     assert len({j["request_id"] for j in jobs}) == 2
 
 
+def _session_end_job(cap, path):
+    identity, upto = mc.resolve_identity(str(cap.store), "claude-code", transcript=str(path))
+    return mc.enqueue(str(cap.store), identity, upto, "SessionEnd", None)
+
+
+def _apply_by_advancing_the_ledger(cap, monkeypatch):
+    def apply(store, job):
+        mc._advance_ledger(store, job, job["cursor"], "saved")
+        job.update(status="saved")
+        mc._write_json(os.path.join(mc.jobs_dir(store), f"{job['request_id']}.json"), job)
+
+    monkeypatch.setattr(mc, "apply_result", apply)
+
+
+def test_session_end_job_queued_behind_a_focus_job_captures_only_the_bytes_after_it(cap, monkeypatch):
+    _apply_by_advancing_the_ledger(cap, monkeypatch)
+    records = [user("from now on we always pin the runner image", cap.repo)]
+    path = cap.transcript(records)
+    focus_upto = path.stat().st_size
+    cap.job(path, focus="pin the runner image")
+    cap.transcript(records + [assistant("noted", cap.repo), user("and keep it pinned", cap.repo)])
+    automatic, apath = _session_end_job(cap, path)
+    # The SessionEnd hook fires after the focus save, so drain()'s newest-first
+    # order visits it first: only the #263 deferral makes the focus job run first.
+    automatic["updated"] = "9999-01-01T00:00:00+00:00"
+    mc._write_json(apath, automatic)
+    cap.respond([{"reply": reply(), "cost": 0.2}, TRIAGE_SAVE, {"reply": reply(), "cost": 0.1}])
+    mc.run_worker(str(cap.store))
+    calls = cap.calls()
+    assert [_flag(c["argv"], "--model") for c in calls] == ["sonnet", "haiku", "sonnet"]
+    focus, automatic = sorted(cap.jobs(), key=lambda j: j["focus"] is None)
+    assert [focus["status"], automatic["status"]] == ["saved", "saved"]
+    assert _result(cap, automatic)["start"] == focus_upto
+    assert _result(cap, automatic)["end"] == path.stat().st_size
+    slice_text = calls[2]["stdin"].split("## Transcript slice", 1)[1]
+    assert "keep it pinned" in slice_text and "always pin the runner image" not in slice_text
+    assert cap.ledger_offset() == path.stat().st_size
+
+
+def test_session_end_job_waits_for_a_failed_focus_job_and_spends_no_model_call(cap):
+    records = [user("from now on we always pin the runner image", cap.repo)]
+    path = cap.transcript(records)
+    _fail(cap, cap.job(path, focus="pin the runner image")[1])
+    cap.transcript(records + [user("and keep it pinned", cap.repo)])
+    _session_end_job(cap, path)
+    mc.run_worker(str(cap.store))
+    assert cap.calls() == []
+    assert sorted(j["status"] for j in cap.jobs()) == ["failed", "queued"]
+
+
 def test_focus_slice_goes_straight_to_capture(cap):
     path = cap.transcript([user("from now on we always pin the runner image", cap.repo)])
     cap.job(path, focus="pin the runner image")

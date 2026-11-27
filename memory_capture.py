@@ -72,6 +72,7 @@ PAGE_TYPES = ("user", "feedback", "project", "reference")
 PAGE_KEYS = ("slug", "action", "name", "description", "type", "labels", "body")
 STATE_SECTIONS = ("summary", "left_off", "next_steps", "decisions", "blockers", "goal")
 PENDING = ("queued", "running")
+AUTOMATIC_TRIGGERS = ("SessionEnd", "PreCompact")
 HOST = socket.gethostname()
 
 # Runners are keyed by model backend, independent of the transcript's harness. A
@@ -815,6 +816,13 @@ def drain(store, cfg, owner, seen, spent):
         if job.get("ledger_key") in awaiting:
             seen.add(rid)  # an earlier result for this session waits for the apply step
             continue
+        blockers = _focus_blockers(jobs, job)
+        if blockers:
+            # #263: the automatic job covers the focus save's range, so it runs after it, from the ledger.
+            if any(b["status"] in PENDING and b["request_id"] not in seen for b in blockers):
+                continue
+            seen.add(rid)
+            continue
         if spent >= cfg["run_budget_usd"] - MIN_CALL_USD:
             log(store, "worker: run budget reached, remaining jobs stay queued")
             break
@@ -828,6 +836,14 @@ def drain(store, cfg, owner, seen, spent):
         if job.get("status") == "captured":
             awaiting.add(job.get("ledger_key"))
     return spent
+
+
+def _focus_blockers(jobs, job):
+    if job.get("focus") or job.get("trigger") not in AUTOMATIC_TRIGGERS:
+        return []
+    return [j for _, j in jobs if j.get("focus") and j["request_id"] != job["request_id"]
+            and j.get("ledger_key") == job.get("ledger_key")
+            and j.get("status") in PENDING + ("failed",)]
 
 
 def job_budget(cfg, job):
